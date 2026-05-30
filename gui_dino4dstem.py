@@ -29,7 +29,6 @@ from gui_app.posthoc_panel import PostHocPanel
 from gui_app.sam_panel import SAMPanel
 from gui_app.blob_panel import BlobPanel
 from gui_app.strain_panel import StrainPanel
-from gui_app.blob_acom_panel import BlobACOMPanel
 from gui_app.fluct_panel import FluctPanel
 from gui_app.symm_panel import SymmPanel
 from gui_app.ordering_panel import OrderingPanel
@@ -419,17 +418,20 @@ class App(ctk.CTk):
         self._lazy_tab_built = set()
 
     def _on_tab_change(self):
-        # Read inner group's selected tab if it has any.  Outer tabs
-        # (Data/Model/Analysis/Clustering/Diffraction) themselves never
-        # need lazy build — only their sub-tabs do.
+        # Walk down the group hierarchy until we hit a leaf.  Outer
+        # group tabs (Data/Model/...) and intermediate tabs that are
+        # themselves containers (Pre-processing, Training) never need
+        # lazy build — only the leaves do.
         name = None
         try:
-            outer = self._tabs.get()
-            tv = self._group_tabs.get(outer)
-            if tv is not None:
-                name = tv.get()
+            cur = self._tabs.get()
+            for _ in range(4):
+                tv = self._group_tabs.get(cur)
+                if tv is None:
+                    name = cur; break
+                cur = tv.get()
             else:
-                name = outer
+                name = cur
         except Exception:
             return
         if not name or name in self._lazy_tab_built:
@@ -452,17 +454,14 @@ class App(ctk.CTk):
             self._blob_tabs.pack(fill="both", expand=True)
             blob_detect_tab = self._blob_tabs.add("Detect")
             blob_strain_tab = self._blob_tabs.add("Strain")
-            blob_acom_tab   = self._blob_tabs.add("ACOM")
             blob_cryst_tab  = self._blob_tabs.add("Crystallinity")
             # Detect is the existing BlobPanel (eager — first visit).
             self.blob = BlobPanel(blob_detect_tab, app=self)
             self.blob.pack(fill="both", expand=True)
             self.strain = None
-            self.blob_acom = None
             self.crystallinity = None
             self._blob_subtab_frames = {
                 "Strain":        blob_strain_tab,
-                "ACOM":          blob_acom_tab,
                 "Crystallinity": blob_cryst_tab,
             }
             self._blob_subtab_built = set()
@@ -499,15 +498,6 @@ class App(ctk.CTk):
             try:
                 if self.blob is not None and self.blob.outdir is not None:
                     self.strain.link_run(self.blob.outdir, self.blob.sample)
-            except Exception:
-                pass
-        elif name == "ACOM":
-            self.blob_acom = BlobACOMPanel(
-                self._blob_subtab_frames["ACOM"], app=self)
-            self.blob_acom.pack(fill="both", expand=True)
-            try:
-                if self.blob is not None and self.blob.outdir is not None:
-                    self.blob_acom.link_run(self.blob.outdir, self.blob.sample)
             except Exception:
                 pass
         elif name == "Crystallinity":
