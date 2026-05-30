@@ -1969,11 +1969,18 @@ class ACOMTabPanel(ctk.CTkFrame):
 
     def _render_batch_cards_singlephase(self, patterns, labels,
                                               classes, results, zas, mode):
-        N = len(patterns); cols = 4
+        N = len(patterns)
+        cols = 4 if N > 6 else max(N, 1)
         rows = (N + cols - 1) // cols
         self._fig.clf()
-        self._fig.set_size_inches(2.6 * cols, 2.8 * rows + 0.5)
-        gs = self._fig.add_gridspec(rows, cols)
+        # Generous per-card footprint so titles don't collide.
+        self._fig.set_size_inches(3.0 * cols, 3.4 * rows + 0.6)
+        gs = self._fig.add_gridspec(rows, cols, hspace=0.45,
+                                          wspace=0.12)
+        # corr range for a green→grey quality cue on the border.
+        corrs = [float(r["corr"]) for r in results
+                    if np.isfinite(r["corr"])]
+        cmax = max(corrs) if corrs else 1.0
         for k in range(N):
             ax = self._fig.add_subplot(gs[k // cols, k % cols])
             ax.imshow(np.log1p(np.clip(patterns[k], 0, None)),
@@ -1982,22 +1989,36 @@ class ACOMTabPanel(ctk.CTkFrame):
             r = results[k]
             if r["peaks"].size:
                 ax.scatter(r["peaks"][:, 1], r["peaks"][:, 0],
-                            s=22, facecolors="none", edgecolors="cyan",
-                            linewidths=0.9)
+                            s=18, facecolors="none", edgecolors="cyan",
+                            linewidths=0.8)
             za, mis = zas[k]
             cls = classes[k]
+            corr = float(r["corr"])
             ax.set_xticks([]); ax.set_yticks([])
-            ax.set_title(
-                f"p{cls}  ZA=[{za[0]} {za[1]} {za[2]}]  "
-                f"corr={r['corr']:.3f}\n{labels[k]}", fontsize=8)
+            # Border + title color: green = strong fit, grey = weak.
+            q = (corr / cmax) if cmax > 0 and np.isfinite(corr) else 0
+            if not np.isfinite(corr) or corr <= 0:
+                col = "#999"; za_s = "no match"
+            else:
+                col = ("#2D7A2D" if q > 0.6
+                          else "#c97c20" if q > 0.3 else "#999")
+                za_s = f"[{za[0]} {za[1]} {za[2]}]"
+            for sp in ax.spines.values():
+                sp.set_edgecolor(col); sp.set_linewidth(2.2)
+            # One-line title (label is below in smaller grey).
+            ax.set_title(f"p{cls}  ·  ZA {za_s}  ·  corr {corr:.2f}",
+                            fontsize=9, color=col, pad=4)
+            ax.set_xlabel(labels[k], fontsize=7.5,
+                             color="#666", labelpad=2)
         for k in range(N, rows * cols):
             ax = self._fig.add_subplot(gs[k // cols, k % cols])
             ax.set_axis_off()
         self._fig.suptitle(
-            f"ACOM {mode}  N={N}  "
-            f"calib={float(self._inv_ang.get()):.5g} 1/Å/px",
-            fontsize=11)
-        self._fig.tight_layout(rect=[0, 0, 1, 0.97])
+            f"ACOM {mode}  ·  N={N}  ·  "
+            f"calib {float(self._inv_ang.get()):.5g} 1/Å/px  ·  "
+            f"green=strong fit, grey=weak/none",
+            fontsize=11, y=0.99)
+        self._fig.tight_layout(rect=[0, 0, 1, 0.96])
         self._canvas.draw_idle()
 
     def _render_phase_region_map(self, mp, region_masks, classes,
