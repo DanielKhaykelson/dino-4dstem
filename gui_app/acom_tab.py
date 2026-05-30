@@ -292,6 +292,10 @@ class ACOMTabPanel(ctk.CTkFrame):
                        fg_color=("#4D6FB0", "#3A5380"),
                        command=self._auto_calibrate
                        ).pack(anchor="w", padx=10, pady=2)
+        ctk.CTkButton(sidebar, text="⤢ Expand 1D + CIF rings",
+                       width=240,
+                       command=self._open_1d_popup
+                       ).pack(anchor="w", padx=10, pady=2)
         self._cif_status = ctk.CTkLabel(sidebar,
             text="(no phases built)",
             font=("Consolas", 9),
@@ -688,9 +692,12 @@ class ACOMTabPanel(ctk.CTkFrame):
             ax.scatter(self._test_peaks[:, 1], self._test_peaks[:, 0],
                         s=70, facecolors="none", edgecolors="cyan",
                         linewidths=1.3)
-        ax.set_title(f"step 1+2 — {self._test_origin}  "
-                       f"({(0 if self._test_peaks is None else len(self._test_peaks))} peaks)",
-                       fontsize=10)
+        np_peaks = (0 if self._test_peaks is None
+                     else len(self._test_peaks))
+        ax.set_title(
+            f"step 1+2  ·  {np_peaks} peaks\n"
+            f"{self._test_origin}",
+            fontsize=9)
         self._redraw_all()
 
     # ------------------------------------------------------------------
@@ -906,9 +913,10 @@ class ACOMTabPanel(ctk.CTkFrame):
         ax.set_xlabel("q  (1/Å)")
         ax.set_ylabel("⟨I⟩ - median  (log)")
         ax.set_title(
-            f"step 3 — 1/Å/px = {inv_a:.5g}   "
-            f"align RED markers (detected peaks) with DASHED lines (CIF)",
-            fontsize=10)
+            f"step 3  ·  calib = {inv_a:.5g} 1/Å/px\n"
+            f"align RED markers (peaks) with DASHED lines (CIF) "
+            f"·  hover CIF lines for hkl",
+            fontsize=9)
         ax.set_xticks(np.arange(0, rc_inva.max() + 0.05, 0.1))
         ax.tick_params(axis="x", labelsize=8)
         ax.set_yticks([])
@@ -966,6 +974,74 @@ class ACOMTabPanel(ctk.CTkFrame):
                 arr.set_color(color)
             self._hover_annot.set_visible(True)
         self._canvas.draw_idle()
+
+    # ---- Expand 1D + CIF rings as a standalone popup -------------
+    def _open_1d_popup(self):
+        """Open a Toplevel with just the 1D radial + CIF rings at
+        full size.  Wires the hover-hkl on the popup's own axes."""
+        if self._test_pattern is None:
+            messagebox.showinfo("Expand 1D",
+                "Load a source first (step 1)."); return
+        from matplotlib.backends.backend_tkagg import (
+            FigureCanvasTkAgg, NavigationToolbar2Tk)
+        win = tk.Toplevel(self)
+        win.title("1D radial + CIF rings  (hover for hkl)")
+        win.geometry("1180x620")
+        fig = Figure(figsize=(11.5, 5.5), dpi=110, facecolor="white")
+        ax = fig.add_subplot(111)
+        # Redraw the same content onto this fresh axis.
+        keep_ax = self._ax_1d
+        self._ax_1d = ax
+        try:
+            self._redraw_1d_with_rings()
+        finally:
+            self._ax_1d = keep_ax
+        fig.tight_layout()
+        canv = FigureCanvasTkAgg(fig, master=win)
+        canv.get_tk_widget().pack(fill="both", expand=True)
+        tb = NavigationToolbar2Tk(canv, win, pack_toolbar=False)
+        tb.update(); tb.pack(side="bottom", fill="x")
+        # Local hover wired to the popup's axes.
+        annot = {"a": None}
+        def _hover(event):
+            if event.inaxes is not ax or not self._cif_ring_db: return
+            xlo, xhi = ax.get_xlim()
+            tol = max((xhi - xlo) * 0.015, 1e-3)
+            best, best_d = None, tol
+            for (q, name, hkl, color, inten) in self._cif_ring_db:
+                d = abs(event.xdata - q)
+                if d < best_d: best_d = d; best = (q, name, hkl,
+                                                       color, inten)
+            if best is None:
+                if annot["a"] is not None:
+                    annot["a"].set_visible(False); canv.draw_idle()
+                return
+            q, name, (h, k, l), color, inten = best
+            txt = (f"{name}  ({h} {k} {l})\n"
+                     f"q = {q:.4f} 1/Å\n"
+                     f"I = {inten:.3g}")
+            if annot["a"] is None:
+                annot["a"] = ax.annotate(
+                    txt, xy=(q, event.ydata),
+                    xytext=(18, 18), textcoords="offset points",
+                    fontsize=10, color="#111",
+                    bbox=dict(boxstyle="round,pad=0.4",
+                                fc="#fff7c2", ec=color, lw=1.4,
+                                alpha=0.97),
+                    arrowprops=dict(arrowstyle="->", color=color,
+                                      lw=1.2),
+                    annotation_clip=False)
+                annot["a"].set_zorder(20)
+            else:
+                annot["a"].xy = (q, event.ydata)
+                annot["a"].set_text(txt)
+                bx = annot["a"].get_bbox_patch()
+                if bx is not None: bx.set_edgecolor(color)
+                ar = annot["a"].arrow_patch
+                if ar is not None: ar.set_color(color)
+                annot["a"].set_visible(True)
+            canv.draw_idle()
+        canv.mpl_connect("motion_notify_event", _hover)
 
     def _auto_calibrate(self):
         """Auto-fit 1/Å/px by aligning *detected peaks* (not the
