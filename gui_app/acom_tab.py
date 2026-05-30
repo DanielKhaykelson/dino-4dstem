@@ -1672,9 +1672,13 @@ class ACOMTabPanel(ctk.CTkFrame):
             self.after(0, lambda: self._set_status(
                 f"{mode} done ({dt:.0f}s)."))
         except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            print(f"[acom batch] FAILED:\n{tb}", flush=True)
             err = repr(e)
             self.after(0, lambda: messagebox.showerror(
-                "Batch ACOM", err))
+                "Batch ACOM",
+                f"{err}\n\n(full traceback printed to console)"))
             self.after(0, lambda: self._set_status(
                 f"batch failed: {err[:120]}"))
 
