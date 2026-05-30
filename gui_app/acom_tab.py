@@ -882,7 +882,7 @@ class ACOMTabPanel(ctk.CTkFrame):
             # peak.  This avoids overcrowding the plot with weak
             # reflections while still surfacing weak matches (γ100,
             # α002 …) when the experimental peak supports them.
-            TOP_REF = 20
+            TOP_REF = 8
             in_range = (np.asarray(gleng) <= rc_inva.max())
             sint_vis = sint_a[in_range]
             gleng_vis = np.asarray(gleng)[in_range]
