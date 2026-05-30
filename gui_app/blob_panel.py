@@ -420,24 +420,24 @@ class BlobPanel(ctk.CTkFrame):
         p = filedialog.askdirectory(title="Pick a run dir")
         if not p:
             return
-        sample = "?"
-        try:
-            tk_path = os.path.join(p, "_train_kwargs.json")
-            if os.path.exists(tk_path):
-                with open(tk_path) as f:
-                    blob = json.load(f)
-                sample = blob.get("sample", "?")
-                cfg = blob.get("_sample_config")
-                if cfg and sample.startswith("loaded__"):
-                    try:
-                        from data import register_runtime_sample
-                        register_runtime_sample(key=sample, **cfg)
-                    except Exception as e:
-                        print(f"[blob-panel] runtime-sample register: "
-                              f"{e!r}", flush=True)
-        except Exception as e:
-            print(f"[blob-panel] _train_kwargs load failed: {e!r}",
-                  flush=True)
+        # Route through the global Session so SAMPLE_LOCK.json /
+        # run_summary.json / _train_kwargs.json get resolved
+        # consistently with every other tab.
+        sess = getattr(self.app, "session", None) if self.app else None
+        sample = None
+        if sess is not None:
+            try:
+                sample = sess.load_run_dir(p)
+            except Exception as e:
+                print(f"[blob-panel] session.load_run_dir: {e!r}",
+                      flush=True)
+        if sample is None:
+            messagebox.showinfo("Blob",
+                "Couldn't auto-resolve a sample for this run dir "
+                "(no SAMPLE_LOCK.json / _train_kwargs.json / "
+                "matching SAMPLES entry).  Pick a sample from the "
+                "topbar dataset badge.")
+            sample = "?"
         self.link_run(p, sample)
 
     def _on_method_change(self):
