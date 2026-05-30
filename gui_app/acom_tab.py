@@ -1625,7 +1625,8 @@ class ACOMTabPanel(ctk.CTkFrame):
                     "Batch", "no patterns")); return
 
             if mode in ("classes", "grains"):
-                cr = next(iter(crystals.values()))
+                phase_name = next(iter(crystals.keys()))
+                cr = crystals[phase_name]
                 results, omap, bv = acom_batch(
                     cr, patterns, inv_ang_per_pixel=inv_a,
                     detect_kw=detect_kw)
@@ -1634,7 +1635,8 @@ class ACOMTabPanel(ctk.CTkFrame):
                     za, mis = zone_axis_from_matrix(r["rotation_matrix"])
                     zas.append((za, mis))
                 self.after(0, lambda: self._render_batch_cards_singlephase(
-                    patterns, labels, classes, results, zas, mode))
+                    patterns, labels, classes, results, zas, mode,
+                    phase_name=phase_name))
             else:
                 mp = acom_multiphase_batch(
                     crystals, patterns, inv_ang_per_pixel=inv_a,
@@ -1968,7 +1970,8 @@ class ACOMTabPanel(ctk.CTkFrame):
         self._canvas.draw_idle()
 
     def _render_batch_cards_singlephase(self, patterns, labels,
-                                              classes, results, zas, mode):
+                                              classes, results, zas, mode,
+                                              phase_name="?"):
         N = len(patterns)
         cols = 4 if N > 6 else max(N, 1)
         rows = (N + cols - 1) // cols
@@ -2006,15 +2009,16 @@ class ACOMTabPanel(ctk.CTkFrame):
             for sp in ax.spines.values():
                 sp.set_edgecolor(col); sp.set_linewidth(2.2)
             # One-line title (label is below in smaller grey).
-            ax.set_title(f"p{cls}  ·  ZA {za_s}  ·  corr {corr:.2f}",
-                            fontsize=9, color=col, pad=4)
+            ax.set_title(
+                f"p{cls}  ·  {phase_name} {za_s}  ·  corr {corr:.2f}",
+                fontsize=9, color=col, pad=4)
             ax.set_xlabel(labels[k], fontsize=7.5,
                              color="#666", labelpad=2)
         for k in range(N, rows * cols):
             ax = self._fig.add_subplot(gs[k // cols, k % cols])
             ax.set_axis_off()
         self._fig.suptitle(
-            f"ACOM {mode}  ·  N={N}  ·  "
+            f"ACOM {mode}  ·  phase = {phase_name}  ·  N={N}  ·  "
             f"calib {float(self._inv_ang.get()):.5g} 1/Å/px  ·  "
             f"green=strong fit, grey=weak/none",
             fontsize=11, y=0.99)
