@@ -876,31 +876,43 @@ class ACOMTabPanel(ctk.CTkFrame):
                 continue
             color = palette[pi % len(palette)]
             sint_a = np.asarray(sint)
-            # Show ALL reflections within the visible q-range (not
-            # just top-60 by intensity) so weak low-index rings like
-            # γ(100) / α(002) appear too.  Opacity scales with
-            # intensity so strong rings stand out; weak ones are
-            # faint but present.  Normalise per-phase.
+            # Adaptive ring display: keep the TOP_REF strongest
+            # rings as orientation anchors, PLUS any other ring whose
+            # q sits within `match_tol` of a detected experimental
+            # peak.  This avoids overcrowding the plot with weak
+            # reflections while still surfacing weak matches (γ100,
+            # α002 …) when the experimental peak supports them.
+            TOP_REF = 20
             in_range = (np.asarray(gleng) <= rc_inva.max())
-            order = np.argsort(-sint_a[in_range])
             sint_vis = sint_a[in_range]
             gleng_vis = np.asarray(gleng)[in_range]
-            i_max = float(sint_vis.max()) if sint_vis.size else 1.0
             hkl_arr = np.asarray(hkl) if hkl is not None else None
             hkl_vis = (hkl_arr[:, in_range]
                           if hkl_arr is not None else None)
-            for j, k_idx in enumerate(order):
+            i_max = float(sint_vis.max()) if sint_vis.size else 1.0
+            # Top-N indices (always shown).
+            topN = set(np.argsort(-sint_vis)[:TOP_REF].tolist())
+            # Match tolerance = 1.5 % of visible q-range.
+            match_tol = max((rc_inva.max() - rc_inva.min()) * 0.015,
+                                 1e-3)
+            for k_idx in range(gleng_vis.size):
                 q = float(gleng_vis[k_idx])
                 I = float(sint_vis[k_idx])
-                # Map intensity to alpha in [0.10, 0.85] (sqrt for
-                # better dynamic range on weak peaks).
-                alpha_ring = 0.10 + 0.75 * np.sqrt(I / max(i_max,
-                                                                1e-12))
-                lw_ring    = 0.7 + 0.6 * (I / max(i_max, 1e-12))
+                is_top = k_idx in topN
+                is_matched = (peak_q.size > 0
+                                and np.min(np.abs(peak_q - q)) <= match_tol)
+                if not (is_top or is_matched):
+                    continue
+                # Opacity / lw scale with intensity (sqrt).  Matched
+                # weak rings get a small alpha boost so the user can
+                # see they were kept on purpose.
+                base = np.sqrt(I / max(i_max, 1e-12))
+                alpha_ring = 0.20 + 0.70 * base
+                if is_matched and not is_top:
+                    alpha_ring = max(alpha_ring, 0.55)
+                lw_ring = 0.8 + 0.6 * base
                 ax.axvline(q, color=color, alpha=float(alpha_ring),
                             lw=float(lw_ring), linestyle="--")
-                # Hover DB: include EVERY visible reflection so weak
-                # ones (γ100, α002 …) are still labellable.
                 if hkl_vis is not None and hkl_vis.shape[1] > int(k_idx):
                     h, kk, l = (int(round(float(v)))
                                   for v in hkl_vis[:, int(k_idx)])
