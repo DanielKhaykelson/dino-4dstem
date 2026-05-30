@@ -152,6 +152,51 @@ def prepare_crystal(crystal,
 # Peak detection (per single 2D pattern)
 # ---------------------------------------------------------------------------
 
+def detect_peaks_cached(patterns, detect_kw, cache_path,
+                            centers=None, progress_cb=None,
+                            force=False):
+    """Detect peaks on a list of 2D patterns with on-disk caching.
+
+    Saves an .npz keyed by the detection params + number of patterns,
+    so re-running matching on the same source skips the (slow) blob
+    detection.  Returns a list of (Ni, 3) peak arrays.
+
+    cache_path : .npz file to read/write.
+    force      : ignore any existing cache and recompute.
+    """
+    import hashlib, json
+    key = hashlib.md5(
+        json.dumps({"n": len(patterns),
+                      "kw": {k: float(v) if isinstance(v, (int, float))
+                                else v for k, v in detect_kw.items()}},
+                     sort_keys=True, default=str).encode()).hexdigest()
+    if (not force) and cache_path and os.path.exists(cache_path):
+        try:
+            d = np.load(cache_path, allow_pickle=True)
+            if str(d.get("key")) == key:
+                arrs = list(d["peaks"])
+                return [np.asarray(a, dtype=float) for a in arrs]
+        except Exception:
+            pass
+    out = []
+    n = len(patterns)
+    for i, pat in enumerate(patterns):
+        out.append(detect_peaks_2d(pat, **detect_kw))
+        if progress_cb is not None and (i % 64 == 0):
+            try: progress_cb(i, n, "detect")
+            except Exception: pass
+    if cache_path:
+        try:
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            np.savez_compressed(
+                cache_path, key=key,
+                peaks=np.array(out, dtype=object))
+        except Exception as e:
+            print(f"[acom_core] peak cache save failed: {e!r}",
+                  flush=True)
+    return out
+
+
 def detect_peaks_2d(pattern: np.ndarray,
                        probe_kernel: Optional[np.ndarray] = None,
                        *,
@@ -647,6 +692,49 @@ def acom_multiphase_full_dataset(crystals_by_name,
     )
 
 
+def _match_safe(crystal, bv, N):
+    """Run match_orientations, returning (corr[N], rmat[N,3,3]).
+
+    py4DSTEM's vectorised match crashes ('argmin of empty sequence')
+    when a pattern has too few peaks to match.  We try the fast
+    vectorised path first; on ANY exception we fall back to a
+    per-pattern loop with try/except so one degenerate pattern (an
+    amorphous class with ~0 Bragg peaks) doesn't kill the whole
+    batch — those patterns get corr=-1, rmat=NaN.
+    """
+    corr = np.full(N, -1.0, dtype=np.float32)
+    rmat = np.full((N, 3, 3), np.nan, dtype=np.float32)
+    try:
+        omap = crystal.match_orientations(bv, progress_bar=False)
+        cv = np.asarray(getattr(omap, "corr", None))
+        mv = np.asarray(getattr(omap, "matrix", None))
+        if cv is not None and cv.size:
+            corr = (cv[..., 0].ravel() if cv.ndim == 3
+                      else cv.ravel())[:N]
+        if mv is not None and mv.size:
+            rmat = (mv[..., 0, :, :].reshape(N, 3, 3) if mv.ndim == 5
+                      else mv.reshape(N, 3, 3))
+        return corr.astype(np.float32), rmat.astype(np.float32)
+    except Exception as e:
+        print(f"[acom_core] vectorised match failed ({e!r}); "
+                f"falling back to per-pattern.", flush=True)
+    # Per-pattern fallback.
+    for k in range(N):
+        try:
+            pl = bv.cal[k, 0]
+            if len(pl.data) < 3:        # too few peaks to match
+                continue
+            orient = crystal.match_single_pattern(pl, verbose=False)
+            c = np.asarray(getattr(orient, "corr", [np.nan])).ravel()
+            m = np.asarray(getattr(orient, "matrix", None))
+            corr[k] = float(c[0]) if c.size else -1.0
+            if m is not None and m.size:
+                rmat[k] = (m[0] if m.ndim == 3 else m)
+        except Exception:
+            continue
+    return corr, rmat
+
+
 def acom_multiphase_batch(crystals_by_name,
                               patterns: Sequence[np.ndarray],
                               *,
@@ -684,27 +772,9 @@ def acom_multiphase_batch(crystals_by_name,
                                 dtype=np.float32)
     for pi, name in enumerate(names):
         cr = crystals_by_name[name]
-        omap = cr.match_orientations(bv)
-        cv = getattr(omap, "corr", None)
-        if cv is not None:
-            arr = np.asarray(cv)
-            try:
-                if arr.ndim == 3:
-                    corr_per_phase[pi] = arr[..., 0].ravel()
-                elif arr.ndim == 2:
-                    corr_per_phase[pi] = arr.ravel()
-            except Exception:
-                pass
-        mv = getattr(omap, "matrix", None)
-        if mv is not None:
-            arr = np.asarray(mv)
-            try:
-                if arr.ndim == 5:
-                    rmat_per_phase[pi] = arr[..., 0, :, :].reshape(N, 3, 3)
-                elif arr.ndim == 4:
-                    rmat_per_phase[pi] = arr.reshape(N, 3, 3)
-            except Exception:
-                pass
+        cvec, mvec = _match_safe(cr, bv, N)
+        corr_per_phase[pi] = cvec
+        rmat_per_phase[pi] = mvec
 
     sorted_idx = np.argsort(-corr_per_phase, axis=0)
     top1_pi = sorted_idx[0]
@@ -768,46 +838,20 @@ def acom_batch(crystal,
     if progress_cb is not None:
         try: progress_cb(len(patterns), len(patterns), "match")
         except Exception: pass
-    omap = crystal.match_orientations(bv)
+    # Crash-safe match (per-pattern fallback for degenerate patterns).
+    N = len(patterns)
+    corr_vec, rmat_vec = _match_safe(crystal, bv, N)
+    omap = None  # vectorised omap not retained in the safe path
 
-    # Per-pattern unpack.
     results = []
-    corr_arr = None
-    for attr in ("corr", "correlation"):
-        v = getattr(omap, attr, None)
-        if v is not None:
-            corr_arr = np.asarray(v)
-            break
-    matrix_arr = None
-    for attr in ("matrix",):
-        v = getattr(omap, attr, None)
-        if v is not None:
-            matrix_arr = np.asarray(v)
-            break
-    for k in range(len(patterns)):
-        corr_k = float("nan")
-        if corr_arr is not None:
-            try:
-                # corr_arr typically (Ny, Nx, n_matches) — we have (N, 1)
-                corr_k = float(np.asarray(corr_arr[k, 0]).ravel()[0])
-            except Exception:
-                try:
-                    corr_k = float(np.asarray(corr_arr[k]).ravel()[0])
-                except Exception:
-                    pass
-        rmat = None
-        if matrix_arr is not None:
-            try:
-                rmat = np.asarray(matrix_arr[k, 0])
-                if rmat.ndim == 3:
-                    rmat = rmat[0]      # top-1 match
-            except Exception:
-                pass
+    for k in range(N):
         results.append(dict(
             peaks=peaks_all[k],
             center=centers_all[k],
-            corr=corr_k,
-            rotation_matrix=rmat,
+            corr=float(corr_vec[k]),
+            rotation_matrix=(None
+                               if not np.isfinite(rmat_vec[k]).any()
+                               else rmat_vec[k]),
             bragg_peaks=bv,
             orientation_map=omap,
             slot=k,
@@ -829,10 +873,17 @@ def zone_axis_from_matrix(rmat: np.ndarray,
     if rmat is None:
         return ((0, 0, 0), float("nan"))
     rmat = np.asarray(rmat, dtype=float)
+    # Guard: NaN matrix (pattern had too few peaks → no match) or
+    # wrong shape → return null ZA instead of crashing downstream.
+    if rmat.size < 3 or not np.isfinite(rmat).any():
+        return ((0, 0, 0), float("nan"))
     # py4DSTEM stores R such that the third column is the beam direction
     # in the crystal frame.
     v = rmat[:, 2] if rmat.shape == (3, 3) else rmat.ravel()[:3]
-    v = v / (np.linalg.norm(v) + 1e-12)
+    nrm = np.linalg.norm(v)
+    if not np.isfinite(nrm) or nrm < 1e-9:
+        return ((0, 0, 0), float("nan"))
+    v = v / (nrm + 1e-12)
     # Search small-integer (u, v, w) up to max_index.  When two
     # candidates tie on alignment (e.g. (0,0,1) vs (0,0,2)), prefer the
     # one with smaller |u|+|v|+|w| so we return canonical Miller indices.

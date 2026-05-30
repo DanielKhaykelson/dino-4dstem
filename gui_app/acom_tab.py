@@ -1677,27 +1677,66 @@ class ACOMTabPanel(ctk.CTkFrame):
         cube = np.asarray(cube) if not hasattr(cube, "shape") else cube
         Ny, Nx, H, W = cube.shape
         center = (H / 2.0, W / 2.0)
-        peaks_all, centers_all = [], []
-        total = Ny * Nx
-        done = 0
-        for rx in range(Ny):
-            if self._stop_event.is_set():
-                raise RuntimeError("stopped by user (during detection)")
-            for ry in range(Nx):
-                done += 1
-                if (rx % stride) or (ry % stride):
-                    peaks_all.append(np.zeros((0, 3), dtype=float))
-                    centers_all.append(center); continue
+        # Peak cache: keyed by run + stride + detect params.  Loading
+        # a cache skips the (slow) full-dataset blob detection.
+        import json, hashlib
+        ph = self._posthoc()
+        run = getattr(ph, "outdir", None) if ph else None
+        cache_path = None
+        if run:
+            kh = hashlib.md5(json.dumps(
+                {"stride": stride, "kw": detect_kw, "shape": [Ny, Nx]},
+                sort_keys=True, default=str).encode()).hexdigest()[:10]
+            cache_path = os.path.join(run, "acom",
+                                          f"peaks_full_{kh}.npz")
+        if cache_path and os.path.exists(cache_path):
+            try:
+                d = np.load(cache_path, allow_pickle=True)
+                peaks_all = [np.asarray(a, dtype=float)
+                                for a in d["peaks"]]
+                centers_all = [center] * (Ny * Nx)
+                if progress_cb is not None:
+                    progress_cb(Ny * Nx, Ny * Nx, "detect (cached)")
+                self._set_status(
+                    f"loaded cached peaks: {os.path.basename(cache_path)}")
+            except Exception:
+                peaks_all = None
+        else:
+            peaks_all = None
+        if peaks_all is None:
+            peaks_all, centers_all = [], []
+            total = Ny * Nx
+            done = 0
+            for rx in range(Ny):
+                if self._stop_event.is_set():
+                    raise RuntimeError("stopped by user (during detection)")
+                for ry in range(Nx):
+                    done += 1
+                    if (rx % stride) or (ry % stride):
+                        peaks_all.append(np.zeros((0, 3), dtype=float))
+                        centers_all.append(center); continue
+                    try:
+                        pat = np.asarray(cube[rx, ry], dtype=np.float32)
+                    except Exception:
+                        peaks_all.append(np.zeros((0, 3), dtype=float))
+                        centers_all.append(center); continue
+                    peaks_all.append(
+                        detect_peaks_2d(pat, **detect_kw))
+                    centers_all.append(center)
+                    if progress_cb is not None and (done % 256 == 0):
+                        progress_cb(done, total, "detect")
+            # Save the cache for next time.
+            if cache_path:
                 try:
-                    pat = np.asarray(cube[rx, ry], dtype=np.float32)
-                except Exception:
-                    peaks_all.append(np.zeros((0, 3), dtype=float))
-                    centers_all.append(center); continue
-                peaks_all.append(
-                    detect_peaks_2d(pat, **detect_kw))
-                centers_all.append(center)
-                if progress_cb is not None and (done % 256 == 0):
-                    progress_cb(done, total, "detect")
+                    os.makedirs(os.path.dirname(cache_path),
+                                  exist_ok=True)
+                    np.savez_compressed(
+                        cache_path,
+                        peaks=np.array(peaks_all, dtype=object))
+                    self._set_status(
+                        f"peaks cached → {os.path.basename(cache_path)}")
+                except Exception as e:
+                    print(f"[acom] peak cache save: {e!r}", flush=True)
         bv = build_bragg_vectors(
             peaks_all, centers=centers_all,
             inv_ang_per_pixel=float(self._inv_ang.get()),
