@@ -308,6 +308,9 @@ class BlobPanel(ctk.CTkFrame):
             # "Grain @ (y, x)", read these.
             "grain_y":      ctk.StringVar(value="64"),
             "grain_x":      ctk.StringVar(value="64"),
+            # Class-average member selection: "top200" (sharp, default)
+            # vs "all" (honest, unfiltered mean over every member).
+            "classavg_members": ctk.StringVar(value="top 200 (sharp)"),
             "frame_index":  ctk.IntVar(value=0),
         }
         # Per-method knob vars, kept distinct so switching method preserves
@@ -359,6 +362,17 @@ class BlobPanel(ctk.CTkFrame):
         ctk.CTkButton(cls_row, text="Reload class avgs", width=140,
                        command=self._compute_class_avgs).pack(side="left",
                                                                  padx=4)
+        # Class-average member selection.
+        ca_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        ca_row.pack(fill="x", padx=4, pady=2)
+        ctk.CTkLabel(ca_row, text="members:", width=70,
+                       anchor="w").pack(side="left")
+        ctk.CTkOptionMenu(ca_row,
+            variable=self._vars["classavg_members"],
+            values=["top 200 (sharp)", "top 500", "all (honest mean)"],
+            width=170,
+            command=lambda _v: self._compute_class_avgs()
+            ).pack(side="left", padx=2)
 
         mode_row = ctk.CTkFrame(sidebar, fg_color="transparent")
         mode_row.pack(fill="x", padx=4, pady=2)
@@ -505,7 +519,11 @@ class BlobPanel(ctk.CTkFrame):
                 self._status_lbl.configure(
                     text="inference failed — see Post-hoc tab")
                 return
-            self._class_avgs = np.asarray(ph._compute_class_averages())
+            sel = self._vars["classavg_members"].get()
+            top_n = (None if sel.startswith("all")
+                       else 500 if "500" in sel else 200)
+            self._class_avgs = np.asarray(
+                ph._compute_class_averages(top_n=top_n))
             self._assigns = ph._inf["assigns"]
             self._K = int(ph._inf["soft_probs"].shape[1])
             self._scan_shape = ph._scan_shape

@@ -2648,7 +2648,15 @@ class PostHocPanel(ctk.CTkFrame):
         return False
 
     # raw class averages
-    def _compute_class_averages(self, top_n=200):
+    def _compute_class_averages(self, top_n=200, weighted=True):
+        """Per-class average diffraction pattern.
+
+        top_n   : number of highest-confidence members to average.
+                   Pass None (or <=0) to use ALL members of each class
+                   — the honest, unfiltered class average.
+        weighted: weight each member by its soft-prob.  When using
+                   all members, set weighted=False for a plain mean.
+        """
         import torch
         import torch.nn.functional as F
         from torchvision.transforms import v2 as T
@@ -2658,6 +2666,7 @@ class PostHocPanel(ctk.CTkFrame):
         K = int(self._inf["soft_probs"].shape[1])
         soft = self._inf["soft_probs"]; ass = self._inf["assigns"]
         H = 192
+        use_all = (top_n is None) or (top_n <= 0)
         cart_pre = T.Compose([
             T.CenterCrop(140),
             T.Resize(H, interpolation=InterpolationMode.BILINEAR, antialias=True),
@@ -2668,9 +2677,17 @@ class PostHocPanel(ctk.CTkFrame):
             if idx.size == 0:
                 avgs.append(np.zeros((H, H), np.float32)); continue
             s = soft[idx, c]
-            top = idx[np.argsort(-s)[:min(top_n, len(idx))]]
-            patterns = np.stack([ds.get_raw(int(i)) for i in top], 0).astype(np.float32)
-            w = s[np.argsort(-s)[:len(top)]].astype(np.float32)
+            if use_all:
+                sel = idx                       # everything in the class
+                w = (s.astype(np.float32) if weighted
+                       else np.ones(len(idx), np.float32))
+            else:
+                order = np.argsort(-s)[:min(top_n, len(idx))]
+                sel = idx[order]
+                w = (s[order].astype(np.float32) if weighted
+                       else np.ones(len(sel), np.float32))
+            patterns = np.stack([ds.get_raw(int(i)) for i in sel],
+                                   0).astype(np.float32)
             wavg = (patterns * w[:, None, None]).sum(0) / (w.sum() + 1e-12)
             wn = np.clip(wavg / max(float(cfg["vmax"]), 1e-6), 0.0, 1.0)
             x = torch.from_numpy(wn).unsqueeze(0).unsqueeze(0).float()
