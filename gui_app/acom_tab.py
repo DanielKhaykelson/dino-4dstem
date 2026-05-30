@@ -108,35 +108,51 @@ class ACOMTabPanel(ctk.CTkFrame):
         pass
 
     def refresh_from_posthoc(self):
-        """Pull the linked run + inference from the post-hoc panel."""
-        ph = getattr(self.app, "posthoc", None)
-        if ph is None:
-            return
-        sample = ph.sample
-        outdir = ph.outdir
-        if sample and outdir:
-            self._link_lbl.configure(
-                text=f"posthoc: {sample}    {os.path.basename(outdir)}")
+        """Back-compat shim — session subscription handles updates."""
+        self._on_session_change(getattr(self.app, "session", None))
+
+    def _on_session_change(self, sess):
+        """Re-draw the classmap + status dots when the global session
+        changes (sample / run_dir / inference)."""
+        if sess is None: return
+        try:
+            self._dot_data.set(
+                "ok" if sess.has_dataset() else "idle",
+                sess.sample or "no dataset")
+            self._dot_inf.set(
+                "ok" if sess.has_inference() else "idle",
+                "inference cached" if sess.has_inference()
+                else "no inference (load a run)")
+            self._dot_cif.set(
+                "ok" if self._phase_crystals else "idle",
+                f"{len(self._phase_crystals)} crystal(s) built"
+                if self._phase_crystals else "no CIF built yet")
             self._draw_classmap_if_possible()
-        else:
-            self._link_lbl.configure(
-                text="(load a run in Post-hoc → Analysis first)")
+        except Exception: pass
 
     # ------------------------------------------------------------------
     # UI
     # ------------------------------------------------------------------
     def _build(self):
-        # Top status bar
+        # Top status bar — three StatusDots reflecting the global
+        # Session.  Replaces the old `_link_lbl` + manual refresh
+        # button (session subscription auto-updates).
+        from gui_app._ui import StatusDot
         top = ctk.CTkFrame(self)
         top.pack(side="top", fill="x", padx=6, pady=6)
-        self._link_lbl = ctk.CTkLabel(top,
-            text="(load a run in Post-hoc → Analysis first)",
-            font=("Consolas", 10), anchor="w", justify="left")
-        self._link_lbl.pack(side="left", padx=8)
-        ctk.CTkButton(top, text="↺ Refresh from posthoc",
-                       width=170,
-                       command=self.refresh_from_posthoc
-                       ).pack(side="right", padx=4)
+        self._dot_data = StatusDot(top, label="dataset")
+        self._dot_inf  = StatusDot(top, label="inference")
+        self._dot_cif  = StatusDot(top, label="crystal")
+        for d in (self._dot_data, self._dot_inf, self._dot_cif):
+            d.pack(side="left", padx=10)
+        ctk.CTkLabel(top,
+            text="(uses the topbar session badges; no per-tab Load button)",
+            font=("Segoe UI", 9), text_color=("#666", "#aaa")
+            ).pack(side="right", padx=8)
+        # Subscribe to global session.
+        sess = getattr(self.app, "session", None)
+        if sess is not None:
+            sess.subscribe(self._on_session_change)
 
         body = ctk.CTkFrame(self)
         body.pack(side="top", fill="both", expand=True, padx=6, pady=4)
@@ -472,12 +488,17 @@ class ACOMTabPanel(ctk.CTkFrame):
         return getattr(self.app, "posthoc", None)
 
     def _need_posthoc_inference(self):
+        # Prefer the global Session; fall back to the legacy posthoc
+        # panel if a tab hasn't migrated yet.
+        sess = getattr(self.app, "session", None)
         ph = self._posthoc()
-        if ph is None or ph.sample is None or ph._inf is None:
-            messagebox.showinfo("ACOM",
-                "Load a run + render the class map on the Post-hoc "
-                "tab first.")
-            return None
+        if (sess is None or not sess.has_dataset()
+                or not sess.has_inference()):
+            if ph is None or ph.sample is None or ph._inf is None:
+                messagebox.showinfo("ACOM",
+                    "Load a run via the topbar dataset / run badges "
+                    "(or in the Post-hoc → Analysis tab) first.")
+                return None
         return ph
 
     def _compute_dp_max_mean(self, ph):
