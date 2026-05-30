@@ -157,13 +157,15 @@ class CrystallinityPanel(ctk.CTkFrame):
     def _build(self):
         top = ctk.CTkFrame(self)
         top.pack(side="top", fill="x", padx=6, pady=6)
-        self._info_lbl = ctk.CTkLabel(top,
-            text="(load a run in Post-hoc, then pick a source below)",
-            font=("Consolas", 10), anchor="w", justify="left")
-        self._info_lbl.pack(side="left", padx=8)
-        ctk.CTkButton(top, text="↺ Refresh", width=110,
-                       command=self._refresh_from_posthoc
-                       ).pack(side="right", padx=4)
+        from gui_app._ui import StatusDot
+        self._dot_data = StatusDot(top, label="dataset")
+        self._dot_run  = StatusDot(top, label="run")
+        for d in (self._dot_data, self._dot_run):
+            d.pack(side="left", padx=10)
+        sess = getattr(self.app, "session", None)
+        if sess is not None:
+            sess.subscribe(self._on_session_change)
+            self._on_session_change(sess)
 
         body = ctk.CTkFrame(self)
         body.pack(side="top", fill="both", expand=True,
@@ -340,14 +342,19 @@ class CrystallinityPanel(ctk.CTkFrame):
 
     # ------------------------------------------------------------------
     def _refresh_from_posthoc(self):
-        ph = self._posthoc()
-        if ph is None or ph.sample is None:
-            self._info_lbl.configure(
-                text="(load a run in Post-hoc → Analysis first)")
-            return
-        self._info_lbl.configure(
-            text=f"linked: {ph.sample}    "
-                  f"{os.path.basename(ph.outdir or '')}")
+        """Back-compat shim — session subscription updates dots."""
+        self._on_session_change(getattr(self.app, "session", None))
+
+    def _on_session_change(self, sess):
+        try:
+            self._dot_data.set(
+                "ok" if (sess and sess.has_dataset()) else "idle",
+                (sess.sample if sess else "") or "no dataset")
+            self._dot_run.set(
+                "ok" if (sess and sess.has_run()) else "idle",
+                (os.path.basename(sess.run_dir or "")
+                  if sess and sess.run_dir else "no run loaded"))
+        except Exception: pass
 
     def _detect_kw(self):
         return dict(
