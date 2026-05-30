@@ -794,6 +794,12 @@ class ACOMTabPanel(ctk.CTkFrame):
                     text=f"{len(self._phase_crystals)} crystal(s) ready "
                           f"({dt:.0f}s).  Refresh 1D radial."))
             self.after(0, self._redraw_1d_with_rings)
+            # Crystal-build doesn't fire a session change but the
+            # 'crystal' StatusDot reads from session_change.  Push a
+            # manual refresh so the dot flips to ✓.
+            self.after(0, lambda:
+                self._on_session_change(
+                    getattr(self.app, "session", None)))
         threading.Thread(target=_w, daemon=True).start()
 
     # ------------------------------------------------------------------

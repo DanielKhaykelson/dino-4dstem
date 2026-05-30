@@ -31,7 +31,6 @@ from gui_app.blob_panel import BlobPanel
 from gui_app.strain_panel import StrainPanel
 from gui_app.fluct_panel import FluctPanel
 from gui_app.symm_panel import SymmPanel
-from gui_app.ordering_panel import OrderingPanel
 from gui_app.nmf_panel import NMFPanel
 from gui_app.dino_pretrained_panel import DINOClusterPanel
 from gui_app.transfer_panel import TransferPanel
@@ -370,17 +369,17 @@ class App(ctk.CTk):
         ph_main_tab     = self._posthoc_tabs.add("Analysis")
         ph_fluct_tab    = self._posthoc_tabs.add("Fluct-map")
         ph_symm_tab     = self._posthoc_tabs.add("Symm-map")
-        ph_ordering_tab = self._posthoc_tabs.add("Ordering")
+        # 'Ordering' sub-tab removed — Crystallinity (under Blob) does
+        # the same peak/background-ratio mapping with the r-window
+        # the user actually wants.
         self.posthoc = PostHocPanel(ph_main_tab, app=self)
         self.posthoc.pack(fill="both", expand=True)
-        # Fluct / Symm / Ordering are lazy — built on first sub-tab click.
         self.fluct = None
         self.symm = None
-        self.ordering = None
+        self.ordering = None    # kept for any back-compat callers
         self._posthoc_subtab_frames = {
             "Fluct-map": ph_fluct_tab,
             "Symm-map":  ph_symm_tab,
-            "Ordering":  ph_ordering_tab,
         }
         self._posthoc_subtab_built = set()
 
@@ -531,15 +530,6 @@ class App(ctk.CTk):
                 try: self.symm.link_run(*pl)
                 except Exception: pass
                 self._pending_symm_link = None
-        elif name == "Ordering":
-            self.ordering = OrderingPanel(
-                self._posthoc_subtab_frames["Ordering"], app=self)
-            self.ordering.pack(fill="both", expand=True)
-            pl = getattr(self, "_pending_ordering_link", None)
-            if pl is not None:
-                try: self.ordering.link_run(*pl)
-                except Exception: pass
-                self._pending_ordering_link = None
         else:
             return
         self._posthoc_subtab_built.add(name)
@@ -661,14 +651,6 @@ class App(ctk.CTk):
                 self.symm.link_run(outdir, sample)
             else:
                 self._pending_symm_link = (outdir, sample)
-        except Exception:
-            pass
-        # And Ordering.
-        try:
-            if self.ordering is not None:
-                self.ordering.link_run(outdir, sample)
-            else:
-                self._pending_ordering_link = (outdir, sample)
         except Exception:
             pass
         # And the NMF + clustering tab.
