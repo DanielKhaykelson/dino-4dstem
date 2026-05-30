@@ -2099,10 +2099,21 @@ class ACOMTabPanel(ctk.CTkFrame):
         what = ("CLASS" if mode == "mp_classes" else "GRAIN")
         ax_map.set_title(
             f"phase map — {what}-level NNLS winner   "
-            f"({len(region_masks)} regions matched against "
-            f"{names})",
-            fontsize=11)
+            f"({len(region_masks)} regions)  ·  "
+            f"L-click = single pattern, R-click = grain avg",
+            fontsize=10)
         ax_map.set_xticks([]); ax_map.set_yticks([])
+        # Stash state so the click handler can resolve (y,x) → diff.
+        self._pmap_ax = ax_map
+        self._pmap_scan = (Ny, Nx)
+        self._pmap_phase_id = phase_id
+        self._pmap_region_masks = region_masks
+        self._pmap_names = list(names)
+        if getattr(self, "_pmap_click_cid", None) is not None:
+            try: self._canvas.mpl_disconnect(self._pmap_click_cid)
+            except Exception: pass
+        self._pmap_click_cid = self._canvas.mpl_connect(
+            "button_press_event", self._on_phase_map_click)
         try:
             nm_per_px = (float(self.app.real_res.get())
                            if self.app else 0.0)
@@ -2150,6 +2161,88 @@ class ACOMTabPanel(ctk.CTkFrame):
             fontsize=12)
         self._fig.tight_layout(rect=[0, 0, 1, 0.96])
         self._canvas.draw_idle()
+
+    def _on_phase_map_click(self, event):
+        """L-click → single scan-position pattern; R-click → grain
+        average.  Pops a diffraction window with hover-q + the phase
+        the clicked region was assigned to."""
+        if event.inaxes is not getattr(self, "_pmap_ax", None):
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        Ny, Nx = self._pmap_scan
+        x = max(0, min(Nx - 1, int(round(event.xdata))))
+        y = max(0, min(Ny - 1, int(round(event.ydata))))
+        # Which region/phase was this pixel assigned to?
+        phase_txt = "—"
+        try:
+            for k, gm in enumerate(self._pmap_region_masks):
+                if gm[y, x]:
+                    pi = int(self._pmap_phase_id[k])
+                    if pi == -1:   phase_txt = "neither"
+                    elif pi == -2: phase_txt = "ambiguous"
+                    else:          phase_txt = self._pmap_names[pi]
+                    break
+        except Exception:
+            pass
+        ph = self._posthoc()
+        if ph is None or ph.sample is None:
+            return
+        right = (event.button == 3)
+        try:
+            if right:
+                gi = ph._compute_grain_average(y, x)
+                if gi is None:
+                    self._set_status("no grain at that pixel"); return
+                pat = gi["grain_avg"].astype(np.float32)
+                title = (f"grain @ ({y},{x})  p{gi['cls']}  "
+                           f"{gi['n_pix']}px  →  phase: {phase_txt}")
+            else:
+                from data import SAMPLES, LoadPRZ
+                cfg = SAMPLES[ph.sample]
+                ds = LoadPRZ(cfg["path"], resize=192, vmax=cfg["vmax"])
+                pat = ds.get_raw(y * Nx + x).astype(np.float32)
+                title = (f"single ({y},{x})  →  phase: {phase_txt}")
+        except Exception as e:
+            messagebox.showerror("inspect", repr(e)); return
+        self._popup_diffraction(pat, title)
+
+    def _popup_diffraction(self, pat, title):
+        """Small diffraction popup with vmax/log controls + hover-q."""
+        from matplotlib.backends.backend_tkagg import (
+            FigureCanvasTkAgg, NavigationToolbar2Tk)
+        from gui_app._ui import attach_hover_q
+        win = tk.Toplevel(self)
+        win.title(title); win.geometry("620x660")
+        ctrl = ctk.CTkFrame(win, fg_color="transparent")
+        ctrl.pack(side="top", fill="x", padx=6, pady=4)
+        log_var = ctk.BooleanVar(value=True)
+        ctk.CTkLabel(ctrl, text=title, font=("Consolas", 10),
+                       anchor="w").pack(side="left", padx=4)
+        fig = Figure(figsize=(6, 6), dpi=110, facecolor="white")
+        ax = fig.add_subplot(111)
+        rp = self._recip_per_px()
+        def _draw():
+            ax.clear()
+            img = (np.log1p(np.clip(pat, 0, None)) if log_var.get()
+                     else np.clip(pat, 0, None))
+            ax.imshow(img, cmap="inferno", aspect="equal",
+                        interpolation="nearest")
+            ax.set_xticks([]); ax.set_yticks([])
+            ax.set_title(title, fontsize=9)
+            canv.draw_idle()
+        ctk.CTkCheckBox(ctrl, text="log", variable=log_var,
+                          command=_draw, width=50).pack(side="right",
+                                                            padx=6)
+        canv = FigureCanvasTkAgg(fig, master=win)
+        canv.get_tk_widget().pack(fill="both", expand=True)
+        tb = NavigationToolbar2Tk(canv, win, pack_toolbar=False)
+        tb.update(); tb.pack(side="bottom", fill="x")
+        _draw()
+        if rp > 0:
+            H, W = pat.shape
+            attach_hover_q(canv, ax, center=(H / 2.0, W / 2.0),
+                              q_per_disp_px=rp, units="nm⁻¹")
 
     def _render_multiphase_cards(self, mp, patterns, labels, classes,
                                        mode):
