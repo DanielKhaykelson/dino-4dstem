@@ -321,21 +321,37 @@ class App(ctk.CTk):
                                   command=self._on_tab_change)
             tv.pack(fill="both", expand=True)
             return {name: tv.add(name) for name in members}, tv
+        # Data: one tab "Pre-processing" with Synthetic nested inside.
+        # Model: "Training" with Eval nested inside, plus Transfer.
         data_frames,  self._group_tabs["Data"]  = _grp(g_data,
-            ["Pre-processing", "Synthetic"])
+            ["Pre-processing"])
+        # Pre-processing sub-tabs: Load (the existing pre panel) +
+        # Synthetic.
+        pre_subtabs = ctk.CTkTabview(data_frames["Pre-processing"],
+                                            anchor="nw",
+                                            command=self._on_tab_change)
+        pre_subtabs.pack(fill="both", expand=True)
+        pre_load_tab  = pre_subtabs.add("Load + Pre-process")
+        synth_tab     = pre_subtabs.add("Synthetic")
+        self._group_tabs["Pre-processing"] = pre_subtabs
         model_frames, self._group_tabs["Model"] = _grp(g_model,
-            ["Training", "Transfer", "Eval"])
+            ["Training", "Transfer"])
+        # Training sub-tabs: Train + Eval (Eval moved from top-level).
+        tr_subtabs = ctk.CTkTabview(model_frames["Training"],
+                                          anchor="nw",
+                                          command=self._on_tab_change)
+        tr_subtabs.pack(fill="both", expand=True)
+        train_tab = tr_subtabs.add("Training")
+        eval_tab  = tr_subtabs.add("Eval")
+        self._group_tabs["Training"] = tr_subtabs
         anal_frames,  self._group_tabs["Analysis"] = _grp(g_anal,
             ["Post-hoc"])
         clust_frames, self._group_tabs["Clustering"] = _grp(g_clust,
             ["NMF + cluster", "DINO + cluster", "SAM"])
         diff_frames,  self._group_tabs["Diffraction"] = _grp(g_diff,
             ["Blob", "ACOM"])
-        pre_tab      = data_frames["Pre-processing"]
-        synth_tab    = data_frames["Synthetic"]
-        train_tab    = model_frames["Training"]
+        pre_tab      = pre_load_tab
         transfer_tab = model_frames["Transfer"]
-        eval_tab     = model_frames["Eval"]
         posthoc_tab  = anal_frames["Post-hoc"]
         nmf_tab      = clust_frames["NMF + cluster"]
         dinoc_tab    = clust_frames["DINO + cluster"]
