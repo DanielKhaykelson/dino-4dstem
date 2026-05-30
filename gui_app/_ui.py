@@ -52,7 +52,7 @@ class StatusDot(ctk.CTkLabel):
         d.set("idle", "not loaded")
     """
     def __init__(self, parent, label: str = ""):
-        self._label = label
+        self._caption = label
         self._state = "idle"
         self._tooltip = ""
         super().__init__(parent, text=self._render(),
@@ -63,7 +63,7 @@ class StatusDot(ctk.CTkLabel):
 
     def _render(self):
         glyph = DOT.get(self._state, "○")
-        return f"{glyph} {self._label}".strip()
+        return f"{glyph} {self._caption}".strip()
 
     def _color(self):
         return {"ok":   COLOR["ok"],

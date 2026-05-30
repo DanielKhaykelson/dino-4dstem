@@ -168,24 +168,25 @@ class App(ctk.CTk):
             messagebox.showerror("Pick sample", repr(e))
 
     def _pick_run_badge(self):
-        """Open a run-dir picker.  Reuses post-hoc loading logic if
-        available so SAMPLE_LOCK / _train_kwargs auto-inference fires."""
+        """Open a run-dir picker.  Routes through Session.load_run_dir
+        which resolves the sample via SAMPLE_LOCK.json /
+        _train_kwargs.json automatically."""
         from tkinter import filedialog, messagebox
         d = filedialog.askdirectory(initialdir="runs",
             title="Pick a run dir")
         if not d: return
-        self.session.set(run_dir=d)
-        # if posthoc exists, delegate the heavy load (SAMPLE_LOCK etc.)
+        sample = self.session.load_run_dir(d)
+        # if posthoc tab exists, also push the inference so it caches
+        # for downstream tabs (ACOM, Crystallinity).
         ph = getattr(self, "posthoc", None)
-        if ph is not None:
-            try:
-                # Re-run posthoc's loader logic on `d` so all the
-                # SAMPLE_LOCK + inference plumbing fires once.
-                ph._load_dir_dialog_with_path(d) \
-                    if hasattr(ph, "_load_dir_dialog_with_path") \
-                    else None
-            except Exception:
-                pass
+        if ph is not None and sample is not None:
+            try: ph.link_run(d, sample)
+            except Exception: pass
+        if sample is None:
+            messagebox.showinfo("Run dir",
+                "Run dir loaded but no sample could be auto-resolved "
+                "from SAMPLE_LOCK.json / _train_kwargs.json.  Click "
+                "the dataset badge to pick one manually.")
 
     def _open_run_inspector(self):
         """Generate runs/_gui/_inspect.html via inspect_runs.gather +
