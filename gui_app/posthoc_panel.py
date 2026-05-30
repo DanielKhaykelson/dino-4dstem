@@ -2557,6 +2557,15 @@ class PostHocPanel(ctk.CTkFrame):
         tb.update(); tb.pack(side="bottom", fill="x")
         vmax_entry.bind("<Return>", lambda _e: _redraw())
         _redraw()
+        # Hover-q on the grain pattern (raw-detector resolution).
+        try:
+            from gui_app._ui import attach_hover_q
+            if rp > 0:
+                H, W = grain_avg.shape
+                attach_hover_q(c, ax_pat,
+                                  center=(H / 2.0, W / 2.0),
+                                  q_per_disp_px=rp, units="nm⁻¹")
+        except Exception: pass
 
     def _diffraction_popup_window(self, title, subtitle, raw_2d, train_vmax):
         """Shared popup implementation for pattern / grain views.
@@ -2622,6 +2631,15 @@ class PostHocPanel(ctk.CTkFrame):
         # Apply current vmax-entry value when user presses Return.
         vmax_entry.bind("<Return>", lambda _e: _redraw())
         _redraw()
+        # Hover-q on the diffraction pattern (raw-detector resolution).
+        try:
+            from gui_app._ui import attach_hover_q
+            if rp > 0:
+                H, W = raw_2d.shape
+                attach_hover_q(c, ax,
+                                  center=(H / 2.0, W / 2.0),
+                                  q_per_disp_px=rp, units="nm⁻¹")
+        except Exception: pass
 
     def _refresh_class_dropdown_lazy(self):
         if self._inf is not None and self._class_menu.cget("values") in (["—"], []):

@@ -507,6 +507,18 @@ class CrystallinityPanel(ctk.CTkFrame):
         ax.set_xticks([]); ax.set_yticks([])
         ax.set_title(f"{self._test_origin}    "
                        f"ratio = {r['ratio']:.4f}", fontsize=10)
+        # Hover-q on the cart pattern (raw-detector resolution).
+        try:
+            from gui_app._ui import attach_hover_q
+            rp = self._recip_per_px()
+            if rp > 0 and self._test_center is not None:
+                if getattr(self, "_hover_cid", None) is not None:
+                    self._canvas.mpl_disconnect(self._hover_cid)
+                self._hover_cid = attach_hover_q(
+                    self._canvas, ax,
+                    center=self._test_center,
+                    q_per_disp_px=rp, units="nm⁻¹")
+        except Exception: pass
 
         # ---- polar view + r-window band ----
         ax = self._ax_polar; ax.clear()

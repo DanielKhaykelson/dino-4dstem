@@ -698,6 +698,20 @@ class ACOMTabPanel(ctk.CTkFrame):
             f"step 1+2  ·  {np_peaks} peaks\n"
             f"{self._test_origin}",
             fontsize=9)
+        # Hover-q readout — pattern is shown at raw-detector
+        # resolution (no resize/crop), so 1 display px = 1 raw px →
+        # q_per_disp_px = recip_res (nm⁻¹/px).
+        try:
+            from gui_app._ui import attach_hover_q
+            rp = self._recip_per_px()
+            if rp > 0 and self._test_center is not None:
+                if getattr(self, "_pat_hover_cid", None) is not None:
+                    self._canvas.mpl_disconnect(self._pat_hover_cid)
+                self._pat_hover_cid = attach_hover_q(
+                    self._canvas, ax,
+                    center=self._test_center,
+                    q_per_disp_px=rp, units="nm⁻¹")
+        except Exception: pass
         self._redraw_all()
 
     # ------------------------------------------------------------------
