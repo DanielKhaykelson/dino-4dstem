@@ -136,8 +136,17 @@ class PostHocPanel(ctk.CTkFrame):
         # Phase B: refresh the fine-tune status panel for this sample.
         try: self._refresh_ft_status()
         except Exception: pass
-        # Push the link to the dedicated ACOM tab so it can pull
-        # class avgs / classmap / grain extraction live.
+        # Drive the global session — replaces the old push-style
+        # `acom2.refresh_from_posthoc()` chain.  Every panel that
+        # subscribes will react automatically.
+        try:
+            sess = getattr(self.app, "session", None)
+            if sess is not None:
+                sess.set(run_dir=outdir, sample=sample,
+                            inference=self._inf)
+        except Exception: pass
+        # Legacy back-compat: still call refresh_from_posthoc on
+        # acom2 so older session-unaware panels keep working.
         try:
             ac = getattr(self.app, "acom2", None)
             if ac is not None:

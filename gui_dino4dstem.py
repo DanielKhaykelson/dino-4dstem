@@ -48,6 +48,11 @@ class App(ctk.CTk):
         self.title("DINO-4DSTEM")
         self.geometry("1480x920")
         self.minsize(1240, 780)
+        # Global session = single source of truth for (sample, run_dir,
+        # inference).  All panels subscribe; no more per-panel
+        # outdir/sample fan-out.
+        from gui_app.session import Session
+        self.session = Session()
 
         self._build_topbar()
         self._build_tabs()
@@ -119,6 +124,70 @@ class App(ctk.CTk):
                       flush=True)
         self.destroy()
 
+    # ---- session badges --------------------------------------------
+    def _on_session_change(self, sess):
+        from gui_app._ui import COLOR
+        ds = sess.sample or "(none)"
+        try:
+            self._badge_dataset.configure(
+                text=f"● dataset:  {ds}")
+        except Exception: pass
+        run = "(none)"
+        if sess.run_dir:
+            run = sess.run_dir.replace("\\", "/").split("/")[-1]
+        try:
+            self._badge_run.configure(text=f"● run:  {run}")
+        except Exception: pass
+        try:
+            if sess.has_inference():
+                self._dot_inf.set("ok", "inference cached")
+            elif sess.has_run():
+                self._dot_inf.set("idle", "run loaded, no inference")
+            else:
+                self._dot_inf.set("idle", "no run loaded")
+        except Exception: pass
+
+    def _pick_dataset_badge(self):
+        """Open a quick sample picker."""
+        try:
+            import tkinter as tk
+            from data import SAMPLES
+            top = tk.Toplevel(self); top.title("Pick a sample")
+            top.geometry("420x460")
+            lst = tk.Listbox(top, font=("Consolas", 10))
+            lst.pack(fill="both", expand=True, padx=8, pady=8)
+            keys = sorted(SAMPLES.keys())
+            for k in keys: lst.insert("end", k)
+            def _ok():
+                sel = lst.curselection()
+                if sel:
+                    self.session.set(sample=keys[int(sel[0])])
+                top.destroy()
+            ctk.CTkButton(top, text="Use this sample",
+                           command=_ok).pack(pady=6)
+        except Exception as e:
+            messagebox.showerror("Pick sample", repr(e))
+
+    def _pick_run_badge(self):
+        """Open a run-dir picker.  Reuses post-hoc loading logic if
+        available so SAMPLE_LOCK / _train_kwargs auto-inference fires."""
+        from tkinter import filedialog, messagebox
+        d = filedialog.askdirectory(initialdir="runs",
+            title="Pick a run dir")
+        if not d: return
+        self.session.set(run_dir=d)
+        # if posthoc exists, delegate the heavy load (SAMPLE_LOCK etc.)
+        ph = getattr(self, "posthoc", None)
+        if ph is not None:
+            try:
+                # Re-run posthoc's loader logic on `d` so all the
+                # SAMPLE_LOCK + inference plumbing fires once.
+                ph._load_dir_dialog_with_path(d) \
+                    if hasattr(ph, "_load_dir_dialog_with_path") \
+                    else None
+            except Exception:
+                pass
+
     def _open_run_inspector(self):
         """Generate runs/_gui/_inspect.html via inspect_runs.gather +
         HTML_TEMPLATE, then open it in the default browser.  Falls back
@@ -171,6 +240,21 @@ class App(ctk.CTk):
                        width=170,
                        command=self._open_run_inspector
                        ).pack(side="left", padx=8, pady=4)
+        # Session badges: dataset + run + inference status.  Click to
+        # change.  Updated by any panel that drives a load.
+        from gui_app._ui import session_badge, StatusDot
+        self._badge_dataset = session_badge(bar,
+            "● dataset:  (none)",
+            command=self._pick_dataset_badge)
+        self._badge_dataset.pack(side="left", padx=4, pady=4)
+        self._badge_run = session_badge(bar,
+            "● run:  (none)",
+            command=self._pick_run_badge)
+        self._badge_run.pack(side="left", padx=4, pady=4)
+        self._dot_inf = StatusDot(bar, label="inference")
+        self._dot_inf.set("idle", "no inference cached")
+        self._dot_inf.pack(side="left", padx=6)
+        self.session.subscribe(self._on_session_change)
 
         # Resolution fields (shared across all tabs).
         # Convention: both values are for the ORIGINAL un-resized data.
@@ -224,17 +308,40 @@ class App(ctk.CTk):
                                        command=self._on_tab_change)
         self._tabs.pack(side="top", fill="both", expand=True,
                          padx=8, pady=(6, 4))
-        pre_tab = self._tabs.add("Pre-processing")
-        synth_tab = self._tabs.add("Synthetic")
-        train_tab = self._tabs.add("Training")
-        transfer_tab = self._tabs.add("Transfer")
-        eval_tab = self._tabs.add("Eval")
-        posthoc_tab = self._tabs.add("Post-hoc")
-        nmf_tab = self._tabs.add("NMF + cluster")
-        dinoc_tab = self._tabs.add("DINO + cluster")
-        sam_tab = self._tabs.add("SAM")
-        blob_tab = self._tabs.add("Blob")
-        acom2_tab = self._tabs.add("ACOM")
+        # 5 high-level groups instead of 11 flat tabs.  Each group is
+        # itself a CTkTabview holding the original panels.
+        g_data    = self._tabs.add("Data")
+        g_model   = self._tabs.add("Model")
+        g_anal    = self._tabs.add("Analysis")
+        g_clust   = self._tabs.add("Clustering")
+        g_diff    = self._tabs.add("Diffraction")
+        self._group_tabs = {}
+        def _grp(parent, members):
+            tv = ctk.CTkTabview(parent, anchor="nw",
+                                  command=self._on_tab_change)
+            tv.pack(fill="both", expand=True)
+            return {name: tv.add(name) for name in members}, tv
+        data_frames,  self._group_tabs["Data"]  = _grp(g_data,
+            ["Pre-processing", "Synthetic"])
+        model_frames, self._group_tabs["Model"] = _grp(g_model,
+            ["Training", "Transfer", "Eval"])
+        anal_frames,  self._group_tabs["Analysis"] = _grp(g_anal,
+            ["Post-hoc"])
+        clust_frames, self._group_tabs["Clustering"] = _grp(g_clust,
+            ["NMF + cluster", "DINO + cluster", "SAM"])
+        diff_frames,  self._group_tabs["Diffraction"] = _grp(g_diff,
+            ["Blob", "ACOM"])
+        pre_tab      = data_frames["Pre-processing"]
+        synth_tab    = data_frames["Synthetic"]
+        train_tab    = model_frames["Training"]
+        transfer_tab = model_frames["Transfer"]
+        eval_tab     = model_frames["Eval"]
+        posthoc_tab  = anal_frames["Post-hoc"]
+        nmf_tab      = clust_frames["NMF + cluster"]
+        dinoc_tab    = clust_frames["DINO + cluster"]
+        sam_tab      = clust_frames["SAM"]
+        blob_tab     = diff_frames["Blob"]
+        acom2_tab    = diff_frames["ACOM"]
 
         # Eager — used immediately or cheap to build.
         self.pre = PrePanel(pre_tab,
@@ -296,11 +403,20 @@ class App(ctk.CTk):
         self._lazy_tab_built = set()
 
     def _on_tab_change(self):
+        # Read inner group's selected tab if it has any.  Outer tabs
+        # (Data/Model/Analysis/Clustering/Diffraction) themselves never
+        # need lazy build — only their sub-tabs do.
+        name = None
         try:
-            name = self._tabs.get()
+            outer = self._tabs.get()
+            tv = self._group_tabs.get(outer)
+            if tv is not None:
+                name = tv.get()
+            else:
+                name = outer
         except Exception:
             return
-        if name in self._lazy_tab_built:
+        if not name or name in self._lazy_tab_built:
             return
         if name == "SAM":
             self.sam = SAMPanel(self._lazy_tab_frames["SAM"], app=self)
