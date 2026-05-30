@@ -231,11 +231,6 @@ class App(ctk.CTk):
         ctk.CTkLabel(bar, text="DINO-4DSTEM",
                       font=("Segoe UI", 16, "bold")).pack(side="left",
                                                             padx=12, pady=6)
-        ctk.CTkLabel(bar,
-            text="self-supervised 4D-STEM clustering with physics-"
-                  "informed (1D radial) regularizer",
-            font=("Segoe UI", 11), text_color=("#444", "#aaa")
-            ).pack(side="left", padx=4)
         ctk.CTkButton(bar, text="Inspect runs  (HTML)",
                        width=170,
                        command=self._open_run_inspector
