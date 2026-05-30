@@ -439,6 +439,18 @@ class ACOMTabPanel(ctk.CTkFrame):
                      fontsize=10, color="#888", transform=ax.transAxes)
             ax.set_xticks([]); ax.set_yticks([])
 
+    def _ensure_quad_layout(self):
+        """A batch render does self._fig.clf(), destroying the 4 step
+        axes.  Before any step-1..4 redraw, rebuild the 2×2 layout if
+        the step axes are no longer attached to the figure (otherwise
+        the step views draw onto dead axes and the canvas stays stuck
+        on the batch output)."""
+        ax = getattr(self, "_ax_pat", None)
+        if ax is None or ax not in self._fig.axes:
+            self._build_axes()
+            return True
+        return False
+
     def _redraw_all(self):
         self._fig.tight_layout()
         self._canvas.draw_idle()
@@ -677,6 +689,7 @@ class ACOMTabPanel(ctk.CTkFrame):
         self._redraw_1d_with_rings()
 
     def _draw_pattern_panel(self):
+        self._ensure_quad_layout()
         ax = self._ax_pat
         ax.clear()
         ax.set_xticks([]); ax.set_yticks([])
@@ -840,6 +853,10 @@ class ACOMTabPanel(ctk.CTkFrame):
         return rpx * inv_a, amp
 
     def _redraw_1d_with_rings(self):
+        # Skip the layout guard when rendering into the standalone 1D
+        # popup (it swaps self._ax_1d to a foreign axes temporarily).
+        if not getattr(self, "_in_1d_popup", False):
+            self._ensure_quad_layout()
         ax = self._ax_1d
         ax.clear()
         ax.set_xticks([]); ax.set_yticks([])
@@ -1038,10 +1055,12 @@ class ACOMTabPanel(ctk.CTkFrame):
         # Redraw the same content onto this fresh axis.
         keep_ax = self._ax_1d
         self._ax_1d = ax
+        self._in_1d_popup = True
         try:
             self._redraw_1d_with_rings()
         finally:
             self._ax_1d = keep_ax
+            self._in_1d_popup = False
         fig.tight_layout()
         canv = FigureCanvasTkAgg(fig, master=win)
         canv.get_tk_widget().pack(fill="both", expand=True)
@@ -1324,6 +1343,7 @@ class ACOMTabPanel(ctk.CTkFrame):
 
     def _draw_fit_panel(self, results):
         from gui_app.acom_core import zone_axis_from_matrix
+        self._ensure_quad_layout()
         ax = self._ax_fit
         ax.clear()
         ax.set_xticks([]); ax.set_yticks([])
@@ -1450,6 +1470,7 @@ class ACOMTabPanel(ctk.CTkFrame):
     # class map (for picking grain / scan_pos)
     # ------------------------------------------------------------------
     def _draw_classmap_if_possible(self):
+        self._ensure_quad_layout()
         ax = self._ax_cmap
         ax.clear()
         ax.set_xticks([]); ax.set_yticks([])
