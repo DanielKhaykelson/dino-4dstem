@@ -875,23 +875,37 @@ class ACOMTabPanel(ctk.CTkFrame):
             if gleng is None or sint is None:
                 continue
             color = palette[pi % len(palette)]
-            order = np.argsort(-np.asarray(sint))
-            top = order[:60]
+            sint_a = np.asarray(sint)
+            # Show ALL reflections within the visible q-range (not
+            # just top-60 by intensity) so weak low-index rings like
+            # γ(100) / α(002) appear too.  Opacity scales with
+            # intensity so strong rings stand out; weak ones are
+            # faint but present.  Normalise per-phase.
+            in_range = (np.asarray(gleng) <= rc_inva.max())
+            order = np.argsort(-sint_a[in_range])
+            sint_vis = sint_a[in_range]
+            gleng_vis = np.asarray(gleng)[in_range]
+            i_max = float(sint_vis.max()) if sint_vis.size else 1.0
             hkl_arr = np.asarray(hkl) if hkl is not None else None
-            for i in top:
-                q = float(gleng[i])
-                if q > rc_inva.max():
-                    continue
-                ax.axvline(q, color=color, alpha=0.45, lw=0.9,
-                            linestyle="--")
-                # Store for hover lookup: round hkl to ints since
-                # py4DSTEM stores them as float arrays.
-                if hkl_arr is not None and hkl_arr.shape[1] > int(i):
-                    h, k, l = (int(round(float(v)))
-                                  for v in hkl_arr[:, int(i)])
+            hkl_vis = (hkl_arr[:, in_range]
+                          if hkl_arr is not None else None)
+            for j, k_idx in enumerate(order):
+                q = float(gleng_vis[k_idx])
+                I = float(sint_vis[k_idx])
+                # Map intensity to alpha in [0.10, 0.85] (sqrt for
+                # better dynamic range on weak peaks).
+                alpha_ring = 0.10 + 0.75 * np.sqrt(I / max(i_max,
+                                                                1e-12))
+                lw_ring    = 0.7 + 0.6 * (I / max(i_max, 1e-12))
+                ax.axvline(q, color=color, alpha=float(alpha_ring),
+                            lw=float(lw_ring), linestyle="--")
+                # Hover DB: include EVERY visible reflection so weak
+                # ones (γ100, α002 …) are still labellable.
+                if hkl_vis is not None and hkl_vis.shape[1] > int(k_idx):
+                    h, kk, l = (int(round(float(v)))
+                                  for v in hkl_vis[:, int(k_idx)])
                     self._cif_ring_db.append(
-                        (q, name, (h, k, l), color,
-                         float(sint[i])))
+                        (q, name, (h, kk, l), color, I))
             any_phase = True
             leg_handles.append(Line2D([0], [0], color=color, lw=1.4,
                                           linestyle="--",

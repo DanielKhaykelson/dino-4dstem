@@ -96,7 +96,16 @@ def prepare_crystal(crystal,
     priori.  Pass `plan_mode="corners"` + `corners_zone_axes` to
     constrain to a triangle.
     """
-    crystal.calculate_structure_factors(float(k_max))
+    # Lower tol_structure_factor (default ~1e-2) so weak low-index
+    # rings like γ(100) or α(002) — which are intensity-weak in
+    # molecular crystals because the unit-cell atoms destructively
+    # interfere along single-axis directions — are kept in the
+    # structure factor list and show up on the 1D plot.
+    try:
+        crystal.calculate_structure_factors(
+            float(k_max), tol_structure_factor=1e-4)
+    except TypeError:
+        crystal.calculate_structure_factors(float(k_max))
     # Build a kwarg dict that is filtered against the installed
     # py4DSTEM version's `orientation_plan` signature so we don't blow
     # up on kwargs that have been renamed across versions.
