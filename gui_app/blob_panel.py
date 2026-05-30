@@ -177,6 +177,12 @@ class BlobPanel(ctk.CTkFrame):
         self._worker_lock = threading.Lock()
         self._raw_cache = {}          # frame_idx -> raw 2D
         self._build()
+        # Subscribe to the global session so loading a run anywhere
+        # (topbar badge, post-hoc, …) auto-links Blob.
+        sess = getattr(self.app, "session", None) if self.app else None
+        if sess is not None:
+            sess.subscribe(self._on_session_change)
+            self._on_session_change(sess)
 
     # ------------- run linkage ------------------------------------
     def link_run(self, outdir, sample):
@@ -185,6 +191,21 @@ class BlobPanel(ctk.CTkFrame):
         self._info_lbl.configure(
             text=f"linked: {os.path.basename(outdir)}  (sample={sample})")
         self._load_run_state()
+
+    def _on_session_change(self, sess):
+        """React to global session updates so Blob picks up the
+        dataset/run loaded by any other tab or the topbar badge."""
+        if sess is None: return
+        if not (sess.has_dataset() and sess.has_run()):
+            return
+        if (self.outdir == sess.run_dir
+                and self.sample == sess.sample):
+            return
+        try:
+            self.link_run(sess.run_dir, sess.sample)
+        except Exception as e:
+            print(f"[blob-panel] session re-link failed: {e!r}",
+                  flush=True)
 
     def on_runtime_sample_added(self, key):
         pass
@@ -283,6 +304,10 @@ class BlobPanel(ctk.CTkFrame):
             "log_stretch":  ctk.BooleanVar(value=COMMON_DEFAULTS["log_stretch"]),
             "current_class": ctk.StringVar(value="0"),
             "frame_mode":   ctk.StringVar(value="Class average"),
+            # New: extra grain-source state.  When frame_mode ==
+            # "Grain @ (y, x)", read these.
+            "grain_y":      ctk.StringVar(value="64"),
+            "grain_x":      ctk.StringVar(value="64"),
             "frame_index":  ctk.IntVar(value=0),
         }
         # Per-method knob vars, kept distinct so switching method preserves
@@ -339,7 +364,9 @@ class BlobPanel(ctk.CTkFrame):
         mode_row.pack(fill="x", padx=4, pady=2)
         ctk.CTkLabel(mode_row, text="frame:", width=60).pack(side="left")
         ctk.CTkOptionMenu(mode_row, variable=self._vars["frame_mode"],
-            values=["Class average", "Single frame"], width=140,
+            values=["Class average", "Single frame", "Grain @ (y, x)",
+                       "dp_max", "dp_mean"],
+            width=160,
             command=lambda _v: self._render_canvas_idle()
             ).pack(side="left", padx=2)
 
@@ -352,6 +379,17 @@ class BlobPanel(ctk.CTkFrame):
         ctk.CTkLabel(idx_row, text="(flat scan idx)",
                        font=("Segoe UI", 9),
                        text_color=("#666", "#aaa")).pack(side="left", padx=4)
+        # Grain @ (y, x) source: scan coords used when frame_mode is
+        # "Grain @ (y, x)".  Uses the same connected-component grain
+        # extraction as the post-hoc grain popup.
+        g_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        g_row.pack(fill="x", padx=4, pady=2)
+        ctk.CTkLabel(g_row, text="grain (y, x):",
+                      width=80, anchor="w").pack(side="left")
+        ctk.CTkEntry(g_row, textvariable=self._vars["grain_y"],
+                       width=50).pack(side="left", padx=2)
+        ctk.CTkEntry(g_row, textvariable=self._vars["grain_x"],
+                       width=50).pack(side="left", padx=2)
 
         # Common preprocessing
         _section(sidebar, "Preprocessing")
@@ -519,10 +557,61 @@ class BlobPanel(ctk.CTkFrame):
                 return None, ""
             c = int(self._vars["current_class"].get())
             return self._class_avgs[c], f"p{c} class average"
-        else:
+        if mode == "Single frame":
             i = int(self._vars["frame_index"].get())
             raw = self._get_raw_frame(i)
             return raw, f"frame [{i}]"
+        if mode == "Grain @ (y, x)":
+            # Re-use the posthoc grain extractor (connected-component
+            # of same-class pixels containing the click).
+            ph = (getattr(self.app, "posthoc", None)
+                    if self.app else None)
+            if ph is None or ph._inf is None:
+                return None, "(need posthoc inference for grain mode)"
+            try:
+                y = int(self._vars["grain_y"].get())
+                x = int(self._vars["grain_x"].get())
+                gi = ph._compute_grain_average(y, x)
+            except Exception:
+                return None, "(grain extract failed)"
+            if gi is None:
+                return None, "(pixel not in any grain)"
+            return (gi["grain_avg"].astype(np.float32),
+                      f"grain @ ({y},{x}) p{gi['cls']} {gi['n_pix']}px")
+        if mode in ("dp_max", "dp_mean"):
+            try:
+                pat = self._compute_dp_image(mode)
+            except Exception as e:
+                return None, f"({mode}: {e!r})"
+            if pat is None:
+                return None, f"(no cube for {mode})"
+            return pat.astype(np.float32), f"{mode} ({self.sample})"
+        return None, f"(unknown mode {mode!r})"
+
+    def _compute_dp_image(self, kind: str):
+        """Stream the cube row-by-row to build dp_max or dp_mean,
+        cached per-sample so toggling doesn't recompute."""
+        if not hasattr(self, "_dp_cache"):
+            self._dp_cache = {}
+        key = (self.sample, kind)
+        if key in self._dp_cache:
+            return self._dp_cache[key]
+        from data import SAMPLES
+        from gui_app.posthoc_panel import _open_lazy
+        if self.sample not in SAMPLES: return None
+        cfg = SAMPLES[self.sample]
+        cube = _open_lazy(cfg["path"], scan_shape=self._scan_shape)
+        Ny, Nx, H, W = cube.shape
+        dp_max = np.zeros((H, W), dtype=np.float32)
+        dp_sum = np.zeros((H, W), dtype=np.float64)
+        for y in range(Ny):
+            blk = np.asarray(cube[y], dtype=np.float32)
+            dp_max = np.maximum(dp_max, blk.max(axis=0))
+            dp_sum += blk.sum(axis=0)
+        dp_mean = (dp_sum / max(Ny * Nx, 1)).astype(np.float32)
+        self._dp_cache[(self.sample, "dp_max")]  = dp_max
+        self._dp_cache[(self.sample, "dp_mean")] = dp_mean
+        return self._dp_cache[key]
 
     # ------------- single-image run --------------------------------
     def _run_on_current(self):
