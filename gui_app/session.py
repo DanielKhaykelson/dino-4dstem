@@ -124,10 +124,25 @@ class Session:
                                 cfg.get("center_mask_radius", 15)),
                             key=sample_inferred)
                 except Exception: pass
-        # Commit to session.
+        # Auto-load eval/inference.npz if present so subscribers
+        # (ACOM, Crystallinity, …) light up immediately.
+        inf = ...
+        inf_p = os.path.join(run_dir, "eval", "inference.npz")
+        if os.path.exists(inf_p):
+            try:
+                import numpy as _np
+                d = _np.load(inf_p, allow_pickle=True)
+                inf = dict(soft_probs=d["soft_probs"],
+                              assigns=d["assigns"],
+                              embeds=d["embeds"])
+            except Exception as e:
+                print(f"[session] inference.npz load failed: {e!r}",
+                      flush=True)
+        # Commit to session (single emit).
         self.set(run_dir=run_dir,
                   sample=(sample_inferred
-                            if sample_inferred in SAMPLES else None))
+                            if sample_inferred in SAMPLES else None),
+                  inference=inf)
         if sample_inferred and sample_inferred not in SAMPLES:
             print(f"[session] '{sample_inferred}' could not be "
                     f"registered — no SAMPLE_LOCK / _train_kwargs / "
