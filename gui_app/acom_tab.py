@@ -884,9 +884,16 @@ class ACOMTabPanel(ctk.CTkFrame):
         if not self._phases:
             messagebox.showinfo("CIF",
                 "Add at least one CIF first."); return
+        try:
+            kmax = float(self._kmax.get())
+        except Exception:
+            kmax = 0.0
+        if not (kmax > 0):
+            messagebox.showerror("CIF build",
+                "k_max (1/Å) must be > 0.  Set it to ~1.0–2.0 in "
+                "step 3 before building."); return
         def _w():
             from gui_app.acom_core import load_crystal, prepare_crystal
-            kmax = float(self._kmax.get())
             plan = self._plan_mode.get()
             t0 = time.time()
             for i, (name, cif) in enumerate(self._phases):

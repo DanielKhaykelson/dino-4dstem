@@ -101,11 +101,31 @@ def prepare_crystal(crystal,
     # molecular crystals because the unit-cell atoms destructively
     # interfere along single-axis directions — are kept in the
     # structure factor list and show up on the 1D plot.
+    k_max = float(k_max)
+    if not (k_max > 0):
+        raise ValueError(
+            f"k_max must be > 0 (got {k_max}). Set a sensible "
+            f"reciprocal cutoff, e.g. 1.0–2.0 1/Å.")
     try:
         crystal.calculate_structure_factors(
-            float(k_max), tol_structure_factor=1e-4)
+            k_max, tol_structure_factor=1e-4)
+    except ValueError as e:
+        if "zero-size array" in str(e):
+            # No reflections survived within k_max — the cell's
+            # smallest |g| is larger than k_max.
+            raise ValueError(
+                f"No reflections within k_max = {k_max:.3g} 1/Å for "
+                f"this CIF — the cutoff is too small for this unit "
+                f"cell.  Increase k_max (try 1.0–2.0 1/Å).") from None
+        raise
     except TypeError:
-        crystal.calculate_structure_factors(float(k_max))
+        crystal.calculate_structure_factors(k_max)
+    # Sanity: if still empty, give a clear message.
+    gl = getattr(crystal, "g_vec_leng", None)
+    if gl is not None and len(gl) == 0:
+        raise ValueError(
+            f"No reflections within k_max = {k_max:.3g} 1/Å — "
+            f"increase k_max (try 1.0–2.0 1/Å).")
     # Build a kwarg dict that is filtered against the installed
     # py4DSTEM version's `orientation_plan` signature so we don't blow
     # up on kwargs that have been renamed across versions.
