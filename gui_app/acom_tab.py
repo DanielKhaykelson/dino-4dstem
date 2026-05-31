@@ -288,13 +288,28 @@ class ACOMTabPanel(ctk.CTkFrame):
         # default from topbar 0.0185 nm⁻¹/px → 0.00185 1/Å/px
         rp = self._recip_per_px() or 0.0185
         self._inv_ang = ctk.DoubleVar(value=round(rp * 0.1, 6))
+        # Track whether the user has manually overridden 1/Å/px; if
+        # not, auto-follow the topbar reciprocal field.
+        self._inv_ang_user_set = False
         inv_e = ctk.CTkEntry(inv_row, textvariable=self._inv_ang,
                                 width=80)
         inv_e.pack(side="left", padx=2)
-        inv_e.bind("<Return>", lambda _e: self._redraw_1d_with_rings())
+        def _inv_edited(_e=None):
+            self._inv_ang_user_set = True
+            self._redraw_1d_with_rings()
+        inv_e.bind("<Return>", _inv_edited)
+        inv_e.bind("<FocusOut>", _inv_edited)
         ctk.CTkButton(inv_row, text="↺", width=28,
                        command=self._sync_calib_from_topbar
                        ).pack(side="left", padx=2)
+        # Auto-follow the topbar reciprocal: when the user changes
+        # 'reciprocal nm⁻¹/px' up top, update this 1/Å/px field
+        # (×0.1) unless they've manually typed a value here.
+        try:
+            self.app.recip_res.trace_add(
+                "write", lambda *a: self._on_topbar_recip_change())
+        except Exception:
+            pass
         ctk.CTkButton(sidebar, text="Auto-fit 1/Å/px ▶",
                        width=240,
                        fg_color=("#4D6FB0", "#3A5380"),
@@ -480,6 +495,8 @@ class ACOMTabPanel(ctk.CTkFrame):
             return 0.0
 
     def _sync_calib_from_topbar(self):
+        # Manual ↺ : force re-sync and resume auto-follow.
+        self._inv_ang_user_set = False
         rp = self._recip_per_px()
         if rp > 0:
             self._inv_ang.set(round(rp * 0.1, 6))
@@ -487,6 +504,21 @@ class ACOMTabPanel(ctk.CTkFrame):
                 f"calibration synced: {rp:.5g} nm⁻¹/px → "
                 f"{rp * 0.1:.5g} 1/Å/px")
             self._redraw_1d_with_rings()
+
+    def _on_topbar_recip_change(self):
+        """Topbar 'reciprocal nm⁻¹/px' changed → update this tab's
+        1/Å/px (×0.1) unless the user manually overrode it."""
+        if getattr(self, "_inv_ang_user_set", False):
+            return
+        rp = self._recip_per_px()
+        if rp and rp > 0:
+            try:
+                self._inv_ang.set(round(rp * 0.1, 6))
+            except Exception:
+                return
+            if self._test_pattern is not None:
+                try: self._redraw_1d_with_rings()
+                except Exception: pass
 
     def _save_panel(self):
         ph = getattr(self.app, "posthoc", None)
