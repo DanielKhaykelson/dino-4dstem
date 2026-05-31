@@ -1834,6 +1834,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                     f"✓ loaded cached peaks "
                     f"({os.path.basename(cache_path)}) — skipping "
                     f"detection, matching only")
+                self._warn_if_sparse(peaks_all, stride)
                 return peaks_all, [center] * (Ny * Nx)
             except Exception:
                 pass
@@ -1865,7 +1866,37 @@ class ACOMTabPanel(ctk.CTkFrame):
                     f"peaks cached → {os.path.basename(cache_path)}")
             except Exception as e:
                 print(f"[acom] peak cache save: {e!r}", flush=True)
+        self._warn_if_sparse(peaks_all, stride)
         return peaks_all, centers_all
+
+    def _warn_if_sparse(self, peaks_all, stride):
+        """Detection sanity check: matching needs ≥3 peaks/pattern.
+        If the median sampled pattern has <3, warn the user that
+        their detection params are too strict (the match will be
+        mostly empty / black map)."""
+        cnt = []
+        for p in peaks_all:
+            a = np.asarray(p)
+            n = a.shape[0] if a.ndim == 2 else 0
+            if n > 0: cnt.append(n)
+        if not cnt:
+            med = 0
+        else:
+            med = int(np.median(cnt))
+        msg = (f"detected peaks/pattern: median={med} over "
+                 f"{len(cnt)} non-empty patterns")
+        self._set_status(msg)
+        if med < 3:
+            self.after(0, lambda: messagebox.showwarning(
+                "Sparse peaks — match will be poor",
+                f"Detection found a median of only {med} Bragg "
+                f"peak(s) per pattern (need ≥3, ideally ≥10 for a "
+                f"good orientation match).\n\n"
+                f"The orientation map will be mostly black.\n\n"
+                f"Fix: in Step 2 LOWER the detection threshold and/or "
+                f"widen the sigma range, verify on a single pattern "
+                f"that you get 10+ peaks, then re-run and choose "
+                f"'No' (re-detect) at the cache prompt."))
 
     def _run_nnls_full_dataset(self, cube, stride, detect_kw,
                                     progress_cb):
