@@ -1303,7 +1303,7 @@ class ACOMTabPanel(ctk.CTkFrame):
             return
         ax = self._ax_fit
         ax.clear()
-        ax.imshow(arr, aspect="auto")
+        ax.imshow(arr, aspect="equal")
         ax.set_xticks([]); ax.set_yticks([])
         for s in ax.spines.values():
             s.set_visible(False)
@@ -1973,7 +1973,7 @@ class ACOMTabPanel(ctk.CTkFrame):
             import matplotlib.pyplot as _plt
             _plt.close(fig_in)
             buf.seek(0)
-            ax.imshow(imread(buf), aspect="auto")
+            ax.imshow(imread(buf), aspect="equal")
             ax.set_title(title, fontsize=10)
             for s in ax.spines.values(): s.set_visible(False)
 
@@ -1988,7 +1988,7 @@ class ACOMTabPanel(ctk.CTkFrame):
         # Residual + reliability directly via imshow.
         try:
             im = ax_res.imshow(cp.phase_residuals, cmap="magma",
-                                  interpolation="nearest", aspect="auto")
+                                  interpolation="nearest", aspect="equal")
             ax_res.set_title("phase fit residual (lower = better)",
                                 fontsize=10)
             ax_res.set_xticks([]); ax_res.set_yticks([])
@@ -2000,7 +2000,7 @@ class ACOMTabPanel(ctk.CTkFrame):
         try:
             im2 = ax_rel.imshow(cp.phase_reliability, cmap="viridis",
                                     interpolation="nearest",
-                                    aspect="auto")
+                                    aspect="equal")
             ax_rel.set_title(
                 "reliability (top-1 − top-2 phase weight)",
                 fontsize=10)
@@ -2064,7 +2064,7 @@ class ACOMTabPanel(ctk.CTkFrame):
             ofig.savefig(buf, format="png", dpi=130,
                             bbox_inches="tight", facecolor="white")
             plt.close(ofig); buf.seek(0)
-            ax_ipf.imshow(imread(buf), aspect="auto")
+            ax_ipf.imshow(imread(buf), aspect="equal")
             ax_ipf.set_title("orientation (IPF + legend)", fontsize=11)
         except Exception as e:
             ax_ipf.text(0.5, 0.5, f"orientation map\nunavailable:\n{e!r}",

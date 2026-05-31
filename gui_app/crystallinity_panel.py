@@ -580,7 +580,7 @@ class CrystallinityPanel(ctk.CTkFrame):
         ax = self._ax_map; ax.clear()
         if self._cryst_map is not None:
             im = ax.imshow(self._cryst_map, cmap="viridis",
-                              interpolation="nearest", aspect="auto")
+                              interpolation="nearest", aspect="equal")
             ax.set_title("crystallinity map", fontsize=10)
             ax.set_xticks([]); ax.set_yticks([])
             try:
@@ -703,7 +703,7 @@ class CrystallinityPanel(ctk.CTkFrame):
         # PNG
         fig, ax = matplotlib.pyplot.subplots(figsize=(7, 6))
         im = ax.imshow(self._cryst_map, cmap="viridis",
-                          interpolation="nearest", aspect="auto")
+                          interpolation="nearest", aspect="equal")
         ax.set_title(f"crystallinity ratio map  "
                        f"(q = {self._r_min.get():.3g}–"
                        f"{self._r_max.get():.3g} 1/Å)",
