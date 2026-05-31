@@ -598,9 +598,13 @@ class ACOMTabPanel(ctk.CTkFrame):
                 try:
                     dpm, dpu = self._compute_dp_max_mean(sample)
                 except Exception as e:
+                    import traceback
+                    tb = traceback.format_exc()
+                    print(f"[acom dp] FAILED:\n{tb}", flush=True)
                     err = repr(e)
                     self.after(0, lambda: messagebox.showerror(
-                        "dp_max/dp_mean", err))
+                        "dp_max/dp_mean",
+                        f"{err}\n(traceback in console)"))
                     return
                 pat = dpm if src == "dp_max" else dpu
                 self._test_pattern = pat.astype(np.float32)
@@ -610,8 +614,16 @@ class ACOMTabPanel(ctk.CTkFrame):
                                       f"sample={sample}")
                 def _done():
                     self._source_status.configure(
-                        text=f"loaded: {self._test_origin}")
-                    self._detect_and_redraw()
+                        text=f"loaded: {self._test_origin}  "
+                              f"max={float(pat.max()):.0f}")
+                    try:
+                        self._detect_and_redraw()
+                    except Exception as e:
+                        import traceback
+                        print(f"[acom dp redraw] FAILED:\n"
+                                f"{traceback.format_exc()}", flush=True)
+                        self._source_status.configure(
+                            text=f"loaded but redraw failed: {e!r}")
                 self.after(0, _done)
             threading.Thread(target=_w, daemon=True).start()
             self._source_status.configure(
