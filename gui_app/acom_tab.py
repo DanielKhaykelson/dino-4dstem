@@ -1642,12 +1642,21 @@ class ACOMTabPanel(ctk.CTkFrame):
                 self.after(0, lambda: messagebox.showinfo(
                     "Batch", "no patterns")); return
 
+            # Progress callback shared by both batch paths.
+            def _bprog(done, total, stage):
+                self.after(0, lambda: self._set_status(
+                    f"{mode}: {stage} {done}/{total}  "
+                    f"({time.time()-t0:.0f}s)"))
+            self.after(0, lambda: self._set_status(
+                f"{mode}: detecting peaks on {len(patterns)} "
+                f"patterns…"))
+
             if mode in ("classes", "grains"):
                 phase_name = next(iter(crystals.keys()))
                 cr = crystals[phase_name]
                 results, omap, bv = acom_batch(
                     cr, patterns, inv_ang_per_pixel=inv_a,
-                    detect_kw=detect_kw)
+                    detect_kw=detect_kw, progress_cb=_bprog)
                 zas = []
                 for r in results:
                     za, mis = zone_axis_from_matrix(r["rotation_matrix"])
@@ -1658,7 +1667,8 @@ class ACOMTabPanel(ctk.CTkFrame):
             else:
                 mp = acom_multiphase_batch(
                     crystals, patterns, inv_ang_per_pixel=inv_a,
-                    detect_kw=detect_kw, threshold=thr, margin=mar)
+                    detect_kw=detect_kw, threshold=thr, margin=mar,
+                    progress_cb=_bprog)
                 # Phase-colored grain/class MAP (the spatial view the
                 # user asked for): same shape as the class map but
                 # painted by phase.

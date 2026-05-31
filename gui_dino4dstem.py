@@ -57,7 +57,34 @@ def _patch_ctk_resize_guard():
         print(f"[ctk-guard] could not patch: {_e!r}", flush=True)
 
 
+def _patch_ctk_entry_empty_guard():
+    """Global fix for CTkEntry bound to IntVar/DoubleVar.
+
+    When the user clears such an entry to retype, CTk's
+    `_textvariable_callback` does `self._textvariable.get() == ""`,
+    but IntVar/DoubleVar.get() raises TclError on an empty string
+    instead of returning "".  Wrap the callback to swallow that
+    TclError (the field is mid-edit; nothing to do).
+    """
+    try:
+        import tkinter as _tk
+        from customtkinter.windows.widgets import ctk_entry as _ce
+        orig = _ce.CTkEntry._textvariable_callback
+        if getattr(orig, "_empty_guarded", False):
+            return
+        def inner(self, *a, **k):
+            try:
+                return orig(self, *a, **k)
+            except _tk.TclError:
+                return None       # entry is empty mid-edit; ignore
+        inner._empty_guarded = True
+        _ce.CTkEntry._textvariable_callback = inner
+    except Exception as _e:
+        print(f"[ctk-guard] entry patch failed: {_e!r}", flush=True)
+
+
 _patch_ctk_resize_guard()
+_patch_ctk_entry_empty_guard()
 
 from gui_app.pre_panel import PrePanel
 from gui_app.train_panel import TrainPanel

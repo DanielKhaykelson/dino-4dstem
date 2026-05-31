@@ -744,6 +744,7 @@ def acom_multiphase_batch(crystals_by_name,
                               detect_kw: Optional[dict] = None,
                               threshold: float = 0.0,
                               margin: float = 0.0,
+                              progress_cb=None,
                               ):
     """Multi-phase ACOM on a list of independent patterns (class avgs,
     grain avgs).  Same return contract as the full-dataset version but
@@ -764,6 +765,12 @@ def acom_multiphase_batch(crystals_by_name,
         peaks = detect_peaks_2d(pat, probe_kernel=probe_kernel,
                                    **detect_kw)
         peaks_all.append(peaks); centers_all.append(c)
+        if progress_cb is not None:
+            try: progress_cb(k + 1, N, "detect")
+            except Exception: pass
+    if progress_cb is not None:
+        try: progress_cb(N, N, "match")
+        except Exception: pass
     bv = build_bragg_vectors(peaks_all, centers=centers_all,
                                   inv_ang_per_pixel=inv_ang_per_pixel,
                                   Rshape=(N, 1))
