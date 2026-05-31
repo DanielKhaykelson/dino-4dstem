@@ -1601,11 +1601,19 @@ class ACOMTabPanel(ctk.CTkFrame):
                             self._set_status(f"{mode} {s}…"))
 
                 if mode == "full":
+                    from gui_app.acom_core import build_bragg_vectors
                     cr = next(iter(crystals.values()))
-                    omap, bv, scan_shape = acom_full_dataset(
-                        cr, cube, inv_ang_per_pixel=inv_a,
-                        detect_kw=detect_kw,
-                        subsample_stride=stride, progress_cb=_prog)
+                    Ny, Nx = cube.shape[:2]
+                    # Cached detection (skips on rerun) → match only.
+                    peaks_all, centers_all = self._detect_full_cached(
+                        cube, stride, detect_kw, _prog)
+                    bv = build_bragg_vectors(
+                        peaks_all, centers=centers_all,
+                        inv_ang_per_pixel=inv_a, Rshape=(Ny, Nx))
+                    self._set_status("matching orientations…")
+                    cr.match_orientations(bv, progress_bar=False)
+                    omap = cr.orientation_map
+                    scan_shape = (Ny, Nx)
                     dt = time.time() - t0
                     self.after(0, lambda:
                         self._render_classical_orientation_strain(
@@ -1732,21 +1740,20 @@ class ACOMTabPanel(ctk.CTkFrame):
         return [base[i % len(base)] for i in range(n)]
 
     # -- NNLS full-dataset (mirrors notebook's quantify_phase) -------
-    def _run_nnls_full_dataset(self, cube, stride, detect_kw,
-                                    progress_cb):
-        """Detect → build BV → match_orientations per phase →
-        CrystalPhase.quantify_phase NNLS over all (Ny, Nx).  Returns
-        the fitted CrystalPhase object."""
-        from gui_app.acom_core import (detect_peaks_2d,
-                                            build_bragg_vectors)
-        from py4DSTEM.process.diffraction.crystal_phase import (
-            CrystalPhase)
+    def _detect_full_cached(self, cube, stride, detect_kw,
+                                 progress_cb):
+        """Full-dataset peak detection with on-disk caching.
+
+        Cache key = run + stride + detect params (NOT the CIF), so
+        changing CIF / k_max / phase set and re-running reuses the
+        peaks and skips straight to matching — 'rerun only the fit'.
+        Returns (peaks_all, centers_all).
+        """
+        from gui_app.acom_core import detect_peaks_2d
+        import json, hashlib
         cube = np.asarray(cube) if not hasattr(cube, "shape") else cube
         Ny, Nx, H, W = cube.shape
         center = (H / 2.0, W / 2.0)
-        # Peak cache: keyed by run + stride + detect params.  Loading
-        # a cache skips the (slow) full-dataset blob detection.
-        import json, hashlib
         ph = self._posthoc()
         run = getattr(ph, "outdir", None) if ph else None
         cache_path = None
@@ -1761,49 +1768,57 @@ class ACOMTabPanel(ctk.CTkFrame):
                 d = np.load(cache_path, allow_pickle=True)
                 peaks_all = [np.asarray(a, dtype=float)
                                 for a in d["peaks"]]
-                centers_all = [center] * (Ny * Nx)
                 if progress_cb is not None:
                     progress_cb(Ny * Nx, Ny * Nx, "detect (cached)")
                 self._set_status(
-                    f"loaded cached peaks: {os.path.basename(cache_path)}")
+                    f"✓ loaded cached peaks "
+                    f"({os.path.basename(cache_path)}) — skipping "
+                    f"detection, matching only")
+                return peaks_all, [center] * (Ny * Nx)
             except Exception:
-                peaks_all = None
-        else:
-            peaks_all = None
-        if peaks_all is None:
-            peaks_all, centers_all = [], []
-            total = Ny * Nx
-            done = 0
-            for rx in range(Ny):
-                if self._stop_event.is_set():
-                    raise RuntimeError("stopped by user (during detection)")
-                for ry in range(Nx):
-                    done += 1
-                    if (rx % stride) or (ry % stride):
-                        peaks_all.append(np.zeros((0, 3), dtype=float))
-                        centers_all.append(center); continue
-                    try:
-                        pat = np.asarray(cube[rx, ry], dtype=np.float32)
-                    except Exception:
-                        peaks_all.append(np.zeros((0, 3), dtype=float))
-                        centers_all.append(center); continue
-                    peaks_all.append(
-                        detect_peaks_2d(pat, **detect_kw))
-                    centers_all.append(center)
-                    if progress_cb is not None and (done % 256 == 0):
-                        progress_cb(done, total, "detect")
-            # Save the cache for next time.
-            if cache_path:
+                pass
+        peaks_all, centers_all = [], []
+        total = Ny * Nx; done = 0
+        for rx in range(Ny):
+            if self._stop_event.is_set():
+                raise RuntimeError("stopped by user (during detection)")
+            for ry in range(Nx):
+                done += 1
+                if (rx % stride) or (ry % stride):
+                    peaks_all.append(np.zeros((0, 3), dtype=float))
+                    centers_all.append(center); continue
                 try:
-                    os.makedirs(os.path.dirname(cache_path),
-                                  exist_ok=True)
-                    np.savez_compressed(
-                        cache_path,
-                        peaks=np.array(peaks_all, dtype=object))
-                    self._set_status(
-                        f"peaks cached → {os.path.basename(cache_path)}")
-                except Exception as e:
-                    print(f"[acom] peak cache save: {e!r}", flush=True)
+                    pat = np.asarray(cube[rx, ry], dtype=np.float32)
+                except Exception:
+                    peaks_all.append(np.zeros((0, 3), dtype=float))
+                    centers_all.append(center); continue
+                peaks_all.append(detect_peaks_2d(pat, **detect_kw))
+                centers_all.append(center)
+                if progress_cb is not None and (done % 256 == 0):
+                    progress_cb(done, total, "detect")
+        if cache_path:
+            try:
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                np.savez_compressed(
+                    cache_path, peaks=np.array(peaks_all, dtype=object))
+                self._set_status(
+                    f"peaks cached → {os.path.basename(cache_path)}")
+            except Exception as e:
+                print(f"[acom] peak cache save: {e!r}", flush=True)
+        return peaks_all, centers_all
+
+    def _run_nnls_full_dataset(self, cube, stride, detect_kw,
+                                    progress_cb):
+        """Detect → build BV → match_orientations per phase →
+        CrystalPhase.quantify_phase NNLS over all (Ny, Nx).  Returns
+        the fitted CrystalPhase object."""
+        from gui_app.acom_core import build_bragg_vectors
+        from py4DSTEM.process.diffraction.crystal_phase import (
+            CrystalPhase)
+        cube = np.asarray(cube) if not hasattr(cube, "shape") else cube
+        Ny, Nx, H, W = cube.shape
+        peaks_all, centers_all = self._detect_full_cached(
+            cube, stride, detect_kw, progress_cb)
         bv = build_bragg_vectors(
             peaks_all, centers=centers_all,
             inv_ang_per_pixel=float(self._inv_ang.get()),
@@ -2011,9 +2026,17 @@ class ACOMTabPanel(ctk.CTkFrame):
                               ha="center", va="center", fontsize=9,
                               color="#a33", transform=ax_rot.transAxes)
         if delta is not None:
+            # Wrap relative rotation into [-180, 180) — the raw
+            # in-plane Euler angle is modulo 360, so a naive
+            # subtract-median leaves ±300° artefacts.
+            delta = (delta + 180.0) % 360.0 - 180.0
             finite = delta[np.isfinite(delta)]
-            vmax = (float(max(np.percentile(np.abs(finite), 95), 0.5))
-                      if finite.size else 5.0)
+            # Robust symmetric range (98th pct), capped at 90° since
+            # larger "rotations" are almost always indexing ambiguity,
+            # not real lattice rotation.
+            vmax = (float(np.percentile(np.abs(finite), 98))
+                      if finite.size else 30.0)
+            vmax = float(min(max(vmax, 2.0), 90.0))
             im = ax_rot.imshow(delta, cmap="RdBu_r",
                                   vmin=-vmax, vmax=vmax,
                                   interpolation="nearest", aspect="equal")
