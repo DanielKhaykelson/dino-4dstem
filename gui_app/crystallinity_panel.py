@@ -228,11 +228,15 @@ class CrystallinityPanel(ctk.CTkFrame):
               "Sets the q-range where peak/background ratio is "
               "computed.  Sliders re-tune in real-time.  Default = "
               "first-3rd ring band.")
-        max_q_default = 96 * (self._recip_per_px() * 0.1 or 0.00185)
-        self._r_min = ctk.DoubleVar(value=max(max_q_default * 0.15,
-                                                     0.05))
+        # Slider range is updated dynamically from the loaded pattern's
+        # half-size × calibration (see _update_r_slider_range).  Start
+        # from a 256-px-radius guess (512 detector) so it isn't tiny.
+        max_q_default = 256 * (self._recip_per_px() * 0.1 or 0.00185)
+        self._r_min = ctk.DoubleVar(value=max(max_q_default * 0.10,
+                                                     0.02))
         self._r_max = ctk.DoubleVar(value=max(max_q_default * 0.60,
                                                      0.2))
+        self._r_sliders = []
         for label, var in (("r_min", self._r_min),
                               ("r_max", self._r_max)):
             row = ctk.CTkFrame(sidebar, fg_color="transparent")
@@ -246,6 +250,7 @@ class CrystallinityPanel(ctk.CTkFrame):
                                   variable=var, width=120,
                                   command=lambda _v: self._recompute_test())
             sl.pack(side="left", padx=4)
+            self._r_sliders.append(sl)
 
         # 4. DETECTION params
         _section_header(sidebar, "4.  Peak detection")
@@ -293,6 +298,10 @@ class CrystallinityPanel(ctk.CTkFrame):
                        width=240,
                        fg_color=("#2D7A2D", "#1F7A1F"),
                        command=self._run_full_dataset
+                       ).pack(anchor="w", padx=10, pady=2)
+        ctk.CTkButton(sidebar, text="Per-cluster ratios  (bar chart)",
+                       width=240,
+                       command=self._render_per_cluster
                        ).pack(anchor="w", padx=10, pady=2)
         ctk.CTkButton(sidebar, text="Save map  (npy + png)",
                        width=240,
@@ -434,9 +443,32 @@ class CrystallinityPanel(ctk.CTkFrame):
         self._test_polar = cart_to_polar(self._test_pattern,
                                               n_theta=192,
                                               center=self._test_center)
+        self._update_r_slider_range()
         self._test_status.configure(
             text=f"loaded: {origin}  ({H}×{W})")
         self._recompute_test()
+
+    def _update_r_slider_range(self):
+        """Set r-slider max to the loaded pattern's max radius × calib
+        (1/Å).  Fixes the old hardcoded 0.2 cap which assumed a 192-px
+        pattern; raw patterns are often 512 so q extends ~2.5× further."""
+        if self._test_pattern is None:
+            return
+        H, W = self._test_pattern.shape
+        r_max_px = float(min(H, W)) / 2.0          # corner-safe radius
+        q_max = r_max_px * self._inv_ang_per_px()
+        if q_max <= 0:
+            return
+        for sl in getattr(self, "_r_sliders", []):
+            try: sl.configure(to=q_max)
+            except Exception: pass
+        # If current r_max is below ~half the new range, open it up so
+        # the user sees the full q-span by default.
+        try:
+            if float(self._r_max.get()) < q_max * 0.3:
+                self._r_max.set(round(q_max * 0.6, 4))
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     def _recompute_test(self):
@@ -679,6 +711,9 @@ class CrystallinityPanel(ctk.CTkFrame):
                       f"{np.nanmedian(cmap):.3f} / "
                       f"{np.nanmax(cmap):.3f}"))
             self.after(0, self._render_test_panels)
+            # If a trained run is linked, also aggregate the ratio
+            # per DINO cluster and show a bar chart.
+            self.after(0, self._render_per_cluster)
         except Exception as e:
             err = repr(e)
             self.after(0, lambda: messagebox.showerror(
@@ -687,6 +722,74 @@ class CrystallinityPanel(ctk.CTkFrame):
             self._busy = False
 
     # ------------------------------------------------------------------
+    def _render_per_cluster(self):
+        """Aggregate the crystallinity ratio per DINO cluster and show
+        a bar chart (mean ± IQR) + a table.  Needs the ratio map + the
+        posthoc inference (class assignments)."""
+        if self._cryst_map is None:
+            messagebox.showinfo("Per-cluster",
+                "Run the full dataset first."); return
+        ph = self._posthoc()
+        if ph is None or getattr(ph, "_inf", None) is None:
+            messagebox.showinfo("Per-cluster",
+                "Per-cluster needs a trained run (DINO class map). "
+                "Load one via the topbar 'run' badge."); return
+        Ny, Nx = ph._scan_shape
+        assigns = np.asarray(ph._inf["assigns"]).reshape(Ny, Nx)
+        K = int(ph._inf["soft_probs"].shape[1])
+        ratio = self._cryst_map
+        rows, means, meds, q1s, q3s, ns, ks = [], [], [], [], [], [], []
+        for c in range(K):
+            vals = ratio[(assigns == c) & np.isfinite(ratio)]
+            if vals.size == 0:
+                continue
+            ks.append(c); ns.append(int(vals.size))
+            means.append(float(np.mean(vals)))
+            meds.append(float(np.median(vals)))
+            q1s.append(float(np.percentile(vals, 25)))
+            q3s.append(float(np.percentile(vals, 75)))
+        if not ks:
+            messagebox.showinfo("Per-cluster",
+                "No overlap between ratio map and class map."); return
+        # Sort by median ratio (most crystalline first).
+        order = np.argsort(-np.asarray(meds))
+        ks = [ks[i] for i in order]; means = [means[i] for i in order]
+        meds = [meds[i] for i in order]; ns = [ns[i] for i in order]
+        q1s = [q1s[i] for i in order]; q3s = [q3s[i] for i in order]
+        # Bar chart in its own popup window.
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_tkagg import (
+            FigureCanvasTkAgg, NavigationToolbar2Tk)
+        win = tk.Toplevel(self)
+        win.title("crystallinity ratio per DINO cluster")
+        win.geometry("780x520")
+        fig = Figure(figsize=(7.6, 5.0), dpi=110, facecolor="white")
+        ax = fig.add_subplot(111)
+        x = np.arange(len(ks))
+        yerr = [np.array(meds) - np.array(q1s),
+                np.array(q3s) - np.array(meds)]
+        cmap = plt.get_cmap("tab10" if K <= 10 else "tab20")
+        cols = [cmap(c % (10 if K <= 10 else 20)) for c in ks]
+        ax.bar(x, meds, yerr=yerr, capsize=3, color=cols,
+                  edgecolor="#333", linewidth=0.6)
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"p{c}\n{n}px" for c, n in zip(ks, ns)],
+                              fontsize=8)
+        ax.set_ylabel("peak/background ratio  (median ± IQR)")
+        ax.set_title(
+            f"crystallinity per cluster  "
+            f"(q = {self._r_min.get():.3g}–{self._r_max.get():.3g} 1/Å)  "
+            f"·  higher = more crystalline", fontsize=10)
+        ax.grid(axis="y", alpha=0.3)
+        fig.tight_layout()
+        c = FigureCanvasTkAgg(fig, master=win)
+        c.get_tk_widget().pack(fill="both", expand=True)
+        tb = NavigationToolbar2Tk(c, win, pack_toolbar=False)
+        tb.update(); tb.pack(side="bottom", fill="x")
+        self._full_status.configure(
+            text=f"per-cluster ratios computed for {len(ks)} classes "
+                  f"(median range {min(meds):.3f}–{max(meds):.3f})")
+
     def _save_map(self):
         if self._cryst_map is None:
             messagebox.showinfo("Save",
