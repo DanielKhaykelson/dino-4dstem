@@ -1208,7 +1208,16 @@ class ACOMTabPanel(ctk.CTkFrame):
         names = list(self._phase_crystals.keys())
         crystals = list(self._phase_crystals.values())
         for cr in crystals:
-            cr.match_orientations(bv, progress_bar=False)
+            try:
+                cr.match_orientations(bv, progress_bar=False)
+            except Exception as e:
+                # Degenerate pattern → match_orientations argmin
+                # crash.  Fall back to per-pattern; leaves an empty
+                # orientation_map slot that quantify handles.
+                print(f"[NNLS] match_orientations fallback: {e!r}",
+                      flush=True)
+                from gui_app.acom_core import _match_safe
+                _match_safe(cr, bv, Rshape[0] * Rshape[1])
         cp = CrystalPhase(crystals, crystal_names=names)
         return cp, bv
 
@@ -1262,9 +1271,13 @@ class ACOMTabPanel(ctk.CTkFrame):
                         names, per_phase, float(pr),
                         float(prel), fig_pt))
             except Exception as e:
+                import traceback
+                tb = traceback.format_exc()
+                print(f"[NNLS fit] FAILED:\n{tb}", flush=True)
                 err = repr(e)
                 self.after(0, lambda: messagebox.showerror(
-                    "NNLS fit", err))
+                    "NNLS fit",
+                    f"{err}\n\n(full traceback in console)"))
                 self.after(0, lambda: self._match_status.configure(
                     text=f"NNLS fit failed: {err[:120]}"))
         threading.Thread(target=_w, daemon=True).start()
