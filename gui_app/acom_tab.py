@@ -1905,70 +1905,102 @@ class ACOMTabPanel(ctk.CTkFrame):
         import io
         from matplotlib.image import imread
         try:
+            # py4DSTEM returns (images_orientation, fig, ax) when
+            # returnfig=True — the fig is element [1], not [0]
+            # ([0] is the RGB image array).  Default corr_range is
+            # [0,5]; keep it permissive.
             res = crystal.plot_orientation_maps(
                 orientation_map=omap, orientation_ind=0,
-                corr_range=[0.0, 1.0], figsize=(6, 6),
-                returnfig=True)
-            ofig = res[0] if isinstance(res, (tuple, list)) else res
+                figsize=(12, 4), returnfig=True, progress_bar=False)
+            ofig = None
+            if isinstance(res, (tuple, list)):
+                for el in res:
+                    if hasattr(el, "savefig"):
+                        ofig = el; break
+            elif hasattr(res, "savefig"):
+                ofig = res
+            if ofig is None:
+                raise RuntimeError("no figure handle in return")
             buf = io.BytesIO()
             ofig.savefig(buf, format="png", dpi=130,
                             bbox_inches="tight", facecolor="white")
             plt.close(ofig); buf.seek(0)
             ax_ipf.imshow(imread(buf), aspect="auto")
-            ax_ipf.set_title("orientation (IPF)", fontsize=11)
+            ax_ipf.set_title("orientation (IPF + legend)", fontsize=11)
         except Exception as e:
             ax_ipf.text(0.5, 0.5, f"orientation map\nunavailable:\n{e!r}",
                           ha="center", va="center", fontsize=9,
                           color="#a33", transform=ax_ipf.transAxes)
         ax_ipf.set_xticks([]); ax_ipf.set_yticks([])
 
-        # --- (2) relative-rotation map from calculate_strain ---
+        # --- (2) relative in-plane rotation map ---
+        # First try py4DSTEM's calculate_strain (full strain tensor).
+        # It does an SVD fit that can fail ('SVD did not converge')
+        # on sparse/noisy data — fall back to the in-plane rotation
+        # angle read straight off the orientation map, which always
+        # works and gives the same relative-rotation picture.
+        delta = None; rot_title = "relative rotation"
         try:
             strain = crystal.calculate_strain(
-                bv, omap, min_num_peaks=3,
-                rotation_range=np.pi / 2)
-            # strain[3] = rotation (rad); strain[4] = correlation mask
+                bv, omap, min_num_peaks=3, rotation_range=np.pi / 2)
             rot_deg = np.degrees(np.asarray(strain[3], dtype=float))
-            corr_mask_raw = np.asarray(strain[4], dtype=float)
-            # Correlation filter (notebook uses 0.3–1.0).
-            mask = np.isfinite(rot_deg) & (corr_mask_raw >= 0.3)
+            cmask = np.asarray(strain[4], dtype=float)
+            mask = np.isfinite(rot_deg) & (cmask >= 0.3)
             delta = np.full_like(rot_deg, np.nan)
             if mask.any():
-                ref = np.nanmedian(rot_deg[mask])
-                delta[mask] = rot_deg[mask] - ref
-                # Robust symmetric range (5–95 pct of |Δθ|).
-                finite = delta[np.isfinite(delta)]
-                vmax = (np.percentile(np.abs(finite), 95)
-                          if finite.size else 5.0)
-                vmax = float(max(vmax, 0.5))
-            else:
-                vmax = 5.0
+                delta[mask] = rot_deg[mask] - np.nanmedian(rot_deg[mask])
+            rot_title = "relative rotation (strain fit)"
+        except Exception as e:
+            print(f"[acom] calculate_strain failed ({e!r}); "
+                    f"falling back to orientation in-plane angle.",
+                    flush=True)
+            try:
+                ang = np.asarray(getattr(omap, "angles", None),
+                                    dtype=float)
+                cv = np.asarray(getattr(omap, "corr", None), dtype=float)
+                # angles: (Ny, Nx, n_matches, 3) Euler (Bunge); the
+                # 3rd (gamma) is the in-plane rotation about beam.
+                if ang.ndim == 4:
+                    rot_deg = np.degrees(ang[:, :, 0, 2])
+                    cm = (cv[..., 0] if cv.ndim == 3 else cv)
+                else:
+                    rot_deg = np.degrees(ang.reshape(Ny, Nx))
+                    cm = np.ones_like(rot_deg)
+                mask = np.isfinite(rot_deg) & (cm >= 0.0)
+                delta = np.full_like(rot_deg, np.nan)
+                if mask.any():
+                    delta[mask] = (rot_deg[mask]
+                                     - np.nanmedian(rot_deg[mask]))
+                rot_title = "relative in-plane rotation (from ZA fit)"
+            except Exception as e2:
+                ax_rot.text(0.5, 0.5,
+                              f"rotation map unavailable:\n{e2!r}",
+                              ha="center", va="center", fontsize=9,
+                              color="#a33", transform=ax_rot.transAxes)
+        if delta is not None:
+            finite = delta[np.isfinite(delta)]
+            vmax = (float(max(np.percentile(np.abs(finite), 95), 0.5))
+                      if finite.size else 5.0)
             im = ax_rot.imshow(delta, cmap="RdBu_r",
                                   vmin=-vmax, vmax=vmax,
                                   interpolation="nearest", aspect="equal")
             cb = self._fig.colorbar(im, ax=ax_rot, fraction=0.045,
                                        pad=0.02)
             cb.set_label("Δθ  (deg, rel. median)", fontsize=9)
-            ax_rot.set_title("relative rotation", fontsize=11)
-            # nm scalebar from topbar real_res.
+            ax_rot.set_title(rot_title, fontsize=11)
             try:
                 nm_per_px = (float(self.app.real_res.get())
                                if self.app else 0.0)
                 if nm_per_px > 0:
                     bar_nm = 50.0
                     sb = AnchoredSizeBar(
-                        ax_rot.transData,
-                        bar_nm / nm_per_px, f"{bar_nm:.0f} nm",
-                        "lower right", pad=0.4, color="black",
-                        frameon=False, size_vertical=max(Ny * 0.01, 1))
+                        ax_rot.transData, bar_nm / nm_per_px,
+                        f"{bar_nm:.0f} nm", "lower right", pad=0.4,
+                        color="black", frameon=False,
+                        size_vertical=max(Ny * 0.01, 1))
                     ax_rot.add_artist(sb)
             except Exception:
                 pass
-        except Exception as e:
-            ax_rot.text(0.5, 0.5,
-                          f"strain map\nunavailable:\n{e!r}",
-                          ha="center", va="center", fontsize=9,
-                          color="#a33", transform=ax_rot.transAxes)
         ax_rot.set_xticks([]); ax_rot.set_yticks([])
 
         self._fig.suptitle(
