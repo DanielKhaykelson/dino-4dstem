@@ -1553,10 +1553,67 @@ class ACOMTabPanel(ctk.CTkFrame):
                 "You haven't validated a source yet (step 1).  "
                 "Continue anyway?"):
                 return
+        # Cache prompt (full-dataset modes only): if a peak cache for
+        # the current (stride, detection params) already exists, ask
+        # whether to reuse it (skip detection) or re-detect.  Decided
+        # on the MAIN thread here; the worker honours the flag.
+        self._use_cached_peaks = True
+        if mode in ("full", "mp_full"):
+            try:
+                stride = max(int(self._full_stride.get()), 1)
+                detect_kw = self._detect_kw_now()
+                cp = self._peak_cache_path(stride, detect_kw)
+                if cp and os.path.exists(cp):
+                    info = self._peak_cache_info(cp)
+                    use = messagebox.askyesno(
+                        "Cached peaks found",
+                        f"A peak cache matching the current stride + "
+                        f"detection params exists:\n\n"
+                        f"  {os.path.basename(cp)}\n  {info}\n\n"
+                        f"USE the cached peaks (Yes) and skip "
+                        f"detection — only re-run the orientation "
+                        f"matching?\n\n"
+                        f"Choose No to re-detect peaks from scratch.")
+                    self._use_cached_peaks = bool(use)
+            except Exception as e:
+                print(f"[acom] cache prompt skipped: {e!r}",
+                      flush=True)
         self._stop_event.clear()        # arm a fresh run
         threading.Thread(
             target=lambda: self._batch_worker(mode),
             daemon=True).start()
+
+    def _detect_kw_now(self):
+        return dict(
+            min_sigma=float(self._det_min.get()),
+            max_sigma=float(self._det_max.get()),
+            num_sigma=int(self._det_num.get()),
+            threshold=float(self._det_thr.get()),
+            log_stretch=bool(self._det_log.get()))
+
+    def _peak_cache_path(self, stride, detect_kw):
+        """Path of the peak cache for (run, stride, detect params).
+        Independent of CIF/phase so any phase run reuses it."""
+        import json, hashlib
+        ph = self._posthoc()
+        run = getattr(ph, "outdir", None) if ph else None
+        if not run or ph._scan_shape is None:
+            return None
+        Ny, Nx = ph._scan_shape
+        kh = hashlib.md5(json.dumps(
+            {"stride": stride, "kw": detect_kw, "shape": [Ny, Nx]},
+            sort_keys=True, default=str).encode()).hexdigest()[:10]
+        return os.path.join(run, "acom", f"peaks_full_{kh}.npz")
+
+    def _peak_cache_info(self, path):
+        try:
+            import datetime
+            mt = datetime.datetime.fromtimestamp(
+                os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M")
+            mb = os.path.getsize(path) / 1e6
+            return f"saved {mt}  ·  {mb:.1f} MB"
+        except Exception:
+            return ""
 
     def _batch_worker(self, mode):
         from scipy.ndimage import label
@@ -1763,7 +1820,10 @@ class ACOMTabPanel(ctk.CTkFrame):
                 sort_keys=True, default=str).encode()).hexdigest()[:10]
             cache_path = os.path.join(run, "acom",
                                           f"peaks_full_{kh}.npz")
-        if cache_path and os.path.exists(cache_path):
+        # Honour the user's cache decision made in _run_batch
+        # (defaults to True for any direct caller).
+        use_cache = getattr(self, "_use_cached_peaks", True)
+        if use_cache and cache_path and os.path.exists(cache_path):
             try:
                 d = np.load(cache_path, allow_pickle=True)
                 peaks_all = [np.asarray(a, dtype=float)
