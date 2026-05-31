@@ -421,6 +421,40 @@ class ACOMTabPanel(ctk.CTkFrame):
                        command=self._stop_batch_run
                        ).pack(anchor="w", padx=10, pady=2)
 
+        # ── Overlay (on the last full-dataset result) ────────────────
+        _section_header(sidebar, "6.  Overlay a label map")
+        _hint(sidebar,
+            "Overlay the DINO class map / NMF clustering / "
+            "DINO+cluster on the last full-dataset ACOM result, to "
+            "compare crystallographic structure with the learned "
+            "classes.")
+        ov_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        ov_row.pack(fill="x", padx=10, pady=1)
+        self._overlay_src = ctk.StringVar(value="DINO class map")
+        ctk.CTkOptionMenu(ov_row, variable=self._overlay_src,
+            values=["DINO class map",
+                       "NMF-KMeans", "NMF-Aglo",
+                       "NMF-HDBSCAN", "NMF-FCM",
+                       "DINO+cluster"],
+            width=160).pack(side="left", padx=2)
+        self._overlay_mode = ctk.StringVar(value="contour")
+        ctk.CTkOptionMenu(ov_row, variable=self._overlay_mode,
+            values=["contour", "side-by-side"],
+            width=120).pack(side="left", padx=2)
+        ov_base = ctk.CTkFrame(sidebar, fg_color="transparent")
+        ov_base.pack(fill="x", padx=10, pady=1)
+        ctk.CTkLabel(ov_base, text="onto:", width=44,
+                       anchor="w").pack(side="left")
+        self._overlay_base = ctk.StringVar(value="phase")
+        ctk.CTkOptionMenu(ov_base, variable=self._overlay_base,
+            values=["phase", "zone-axis", "correlation"],
+            width=130).pack(side="left", padx=2)
+        ctk.CTkButton(sidebar, text="Overlay ▶",
+                       width=240,
+                       fg_color=("#4D6FB0", "#3A5380"),
+                       command=self._do_overlay
+                       ).pack(anchor="w", padx=10, pady=2)
+
         self._status = ctk.CTkLabel(sidebar, text="",
             font=("Consolas", 9), text_color=("#444", "#aaa"),
             wraplength=290, justify="left", anchor="w")
@@ -1744,6 +1778,7 @@ class ACOMTabPanel(ctk.CTkFrame):
         # whether to reuse it (skip detection) or re-detect.  Decided
         # on the MAIN thread here; the worker honours the flag.
         self._use_cached_peaks = True
+        self._peaks_load_path = None
         if mode in ("full", "mp_full"):
             try:
                 stride = max(int(self._full_stride.get()), 1)
@@ -1761,6 +1796,25 @@ class ACOMTabPanel(ctk.CTkFrame):
                         f"matching?\n\n"
                         f"Choose No to re-detect peaks from scratch.")
                     self._use_cached_peaks = bool(use)
+                else:
+                    # No cache for these params.  Offer: re-detect, or
+                    # load a saved peaks .npz from a path.
+                    rerun = messagebox.askyesno(
+                        "No peak cache",
+                        "No saved peaks match the current stride + "
+                        "detection params.\n\n"
+                        "Yes  → detect peaks now (saved for reuse).\n"
+                        "No   → load a previously-saved peaks file "
+                        "(.npz) from disk.")
+                    if not rerun:
+                        from tkinter import filedialog
+                        p = filedialog.askopenfilename(
+                            title="Load saved peaks (.npz)",
+                            filetypes=[("peaks npz", "*.npz"),
+                                         ("All", "*.*")])
+                        if not p:
+                            return     # cancelled
+                        self._peaks_load_path = p
             except Exception as e:
                 print(f"[acom] cache prompt skipped: {e!r}",
                       flush=True)
@@ -1890,18 +1944,18 @@ class ACOMTabPanel(ctk.CTkFrame):
                         self._render_classical_orientation_strain(
                             cr, omap, bv, scan_shape, stride, dt))
                 else:
-                    # Mirror the notebook: build PointListArray over
-                    # the full cube → match_orientations per phase →
-                    # CrystalPhase.quantify_phase (NNLS fit at every
-                    # position) → plot_dominant_phase.
+                    # Multi-phase full: detect (cached) → match each
+                    # phase → combine into phase / zone-axis / corr,
+                    # then render THREE separate full-size images.
                     self._set_status(
-                        f"NNLS full-dataset: detecting peaks "
+                        f"Multi-phase full: detecting peaks "
                         f"(stride={stride})…")
-                    cp = self._run_nnls_full_dataset(
-                        cube, stride, detect_kw, _prog)
+                    res = self._run_mp_full_cached(
+                        cube, stride, detect_kw, inv_a, thr, mar,
+                        crystals, _prog)
                     dt = time.time() - t0
-                    self.after(0, lambda: self._render_nnls_full_map(
-                        cp, stride, dt))
+                    self.after(0, lambda: self._render_mp_full_three(
+                        res, stride, dt))
                 self.after(0, lambda: self._set_status(
                     f"{mode} done ({dt:.0f}s)."))
                 return
@@ -2025,6 +2079,22 @@ class ACOMTabPanel(ctk.CTkFrame):
         Ny, Nx, H, W = cube.shape
         center = (H / 2.0, W / 2.0)
         cache_path = self._peak_cache_path(stride, detect_kw)
+        # User asked to load peaks from an explicit path.
+        load_path = getattr(self, "_peaks_load_path", None)
+        if load_path and os.path.exists(load_path):
+            try:
+                d = np.load(load_path, allow_pickle=True)
+                peaks_all = [np.asarray(a, dtype=float)
+                                for a in d["peaks"]]
+                if progress_cb is not None:
+                    progress_cb(Ny * Nx, Ny * Nx, "detect (loaded)")
+                self._set_status(
+                    f"✓ loaded peaks from {os.path.basename(load_path)}")
+                self._warn_if_sparse(peaks_all, stride)
+                return peaks_all, [center] * (Ny * Nx)
+            except Exception as e:
+                self._set_status(
+                    f"peaks load failed ({e!r}); re-detecting")
         # Honour the user's cache decision made in _run_batch
         # (defaults to True for any direct caller).
         use_cache = getattr(self, "_use_cached_peaks", True)
@@ -2143,6 +2213,290 @@ class ACOMTabPanel(ctk.CTkFrame):
             allow_strain=False,
             progress_bar=False)
         return cp
+
+    # ==================================================================
+    # Multi-phase full dataset: cached detection → per-phase match →
+    # combine → 3 separate images + overlay.
+    # ==================================================================
+    def _run_mp_full_cached(self, cube, stride, detect_kw, inv_a,
+                                 thr, mar, crystals, progress_cb):
+        from gui_app.acom_core import (build_bragg_vectors,
+                                            _match_safe,
+                                            zone_axis_from_matrix)
+        cube = np.asarray(cube) if not hasattr(cube, "shape") else cube
+        Ny, Nx, H, W = cube.shape
+        peaks_all, centers_all = self._detect_full_cached(
+            cube, stride, detect_kw, progress_cb)
+        bv = build_bragg_vectors(peaks_all, centers=centers_all,
+                                      inv_ang_per_pixel=inv_a,
+                                      Rshape=(Ny, Nx))
+        names = list(crystals.keys())
+        N = Ny * Nx
+        corr_per = np.full((len(names), N), -1.0, np.float32)
+        rmat_per = np.full((len(names), N, 3, 3), np.nan, np.float32)
+        for pi, nm in enumerate(names):
+            if self._stop_event.is_set():
+                raise RuntimeError("stopped by user")
+            if progress_cb is not None:
+                progress_cb(0, 1, f"match[{nm}]")
+            cvec, mvec = _match_safe(crystals[nm], bv, N)
+            corr_per[pi] = cvec
+            rmat_per[pi] = mvec
+        # Combine.
+        corr_per_g = corr_per.reshape(len(names), Ny, Nx)
+        rmat_per_g = rmat_per.reshape(len(names), Ny, Nx, 3, 3)
+        order = np.argsort(-corr_per_g, axis=0)
+        top1 = order[0]
+        win_corr = np.take_along_axis(corr_per_g, top1[None], 0)[0]
+        if len(names) >= 2:
+            top2 = order[1]
+            c2 = np.take_along_axis(corr_per_g, top2[None], 0)[0]
+        else:
+            c2 = np.full_like(win_corr, -1.0)
+        phase_id = top1.astype(np.int32)
+        if thr and thr > 0:
+            phase_id[win_corr < thr] = -1
+        if mar and mar > 0:
+            phase_id[(win_corr - c2) < mar] = -2
+        win_rmat = np.full((Ny, Nx, 3, 3), np.nan, np.float32)
+        for pi in range(len(names)):
+            m = phase_id == pi
+            if m.any(): win_rmat[m] = rmat_per_g[pi][m]
+        return dict(phase_names=names, phase_id=phase_id,
+                      winning_corr=win_corr, winning_rmat=win_rmat,
+                      corr_per_phase=corr_per_g, scan_shape=(Ny, Nx))
+
+    def _render_mp_full_three(self, res, stride, elapsed_s):
+        """Build phase / zone-axis / correlation maps, save each as its
+        own PNG, and open each full-size in its own window.  Stash for
+        the overlay."""
+        from gui_app.acom_core import zone_axis_from_matrix
+        from matplotlib.colors import to_rgb
+        import matplotlib.pyplot as plt
+        Ny, Nx = res["scan_shape"]
+        names = res["phase_names"]; n_ph = len(names)
+        phase_id = res["phase_id"]; win_rmat = res["winning_rmat"]
+        win_corr = res["winning_corr"]
+        palette = self._phase_palette(n_ph)
+        NA = (0.55, 0.55, 0.55); AMB = (0.30, 0.30, 0.30)
+
+        phase_rgb = np.zeros((Ny, Nx, 3), np.float32)
+        for pi in range(n_ph):
+            m = phase_id == pi
+            if m.any(): phase_rgb[m] = to_rgb(palette[pi])
+        phase_rgb[phase_id == -1] = NA
+        phase_rgb[phase_id == -2] = AMB
+
+        za_rgb = np.zeros((Ny, Nx, 3), np.float32)
+        za_color = {}; za_count = {}
+        cmap20 = plt.get_cmap("tab20")
+        for rx in range(Ny):
+            for ry in range(Nx):
+                pi = int(phase_id[rx, ry])
+                if pi < 0: continue
+                R = win_rmat[rx, ry]
+                if not np.isfinite(R).all(): continue
+                za, _ = zone_axis_from_matrix(R)
+                key = (pi, za)
+                if key not in za_color:
+                    za_color[key] = cmap20(len(za_color) % 20)[:3]
+                    za_count[key] = 0
+                za_count[key] += 1
+                za_rgb[rx, ry] = za_color[key]
+
+        # Stash for overlay.
+        self._mpfull = dict(
+            scan_shape=(Ny, Nx), phase_rgb=phase_rgb, za_rgb=za_rgb,
+            win_corr=win_corr, phase_id=phase_id, names=names,
+            za_color=za_color, za_count=za_count, palette=palette)
+
+        # Save dir.
+        ph = self._posthoc()
+        run = getattr(ph, "outdir", None) if ph else None
+        sample = self._active_sample()
+        base = (os.path.join(run, "acom", "maps") if run
+                  else os.path.join(
+                      os.path.dirname(SAMPLES[sample]["path"]),
+                      "_acom_maps"))
+        os.makedirs(base, exist_ok=True)
+        from matplotlib.patches import Patch
+        from matplotlib.lines import Line2D
+
+        def _legend_phase(ax):
+            tot = Ny * Nx
+            h = [Patch(color=palette[pi],
+                          label=f"{names[pi]}  "
+                                f"{(phase_id==pi).sum()/tot*100:.0f}%")
+                   for pi in range(n_ph)]
+            if (phase_id == -1).any():
+                h.append(Patch(color=NA, label="neither"))
+            ax.legend(handles=h, loc="upper right", fontsize=8,
+                         framealpha=0.85)
+
+        def _legend_za(ax):
+            items = sorted(za_color.items(),
+                              key=lambda kv: -za_count[kv[0]])[:14]
+            h = [Line2D([0], [0], marker="s", color="w",
+                           markerfacecolor=col, markersize=9,
+                           label=f"{names[pi]} [{za[0]} {za[1]} {za[2]}]"
+                                 f"  {za_count[(pi,za)]}")
+                   for (pi, za), col in items]
+            ax.legend(handles=h, loc="center left",
+                         bbox_to_anchor=(1.01, 0.5), fontsize=8,
+                         title="phase [zone axis]")
+
+        saved = []
+        specs = [
+            ("phase", lambda ax: (ax.imshow(phase_rgb,
+                interpolation="nearest", aspect="equal"),
+                _legend_phase(ax))),
+            ("zone_axis", lambda ax: (ax.imshow(za_rgb,
+                interpolation="nearest", aspect="equal"),
+                _legend_za(ax))),
+            ("correlation", lambda ax: self._fig_corr(ax, win_corr)),
+        ]
+        from datetime import datetime
+        try:
+            stamp = "%s" % (int(elapsed_s))
+        except Exception:
+            stamp = "x"
+        for nm, draw in specs:
+            fig = Figure(figsize=(7.5, 6.5), dpi=120,
+                            facecolor="white")
+            ax = fig.add_subplot(111)
+            try: draw(ax)
+            except Exception as e: print(f"[mpfull] {nm}: {e!r}")
+            ax.set_xticks([]); ax.set_yticks([])
+            ax.set_title(f"{nm}  ·  phases={names}  ·  stride={stride}",
+                            fontsize=11)
+            self._add_scalebar(ax, Ny)
+            fig.tight_layout()
+            png = os.path.join(base, f"mpfull_{nm}.png")
+            try:
+                fig.savefig(png, dpi=150, facecolor="white",
+                               bbox_inches="tight")
+                saved.append(png)
+            except Exception as e:
+                print(f"[mpfull] save {nm} failed: {e!r}")
+            self._popup_figure(fig, f"ACOM full — {nm}")
+        self._set_status(
+            f"multi-phase full done ({elapsed_s:.0f}s).  saved "
+            f"{len(saved)} maps → {base}")
+
+    def _fig_corr(self, ax, win_corr):
+        im = ax.imshow(win_corr, cmap="viridis",
+                          interpolation="nearest", aspect="equal")
+        ax.figure.colorbar(im, ax=ax, fraction=0.045, pad=0.02)
+
+    def _add_scalebar(self, ax, Ny):
+        try:
+            from mpl_toolkits.axes_grid1.anchored_artists import (
+                AnchoredSizeBar)
+            nm = float(self.app.real_res.get()) if self.app else 0
+            if nm > 0:
+                ax.add_artist(AnchoredSizeBar(
+                    ax.transData, 50.0 / nm, "50 nm", "lower right",
+                    pad=0.3, color="white", frameon=False,
+                    size_vertical=max(Ny * 0.01, 1)))
+        except Exception:
+            pass
+
+    def _popup_figure(self, fig, title):
+        """Show a matplotlib Figure full-size in its own tk window
+        (plain tk widgets only, to avoid the CTk resize clash)."""
+        from matplotlib.backends.backend_tkagg import (
+            FigureCanvasTkAgg, NavigationToolbar2Tk)
+        win = tk.Toplevel(self); win.title(title)
+        win.geometry("820x760")
+        holder = tk.Frame(win); holder.pack(fill="both", expand=True)
+        c = FigureCanvasTkAgg(fig, master=holder)
+        c.get_tk_widget().pack(fill="both", expand=True)
+        tbf = tk.Frame(win); tbf.pack(side="bottom", fill="x")
+        tb = NavigationToolbar2Tk(c, tbf, pack_toolbar=False)
+        tb.update(); tb.pack(side="left")
+        c.draw_idle()
+
+    # ---- overlay a label map (DINO / NMF / DINO+cluster) -----------
+    def _resolve_overlay_labels(self, which):
+        """Return (Ny,Nx) int label map for the chosen source, or
+        (None, reason) if unavailable."""
+        ph = self._posthoc()
+        Ny, Nx = self._mpfull["scan_shape"]
+        if which == "DINO class map":
+            if ph is None or getattr(ph, "_inf", None) is None:
+                return None, ("DINO class map not available — load a "
+                                "trained run (topbar 'run' badge).")
+            return (np.asarray(ph._inf["assigns"]).reshape(Ny, Nx),
+                      None)
+        if which == "DINO+cluster":
+            dc = getattr(self.app, "dino_cluster", None)
+            lab = getattr(dc, "last_labels", None) if dc else None
+            if lab is None:
+                return None, ("DINO+cluster image not available — run "
+                                "it in the Clustering → DINO+cluster tab.")
+            return np.asarray(lab).reshape(Ny, Nx), None
+        if which.startswith("NMF"):
+            method = which.split("-", 1)[1]   # KMeans/Aglo/HDBSCAN/FCM
+            nmf = getattr(self.app, "nmf", None)
+            store = getattr(nmf, "last_cluster_labels", None) if nmf else None
+            if not store or method not in store:
+                return None, (f"{which} not available — run NMF + "
+                                f"'{method}' clustering in the "
+                                f"Clustering → NMF tab first.")
+            return np.asarray(store[method]).reshape(Ny, Nx), None
+        return None, f"unknown source {which}"
+
+    def _do_overlay(self):
+        if getattr(self, "_mpfull", None) is None:
+            messagebox.showinfo("Overlay",
+                "Run a multi-phase full-dataset first."); return
+        which = self._overlay_src.get()
+        labels, reason = self._resolve_overlay_labels(which)
+        if labels is None:
+            messagebox.showinfo("Overlay not available", reason); return
+        base = self._overlay_base.get()
+        bg = {"phase": self._mpfull["phase_rgb"],
+                "zone-axis": self._mpfull["za_rgb"]}.get(base, None)
+        Ny, Nx = self._mpfull["scan_shape"]
+        import matplotlib.pyplot as plt
+        K = int(labels.max()) + 1
+        cmapL = (plt.get_cmap("tab10") if K <= 10
+                   else plt.get_cmap("tab20"))
+        if self._overlay_mode.get() == "side-by-side":
+            fig = Figure(figsize=(13, 6.2), dpi=115, facecolor="white")
+            axA = fig.add_subplot(1, 2, 1)
+            axB = fig.add_subplot(1, 2, 2)
+            if bg is not None:
+                axA.imshow(bg, interpolation="nearest", aspect="equal")
+            else:
+                axA.imshow(self._mpfull["win_corr"], cmap="viridis",
+                              interpolation="nearest", aspect="equal")
+            axA.set_title(f"ACOM {base}", fontsize=10)
+            axB.imshow(labels, cmap=cmapL, interpolation="nearest",
+                          aspect="equal", vmin=-0.5, vmax=K - 0.5)
+            axB.set_title(f"{which}  (K={K})", fontsize=10)
+            for a in (axA, axB):
+                a.set_xticks([]); a.set_yticks([])
+        else:
+            fig = Figure(figsize=(7.5, 6.8), dpi=120, facecolor="white")
+            ax = fig.add_subplot(111)
+            if bg is not None:
+                ax.imshow(bg, interpolation="nearest", aspect="equal")
+            else:
+                ax.imshow(self._mpfull["win_corr"], cmap="viridis",
+                             interpolation="nearest", aspect="equal")
+            # Contour each cluster's boundary.
+            for c in range(K):
+                m = (labels == c).astype(float)
+                if m.sum() == 0: continue
+                ax.contour(m, levels=[0.5], colors=[cmapL(c % cmapL.N)],
+                              linewidths=1.0)
+            ax.set_title(f"ACOM {base}  +  {which} contours (K={K})",
+                            fontsize=10)
+            ax.set_xticks([]); ax.set_yticks([])
+            self._add_scalebar(ax, Ny)
+        fig.tight_layout()
+        self._popup_figure(fig, f"overlay — {which} on {base}")
 
     def _render_nnls_full_map(self, cp, stride, elapsed_s):
         """Render py4DSTEM CrystalPhase outputs as a 2×2:

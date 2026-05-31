@@ -870,6 +870,8 @@ class NMFPanel(ctk.CTkFrame):
                 labels=labels, errs=errs, sil=sil,
                 err_final=err_final,
             )
+            # Expose cluster labels for cross-tab overlays (ACOM).
+            self.last_cluster_labels = dict(labels)
             with self._lock:
                 self._compute_progress = (
                     f"done. ({time.perf_counter() - t0:.1f}s)  "
