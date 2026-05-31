@@ -2304,59 +2304,136 @@ class ACOMTabPanel(ctk.CTkFrame):
 
     def _render_phase_region_map(self, mp, region_masks, classes,
                                        labels, scan_shape, mode):
-        """Paint the (Ny, Nx) scan map by winning phase per region.
+        """Two side-by-side region maps:
 
-        Region = a class (mp_classes) or a grain (mp_grains).  Pixels
-        outside any region (e.g. tiny grains dropped by min size) stay
-        black.  NA / neither / ambiguous regions paint mid-grey.
-
-        Layout: large phase map LEFT, per-phase fraction bar chart +
-        legend RIGHT.
+          LEFT  — PHASE map: each region (class or grain) painted by
+                  its NNLS-winning phase (α/γ/…), neither=grey.
+                  Clickable: L-click → single pattern, R-click →
+                  grain-average diffraction.
+          RIGHT — ZONE-AXIS map: same regions painted by their
+                  integer zone axis [u v w], with an EXPLICIT legend
+                  (colour ↔ 'phase [u v w]') and the [u v w] text
+                  printed on the larger grains — far more intuitive
+                  than py4DSTEM's continuous IPF colouring.
         """
         from matplotlib.colors import to_rgb
         from matplotlib.patches import Patch
+        from gui_app.acom_core import zone_axis_from_matrix
+        import matplotlib.pyplot as plt
         Ny, Nx = scan_shape
         names = list(mp["phase_names"])
         n_ph = len(names)
         palette = self._phase_palette(n_ph)
-        NA_COLOR = (0.55, 0.55, 0.55)
+        NA = (0.55, 0.55, 0.55); AMB = (0.30, 0.30, 0.30)
+        phase_id = mp["phase_id"]
+        rmat_per = mp.get("rmat_per_phase")
 
         phase_rgb = np.zeros((Ny, Nx, 3), dtype=np.float32)
+        za_rgb    = np.zeros((Ny, Nx, 3), dtype=np.float32)
         per_phase_pix  = [0] * n_ph
         per_phase_regs = [0] * n_ph
-        na_regs = 0; na_pix = 0
-        amb_regs = 0; amb_pix = 0
+        na_regs = na_pix = amb_regs = amb_pix = 0
+        za_color = {}          # (phase_idx, (u,v,w)) -> rgb
+        za_count = {}          # same key -> #regions
+        region_za = [None] * len(region_masks)   # per-region ZA text
+        cmap20 = plt.get_cmap("tab20")
         for k, gm in enumerate(region_masks):
-            pi = int(mp["phase_id"][k])
-            n_px = int(gm.sum())
+            pi = int(phase_id[k]); n_px = int(gm.sum())
             if pi == -1:
-                phase_rgb[gm] = NA_COLOR
-                na_regs += 1; na_pix += n_px
-            elif pi == -2:
-                phase_rgb[gm] = (0.30, 0.30, 0.30)
-                amb_regs += 1; amb_pix += n_px
-            else:
-                phase_rgb[gm] = to_rgb(palette[pi])
-                per_phase_pix[pi]  += n_px
-                per_phase_regs[pi] += 1
+                phase_rgb[gm] = NA; za_rgb[gm] = NA
+                na_regs += 1; na_pix += n_px; continue
+            if pi == -2:
+                phase_rgb[gm] = AMB; za_rgb[gm] = AMB
+                amb_regs += 1; amb_pix += n_px; continue
+            phase_rgb[gm] = to_rgb(palette[pi])
+            per_phase_pix[pi] += n_px; per_phase_regs[pi] += 1
+            # Zone axis for this region's winning phase.
+            za = (0, 0, 0)
+            try:
+                R = rmat_per[pi, k]
+                za, _ = zone_axis_from_matrix(R)
+            except Exception:
+                pass
+            key = (pi, tuple(za))
+            if key not in za_color:
+                za_color[key] = cmap20(len(za_color) % 20)[:3]
+                za_count[key] = 0
+            za_count[key] += 1
+            za_rgb[gm] = za_color[key]
+            region_za[k] = (pi, za, gm)
 
-        # Layout: phase map (LEFT, big) + legend/stats panel (RIGHT).
         self._fig.clf()
-        gs = self._fig.add_gridspec(1, 2, width_ratios=[3, 1.0],
-                                          wspace=0.05)
-        ax_map = self._fig.add_subplot(gs[0, 0])
-        ax_leg = self._fig.add_subplot(gs[0, 1])
-        ax_map.imshow(phase_rgb, interpolation="nearest",
-                         aspect="equal")
-        what = ("CLASS" if mode == "mp_classes" else "GRAIN")
-        ax_map.set_title(
-            f"phase map — {what}-level NNLS winner   "
-            f"({len(region_masks)} regions)  ·  "
-            f"L-click = single pattern, R-click = grain avg",
-            fontsize=10)
-        ax_map.set_xticks([]); ax_map.set_yticks([])
-        # Stash state so the click handler can resolve (y,x) → diff.
-        self._pmap_ax = ax_map
+        gs = self._fig.add_gridspec(1, 2, wspace=0.10)
+        ax_ph = self._fig.add_subplot(gs[0, 0])
+        ax_za = self._fig.add_subplot(gs[0, 1])
+        what = ("class" if mode == "mp_classes" else "grain")
+
+        # ---- LEFT: phase map ----
+        ax_ph.imshow(phase_rgb, interpolation="nearest", aspect="equal")
+        ax_ph.set_xticks([]); ax_ph.set_yticks([])
+        ax_ph.set_title(f"PHASE  ({what}-level)\n"
+                          f"L-click=single · R-click=grain avg",
+                          fontsize=10)
+        tot = Ny * Nx
+        ph_handles = []
+        for pi, nm in enumerate(names):
+            ph_handles.append(Patch(
+                color=palette[pi],
+                label=f"{nm}  ·  {per_phase_regs[pi]} {what}s  ·  "
+                      f"{per_phase_pix[pi]/tot*100:.0f}%"))
+        if na_regs:
+            ph_handles.append(Patch(color=NA,
+                label=f"neither  ·  {na_regs}"))
+        if amb_regs:
+            ph_handles.append(Patch(color=AMB,
+                label=f"ambiguous  ·  {amb_regs}"))
+        ax_ph.legend(handles=ph_handles, loc="upper right",
+                        fontsize=8, framealpha=0.85)
+
+        # ---- RIGHT: zone-axis map + explicit legend + labels ----
+        ax_za.imshow(za_rgb, interpolation="nearest", aspect="equal")
+        ax_za.set_xticks([]); ax_za.set_yticks([])
+        ax_za.set_title("ZONE AXIS per region  (colour ↔ [u v w])",
+                          fontsize=10)
+        # Print [u v w] text on the larger grains (top by area).
+        sized = sorted(
+            [(k, int(region_za[k][2].sum()), region_za[k])
+               for k in range(len(region_masks))
+               if region_za[k] is not None],
+            key=lambda t: -t[1])
+        for (k, npx, (pi, za, gm)) in sized[:25]:
+            if npx < 25: break
+            ys, xs = np.where(gm)
+            cy, cx = float(ys.mean()), float(xs.mean())
+            ax_za.text(cx, cy, f"{za[0]}{za[1]}{za[2]}",
+                          ha="center", va="center", fontsize=6.5,
+                          color="white", weight="bold",
+                          path_effects=[])
+        # Legend: colour ↔ 'phase [u v w]  (Nregions)', top 14 by count.
+        za_items = sorted(za_color.items(),
+                             key=lambda kv: -za_count[kv[0]])[:14]
+        za_handles = [
+            Patch(color=col,
+                    label=f"{names[pi]} [{za[0]} {za[1]} {za[2]}]"
+                          f"  ·  {za_count[(pi, za)]}")
+            for (pi, za), col in za_items]
+        ax_za.legend(handles=za_handles, loc="center left",
+                        bbox_to_anchor=(1.01, 0.5), fontsize=8,
+                        framealpha=1.0, title="phase  [zone axis]")
+
+        # Scalebars.
+        try:
+            nm_per_px = float(self.app.real_res.get()) if self.app else 0
+            if nm_per_px > 0:
+                from gui_app._calib_utils import add_real_scalebar
+                for a in (ax_ph, ax_za):
+                    add_real_scalebar(a, nm_per_px, length_nm=100,
+                                           color="white")
+        except Exception:
+            pass
+
+        # Click handler on BOTH maps → grain/single diffraction.
+        self._pmap_axes = (ax_ph, ax_za)
         self._pmap_scan = (Ny, Nx)
         self._pmap_phase_id = phase_id
         self._pmap_region_masks = region_masks
@@ -2366,59 +2443,19 @@ class ACOMTabPanel(ctk.CTkFrame):
             except Exception: pass
         self._pmap_click_cid = self._canvas.mpl_connect(
             "button_press_event", self._on_phase_map_click)
-        try:
-            nm_per_px = (float(self.app.real_res.get())
-                           if self.app else 0.0)
-        except Exception:
-            nm_per_px = 0.0
-        if nm_per_px > 0:
-            try:
-                from gui_app._calib_utils import add_real_scalebar
-                add_real_scalebar(ax_map, nm_per_px, length_nm=100,
-                                       color="white")
-            except Exception:
-                pass
 
-        # Legend / stats panel: pixel-fraction stacked bar + handles
-        total_px = Ny * Nx
-        ax_leg.set_axis_off()
-        # Build legend handles
-        handles = []
-        for pi, n in enumerate(names):
-            frac = per_phase_pix[pi] / max(total_px, 1) * 100
-            handles.append(Patch(color=palette[pi],
-                                    label=f"{n}   "
-                                           f"{per_phase_regs[pi]} regs   "
-                                           f"{frac:.1f}% area"))
-        if na_regs > 0:
-            handles.append(Patch(color=NA_COLOR,
-                                    label=f"neither   {na_regs} regs   "
-                                           f"{na_pix/total_px*100:.1f}% area"))
-        if amb_regs > 0:
-            handles.append(Patch(color=(0.3, 0.3, 0.3),
-                                    label=f"ambiguous   {amb_regs} regs"
-                                           f"  {amb_pix/total_px*100:.1f}% area"))
-        unassigned_px = total_px - sum(per_phase_pix) - na_pix - amb_pix
-        if unassigned_px > 0:
-            handles.append(Patch(color="black",
-                                    label=f"unassigned   "
-                                           f"{unassigned_px/total_px*100:.1f}% area "
-                                           f"(small grains dropped)"))
-        ax_leg.legend(handles=handles, loc="upper left",
-                         fontsize=10, framealpha=1.0,
-                         title=f"calib = "
-                               f"{float(self._inv_ang.get()):.5g} 1/Å/px")
         self._fig.suptitle(
-            f"Multi-phase ACOM {mode} — phase-region map",
-            fontsize=12)
-        self._fig.tight_layout(rect=[0, 0, 1, 0.96])
+            f"Multi-phase ACOM {mode} — phase + zone-axis  "
+            f"(calib {float(self._inv_ang.get()):.5g} 1/Å/px)",
+            fontsize=11)
+        self._fig.tight_layout(rect=[0, 0, 1, 0.95])
         self._canvas.draw_idle()
 
     def _on_phase_map_click(self, event):
         """L-click → single scan-position pattern; R-click → grain
         average.  Pops a diffraction window with hover-q + the phase
         the clicked region was assigned to."""
-        if event.inaxes is not getattr(self, "_pmap_ax", None):
+        if event.inaxes not in getattr(self, "_pmap_axes", ()):
             return
         if event.xdata is None or event.ydata is None:
             return
