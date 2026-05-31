@@ -806,19 +806,35 @@ class ACOMTabPanel(ctk.CTkFrame):
                      ha="center", va="center", fontsize=10,
                      color="#888", transform=ax.transAxes)
             self._redraw_all(); return
-        img = np.log1p(np.clip(self._test_pattern, 0, None))
+        pat = self._test_pattern
+        img = np.log1p(np.clip(pat, 0, None))
+        # Robust display range (1–99.5 pct) so a single saturated
+        # central-beam pixel doesn't wash the whole image to black,
+        # and a low-contrast image still shows its structure.
+        finite = img[np.isfinite(img)]
+        if finite.size:
+            vlo = float(np.percentile(finite, 1.0))
+            vhi = float(np.percentile(finite, 99.5))
+            if vhi <= vlo: vhi = vlo + 1e-6
+        else:
+            vlo, vhi = 0.0, 1.0
         ax.imshow(img, cmap="inferno", aspect="equal",
-                    interpolation="nearest")
+                    interpolation="nearest", vmin=vlo, vmax=vhi)
         if self._test_peaks is not None and len(self._test_peaks):
             ax.scatter(self._test_peaks[:, 1], self._test_peaks[:, 0],
                         s=70, facecolors="none", edgecolors="cyan",
                         linewidths=1.3)
         np_peaks = (0 if self._test_peaks is None
                      else len(self._test_peaks))
+        # Data stats in the title — flat/black usually means a near-
+        # constant array (wrong cube read) vs real structure.
+        pmin = float(np.nanmin(pat)); pmed = float(np.nanmedian(pat))
+        pmax = float(np.nanmax(pat))
         ax.set_title(
-            f"step 1+2  ·  {np_peaks} peaks\n"
+            f"step 1+2  ·  {np_peaks} peaks  ·  "
+            f"min/med/max = {pmin:.3g}/{pmed:.3g}/{pmax:.3g}\n"
             f"{self._test_origin}",
-            fontsize=9)
+            fontsize=8)
         # Hover-q readout — pattern is shown at raw-detector
         # resolution (no resize/crop), so 1 display px = 1 raw px →
         # q_per_disp_px = recip_res (nm⁻¹/px).
