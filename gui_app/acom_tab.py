@@ -2035,10 +2035,36 @@ class ACOMTabPanel(ctk.CTkFrame):
         from mpl_toolkits.axes_grid1.anchored_artists import (
             AnchoredSizeBar)
         Ny, Nx = scan_shape
+
+        # Compute the strain tensor FIRST so we know whether to lay
+        # out the 2×2 strain grid (success) or a single rotation
+        # panel (SVD fallback).
+        strain_ok = False; strain = None
+        try:
+            strain = crystal.calculate_strain(
+                bv, omap, min_num_peaks=3, rotation_range=np.pi / 2)
+            strain = np.asarray(strain, dtype=float)
+            strain_ok = strain.shape[0] >= 5
+        except Exception as e:
+            print(f"[acom] calculate_strain failed ({e!r}); "
+                    f"falling back to in-plane rotation panel.",
+                    flush=True)
+
         self._fig.clf()
-        gs = self._fig.add_gridspec(1, 2, wspace=0.15)
-        ax_ipf = self._fig.add_subplot(gs[0, 0])
-        ax_rot = self._fig.add_subplot(gs[0, 1])
+        if strain_ok:
+            # IPF spans the left column; strain 2×2 on the right.
+            gs = self._fig.add_gridspec(2, 3, wspace=0.20, hspace=0.22,
+                                              width_ratios=[1.5, 1, 1])
+            ax_ipf = self._fig.add_subplot(gs[:, 0])
+            ax_exx = self._fig.add_subplot(gs[0, 1])
+            ax_eyy = self._fig.add_subplot(gs[0, 2])
+            ax_exy = self._fig.add_subplot(gs[1, 1])
+            ax_rot = self._fig.add_subplot(gs[1, 2])
+        else:
+            gs = self._fig.add_gridspec(1, 2, wspace=0.15)
+            ax_ipf = self._fig.add_subplot(gs[0, 0])
+            ax_rot = self._fig.add_subplot(gs[0, 1])
+            ax_exx = ax_eyy = ax_exy = None
 
         # --- (1) IPF orientation map via py4DSTEM ---
         import io
@@ -2072,86 +2098,101 @@ class ACOMTabPanel(ctk.CTkFrame):
                           color="#a33", transform=ax_ipf.transAxes)
         ax_ipf.set_xticks([]); ax_ipf.set_yticks([])
 
-        # --- (2) relative in-plane rotation map ---
-        # First try py4DSTEM's calculate_strain (full strain tensor).
-        # It does an SVD fit that can fail ('SVD did not converge')
-        # on sparse/noisy data — fall back to the in-plane rotation
-        # angle read straight off the orientation map, which always
-        # works and gives the same relative-rotation picture.
-        delta = None; rot_title = "relative rotation"
-        try:
-            strain = crystal.calculate_strain(
-                bv, omap, min_num_peaks=3, rotation_range=np.pi / 2)
-            rot_deg = np.degrees(np.asarray(strain[3], dtype=float))
-            cmask = np.asarray(strain[4], dtype=float)
-            mask = np.isfinite(rot_deg) & (cmask >= 0.3)
-            delta = np.full_like(rot_deg, np.nan)
-            if mask.any():
-                delta[mask] = rot_deg[mask] - np.nanmedian(rot_deg[mask])
-            rot_title = "relative rotation (strain fit)"
-        except Exception as e:
-            print(f"[acom] calculate_strain failed ({e!r}); "
-                    f"falling back to orientation in-plane angle.",
-                    flush=True)
+        # --- (2) strain tensor (or rotation fallback) ---
+        def _scalebar(ax):
+            try:
+                nm = float(self.app.real_res.get()) if self.app else 0
+                if nm > 0:
+                    ax.add_artist(AnchoredSizeBar(
+                        ax.transData, 50.0 / nm, "50 nm",
+                        "lower right", pad=0.3, color="black",
+                        frameon=False,
+                        size_vertical=max(Ny * 0.01, 1)))
+            except Exception:
+                pass
+        def _masked_panel(ax, data, mask, title, label, pct=False):
+            """Diverging map, corr-masked, robust symmetric range."""
+            d = np.full_like(data, np.nan, dtype=float)
+            d[mask] = data[mask] - np.nanmedian(data[mask])
+            if pct: d = d * 100.0      # strain → %
+            fin = d[np.isfinite(d)]
+            vmax = (float(np.percentile(np.abs(fin), 98))
+                      if fin.size else 1.0)
+            vmax = max(vmax, 1e-3)
+            im = ax.imshow(d, cmap="RdBu_r", vmin=-vmax, vmax=vmax,
+                              interpolation="nearest", aspect="equal")
+            cb = self._fig.colorbar(im, ax=ax, fraction=0.046,
+                                       pad=0.02)
+            cb.set_label(label, fontsize=8)
+            cb.ax.tick_params(labelsize=7)
+            ax.set_title(title, fontsize=10)
+            ax.set_xticks([]); ax.set_yticks([])
+
+        if strain_ok:
+            # py4DSTEM strain: [e_xx, e_yy, e_xy, theta(rad), mask].
+            exx = strain[0]; eyy = strain[1]; exy = strain[2]
+            rot = np.degrees(strain[3])
+            cmask = strain[4]
+            mask = np.isfinite(rot) & (cmask >= 0.3)
+            if not mask.any():
+                mask = np.isfinite(rot)
+            _masked_panel(ax_exx, exx, mask, "ε_xx", "strain (%)",
+                            pct=True)
+            _masked_panel(ax_eyy, eyy, mask, "ε_yy", "strain (%)",
+                            pct=True)
+            _masked_panel(ax_exy, exy, mask, "ε_xy", "shear (%)",
+                            pct=True)
+            # rotation: wrap to ±180, cap 90
+            rotc = (rot + 180.0) % 360.0 - 180.0
+            _masked_panel(ax_rot, rotc, mask,
+                            "rotation θ", "Δθ (deg)")
+            for a in (ax_exx, ax_eyy, ax_exy, ax_rot):
+                _scalebar(a)
+            sub = "strain tensor (ε_xx, ε_yy, ε_xy, θ)"
+        else:
+            # SVD failed → in-plane rotation from the ZA fit only.
+            delta = None
             try:
                 ang = np.asarray(getattr(omap, "angles", None),
                                     dtype=float)
                 cv = np.asarray(getattr(omap, "corr", None), dtype=float)
-                # angles: (Ny, Nx, n_matches, 3) Euler (Bunge); the
-                # 3rd (gamma) is the in-plane rotation about beam.
                 if ang.ndim == 4:
                     rot_deg = np.degrees(ang[:, :, 0, 2])
                     cm = (cv[..., 0] if cv.ndim == 3 else cv)
                 else:
                     rot_deg = np.degrees(ang.reshape(Ny, Nx))
                     cm = np.ones_like(rot_deg)
-                mask = np.isfinite(rot_deg) & (cm >= 0.0)
+                mask = np.isfinite(rot_deg)
                 delta = np.full_like(rot_deg, np.nan)
                 if mask.any():
                     delta[mask] = (rot_deg[mask]
                                      - np.nanmedian(rot_deg[mask]))
-                rot_title = "relative in-plane rotation (from ZA fit)"
+                    delta = (delta + 180.0) % 360.0 - 180.0
             except Exception as e2:
-                ax_rot.text(0.5, 0.5,
-                              f"rotation map unavailable:\n{e2!r}",
+                ax_rot.text(0.5, 0.5, f"rotation unavailable:\n{e2!r}",
                               ha="center", va="center", fontsize=9,
                               color="#a33", transform=ax_rot.transAxes)
-        if delta is not None:
-            # Wrap relative rotation into [-180, 180) — the raw
-            # in-plane Euler angle is modulo 360, so a naive
-            # subtract-median leaves ±300° artefacts.
-            delta = (delta + 180.0) % 360.0 - 180.0
-            finite = delta[np.isfinite(delta)]
-            # Robust symmetric range (98th pct), capped at 90° since
-            # larger "rotations" are almost always indexing ambiguity,
-            # not real lattice rotation.
-            vmax = (float(np.percentile(np.abs(finite), 98))
-                      if finite.size else 30.0)
-            vmax = float(min(max(vmax, 2.0), 90.0))
-            im = ax_rot.imshow(delta, cmap="RdBu_r",
-                                  vmin=-vmax, vmax=vmax,
-                                  interpolation="nearest", aspect="equal")
-            cb = self._fig.colorbar(im, ax=ax_rot, fraction=0.045,
-                                       pad=0.02)
-            cb.set_label("Δθ  (deg, rel. median)", fontsize=9)
-            ax_rot.set_title(rot_title, fontsize=11)
-            try:
-                nm_per_px = (float(self.app.real_res.get())
-                               if self.app else 0.0)
-                if nm_per_px > 0:
-                    bar_nm = 50.0
-                    sb = AnchoredSizeBar(
-                        ax_rot.transData, bar_nm / nm_per_px,
-                        f"{bar_nm:.0f} nm", "lower right", pad=0.4,
-                        color="black", frameon=False,
-                        size_vertical=max(Ny * 0.01, 1))
-                    ax_rot.add_artist(sb)
-            except Exception:
-                pass
-        ax_rot.set_xticks([]); ax_rot.set_yticks([])
+            if delta is not None:
+                fin = delta[np.isfinite(delta)]
+                vmax = float(min(max(
+                    np.percentile(np.abs(fin), 98) if fin.size else 30,
+                    2.0), 90.0))
+                im = ax_rot.imshow(delta, cmap="RdBu_r",
+                                      vmin=-vmax, vmax=vmax,
+                                      interpolation="nearest",
+                                      aspect="equal")
+                cb = self._fig.colorbar(im, ax=ax_rot, fraction=0.045,
+                                           pad=0.02)
+                cb.set_label("Δθ (deg, rel. median)", fontsize=9)
+                ax_rot.set_title(
+                    "relative in-plane rotation (ZA fit; "
+                    "strain SVD failed)", fontsize=10)
+                _scalebar(ax_rot)
+            ax_rot.set_xticks([]); ax_rot.set_yticks([])
+            sub = "relative rotation (strain SVD failed)"
 
         self._fig.suptitle(
-            f"Classical ACOM — orientation + relative rotation  "
+            f"Classical ACOM — orientation + {sub}  "
             f"(stride={stride}, {elapsed_s:.0f}s)",
             fontsize=11)
         self._fig.tight_layout(rect=[0, 0, 1, 0.95])
