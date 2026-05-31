@@ -1953,7 +1953,7 @@ class PostHocPanel(ctk.CTkFrame):
                             scale_markers=1000,
                             scale_markers_compare=4e4,
                             min_marker_size=1, figsize=(5, 5),
-                            input_fig_handle=(fig, ax_fit))
+                            input_fig_handle=(fig, [ax_fit]))
                     except Exception as e2:
                         ax_fit.text(0.5, 0.5,
                             f"fit plot failed:\n{e2!r}",

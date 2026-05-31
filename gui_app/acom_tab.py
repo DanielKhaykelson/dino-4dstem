@@ -1395,7 +1395,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                 bragg_peaks_compare=best_res["calibrated_pl"],
                 scale_markers=1000, scale_markers_compare=4e4,
                 min_marker_size=1, figsize=(5, 5),
-                input_fig_handle=(self._fig, ax))
+                input_fig_handle=(self._fig, [ax]))
         except Exception as e:
             ax.text(0.5, 0.5, f"plot err:\n{e!r}",
                      ha="center", va="center", fontsize=9,
