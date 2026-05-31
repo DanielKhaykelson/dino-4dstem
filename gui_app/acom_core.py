@@ -66,7 +66,15 @@ def _import_braggvectors():
 # ---------------------------------------------------------------------------
 
 def load_crystal(cif_path: str):
-    """Load a CIF as a py4DSTEM Crystal, with the version-robust fallback."""
+    """Load a CIF as a py4DSTEM Crystal.
+
+    Primary path is `Crystal.from_CIF` (pymatgen).  Pymatgen's CIF
+    parser fails on some real-world files — multi-block CODs with
+    embedded SHELX `_iucr_refine_instructions_details`, partial
+    occupancies, missing `_symmetry_equiv_pos_as_xyz`, etc. — raising
+    'Invalid CIF file with no structures!'.  ASE's reader is more
+    tolerant, so we fall back to `ase.io.read` → `Crystal.from_ase`.
+    """
     _, Crystal = _import_py4DSTEM()
     if Crystal is None:
         raise RuntimeError("py4DSTEM is not importable.")
@@ -74,8 +82,16 @@ def load_crystal(cif_path: str):
         raise FileNotFoundError(cif_path)
     try:
         return Crystal.from_CIF(cif_path)
-    except AttributeError:
-        return Crystal(filepath=cif_path)
+    except Exception as e_pmg:
+        # Fall back to ASE (handles multi-block / SHELX-laden CIFs).
+        try:
+            from ase.io import read as _ase_read
+            atoms = _ase_read(cif_path)
+            return Crystal.from_ase(atoms)
+        except Exception as e_ase:
+            raise RuntimeError(
+                f"Could not load CIF.\n  pymatgen: {e_pmg}\n"
+                f"  ASE fallback: {e_ase}") from None
 
 
 def prepare_crystal(crystal,
