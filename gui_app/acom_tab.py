@@ -601,19 +601,32 @@ class ACOMTabPanel(ctk.CTkFrame):
         dp_max = np.zeros((H, W), dtype=np.float32)
         dp_sum = np.zeros((H, W), dtype=np.float64)
         t0 = time.time()
-        for y in range(Ny):
-            try:
-                block = np.asarray(cube[y], dtype=np.float32)
-            except Exception:
-                continue
-            # block is (Nx, H, W)
-            dp_max = np.maximum(dp_max, block.max(axis=0))
-            dp_sum += block.sum(axis=0)
-            if (y & 7) == 0:
+        # Index per (rx, ry) with a 2-tuple — works for BOTH a 4D
+        # numpy memmap (.prz/.npy) AND the 3D-backed _H5Cube4D h5
+        # wrapper (which only accepts cube[rx, ry], NOT cube[rx]).
+        # The old cube[rx] silently failed on h5 → all-zero dp.
+        n_read = 0
+        for rx in range(Ny):
+            row = np.empty((Nx, H, W), dtype=np.float32)
+            ok = 0
+            for ry in range(Nx):
+                try:
+                    row[ok] = np.asarray(cube[rx, ry], dtype=np.float32)
+                    ok += 1
+                except Exception as e:
+                    if rx == 0 and ry == 0:
+                        raise RuntimeError(
+                            f"cube[{rx},{ry}] read failed: {e!r}")
+            if ok:
+                blk = row[:ok]
+                dp_max = np.maximum(dp_max, blk.max(axis=0))
+                dp_sum += blk.sum(axis=0)
+                n_read += ok
+            if (rx & 7) == 0:
                 self._set_status(
-                    f"computing dp_max + dp_mean … row {y+1}/{Ny}  "
-                    f"({time.time()-t0:.0f}s)")
-        dp_mean = (dp_sum / max(Ny * Nx, 1)).astype(np.float32)
+                    f"computing dp_max + dp_mean … row {rx+1}/{Ny}  "
+                    f"({n_read} frames, {time.time()-t0:.0f}s)")
+        dp_mean = (dp_sum / max(n_read, 1)).astype(np.float32)
         self._cached_dp_max[sample] = dp_max
         self._cached_dp_mean[sample] = dp_mean
         self._set_status(
