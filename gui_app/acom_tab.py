@@ -1386,15 +1386,34 @@ class ACOMTabPanel(ctk.CTkFrame):
                      color="#a33", transform=ax.transAxes)
             self._redraw_all(); return
 
-        # Overlay experimental peaks vs CIF predicted using py4DSTEM.
+        # Overlay experimental peaks vs CIF predicted.  py4DSTEM's
+        # plot_diffraction_pattern sizes each marker as
+        # `scale * intensity`, so a fixed scale produces giant blobs
+        # when intensities are large and dots when they're small.
+        # Auto-scale BOTH so the median marker is a sane ~80 px², and
+        # draw experimental as hollow rings (not filled) so they don't
+        # bury the predicted hkl markers.
         try:
+            fit = best_res["fit_pattern"]
+            pl  = best_res["calibrated_pl"]
+            def _scale_for(obj, target=80.0):
+                try:
+                    inten = np.asarray(obj.data["intensity"],
+                                          dtype=float)
+                    med = np.median(inten[inten > 0]) if (
+                        inten.size and (inten > 0).any()) else 1.0
+                    return float(target / max(med, 1e-9))
+                except Exception:
+                    return 1.0
+            s_fit = _scale_for(fit)
+            s_exp = _scale_for(pl)
             from py4DSTEM.process.diffraction import (
                 plot_diffraction_pattern)
             plot_diffraction_pattern(
-                best_res["fit_pattern"],
-                bragg_peaks_compare=best_res["calibrated_pl"],
-                scale_markers=1000, scale_markers_compare=4e4,
-                min_marker_size=1, figsize=(5, 5),
+                fit, bragg_peaks_compare=pl,
+                scale_markers=s_fit,
+                scale_markers_compare=s_exp,
+                min_marker_size=2, figsize=(5, 5),
                 input_fig_handle=(self._fig, [ax]))
         except Exception as e:
             ax.text(0.5, 0.5, f"plot err:\n{e!r}",
@@ -1402,8 +1421,9 @@ class ACOMTabPanel(ctk.CTkFrame):
                      color="#a33", transform=ax.transAxes)
         ax.set_title(
             f"step 4 — best fit: {best_name}  "
-            f"corr={best_res['corr']:.4f}",
-            fontsize=10)
+            f"corr={best_res['corr']:.4f}\n"
+            f"(red = CIF hkl, cyan = experimental peaks)",
+            fontsize=9)
         self._redraw_all()
 
     def _show_topN_matches(self):
