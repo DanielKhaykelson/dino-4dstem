@@ -22,6 +22,43 @@ except Exception:
 
 import customtkinter as ctk
 
+
+def _patch_ctk_resize_guard():
+    """Global safety net for the customtkinter + matplotlib clash.
+
+    When a matplotlib FigureCanvasTkAgg is embedded near CTk widgets,
+    CTk's resize/scaling callbacks can fire `_update_dimensions_event`
+    / `_draw` on a widget whose internal handle is the matplotlib
+    canvas, which lacks `winfo_exists` → AttributeError that crashes
+    the Tk callback.  We wrap the two offending CTk methods to swallow
+    that specific AttributeError (harmless — it just means 'skip the
+    redraw for this transient state').  Applied once at startup.
+    """
+    try:
+        from customtkinter.windows.widgets.core_widget_classes \
+            import ctk_base_class as _cbc
+        Base = _cbc.CTkBaseClass
+        for meth in ("_update_dimensions_event", "_draw"):
+            orig = getattr(Base, meth, None)
+            if orig is None or getattr(orig, "_resize_guarded", False):
+                continue
+            def _wrap(o):
+                def inner(self, *a, **k):
+                    try:
+                        return o(self, *a, **k)
+                    except AttributeError as e:
+                        if "winfo_exists" in str(e):
+                            return None
+                        raise
+                inner._resize_guarded = True
+                return inner
+            setattr(Base, meth, _wrap(orig))
+    except Exception as _e:
+        print(f"[ctk-guard] could not patch: {_e!r}", flush=True)
+
+
+_patch_ctk_resize_guard()
+
 from gui_app.pre_panel import PrePanel
 from gui_app.train_panel import TrainPanel
 from gui_app.eval_panel import EvalPanel
