@@ -645,6 +645,16 @@ class App(ctk.CTk):
             if sk:
                 self._sb.configure(
                     text=f"loaded cube: {path}    (sample key: {sk})")
+                # Drive the global session so the Diffraction tabs
+                # (ACOM / Blob / Crystallinity) auto-pick up the
+                # dataset — no trained run needed for dp_max /
+                # single-pattern / full-dataset ACOM.
+                try:
+                    if getattr(self, "session", None) is not None:
+                        self.session.set(sample=sk)
+                except Exception as e:
+                    print(f"[app] session.set on load failed: {e!r}",
+                          flush=True)
                 # Tell the Training tab a new sample is available so it can
                 # refresh its dropdown and auto-select it.
                 try:
