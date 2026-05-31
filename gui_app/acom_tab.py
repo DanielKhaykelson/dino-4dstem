@@ -90,6 +90,14 @@ class ACOMTabPanel(ctk.CTkFrame):
         # source-switching without recomputing).
         self._cached_dp_max = {}    # sample → (H, W) np.float32
         self._cached_dp_mean = {}   # sample → (H, W) np.float32
+        # raw-detector pixels spanned per display pixel of the current
+        # test pattern.  1.0 for raw sources (dp_max/dp_mean/scan_pos/
+        # grain).  For class averages the pipeline is
+        #   raw → resize(192) → CenterCrop(140) → resize(192)
+        # so each display px spans (H_raw/192)·(140/192) raw px, and
+        # the effective q-per-px (and matching calibration) must be
+        # scaled by this factor.
+        self._test_px_factor = 1.0
         # CIF-ring index for hover tooltip: list of
         #   (q_invA, phase_name, (h,k,l), color)
         self._cif_ring_db: list = []
@@ -494,6 +502,20 @@ class ACOMTabPanel(ctk.CTkFrame):
         except Exception:
             return 0.0
 
+    def _eff_inv_ang(self):
+        """Effective 1/Å per DISPLAY pixel of the current test pattern,
+        accounting for the source's crop/resize (class avg ≠ raw)."""
+        try:
+            base = float(self._inv_ang.get())
+        except Exception:
+            base = (self._recip_per_px() or 0.0185) * 0.1
+        return base * float(getattr(self, "_test_px_factor", 1.0))
+
+    def _eff_recip_nm(self):
+        """Effective nm⁻¹ per display pixel (for hover-q), same scaling."""
+        return self._recip_per_px() * float(
+            getattr(self, "_test_px_factor", 1.0))
+
     def _sync_calib_from_topbar(self):
         # Manual ↺ : force re-sync and resume auto-follow.
         self._inv_ang_user_set = False
@@ -635,6 +657,9 @@ class ACOMTabPanel(ctk.CTkFrame):
 
     def _load_source(self):
         src = self._source_var.get()
+        # Default: raw-detector resolution → factor 1.0.  Overridden
+        # for class_avg below.
+        self._test_px_factor = 1.0
         # dp_max / dp_mean / scan_pos need only the DATASET.
         if src in ("dp_max", "dp_mean"):
             sample = self._need_dataset()
@@ -721,12 +746,25 @@ class ACOMTabPanel(ctk.CTkFrame):
             vm = float(cfg.get("vmax", 5.0))
             pat = (avgs[cid] * vm).astype(np.float32)
             self._test_pattern = pat
-            self._test_origin = f"class p{cid} avg"
             H, W = pat.shape
             self._test_center = (H / 2.0, W / 2.0)
+            # Class-avg pipeline = raw → resize(192) → CenterCrop(140)
+            # → resize(192).  Each display px spans
+            #   (H_raw/192) · (140/192)  raw-detector px,
+            # so q (and the matching calibration) scale by that.
+            try:
+                _ds = LoadPRZ(cfg["path"], resize=192, vmax=vm)
+                H_raw = float(_ds.H)
+            except Exception:
+                H_raw = 192.0
+            CENTER_CROP = 140.0
+            self._test_px_factor = (H_raw / 192.0) * (CENTER_CROP / 192.0)
+            self._test_origin = (
+                f"class p{cid} avg  (q×{self._test_px_factor:.3g} "
+                f"vs raw)")
             self._source_status.configure(
-                text=f"loaded: class p{cid} avg  "
-                      f"({pat.shape[0]}×{pat.shape[1]})")
+                text=f"loaded: class p{cid} avg  ({H}×{W})  "
+                      f"q-scale ×{self._test_px_factor:.3g}")
         else:
             # grain / scan_pos require a click on the classmap
             self._source_status.configure(
@@ -853,7 +891,7 @@ class ACOMTabPanel(ctk.CTkFrame):
         # q_per_disp_px = recip_res (nm⁻¹/px).
         try:
             from gui_app._ui import attach_hover_q
-            rp = self._recip_per_px()
+            rp = self._eff_recip_nm()   # source-aware (class avg ≠ raw)
             if rp > 0 and self._test_center is not None:
                 if getattr(self, "_pat_hover_cid", None) is not None:
                     self._canvas.mpl_disconnect(self._pat_hover_cid)
@@ -988,7 +1026,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                 or self._test_center is None):
             return np.zeros(0), np.zeros(0)
         cy, cx = self._test_center
-        inv_a = float(self._inv_ang.get())
+        inv_a = self._eff_inv_ang()
         qx = self._test_peaks[:, 0]
         qy = self._test_peaks[:, 1]
         amp = self._test_peaks[:, 2] if self._test_peaks.shape[1] > 2 \
@@ -1011,7 +1049,7 @@ class ACOMTabPanel(ctk.CTkFrame):
             self._redraw_all(); return
         rc_px, prof = self._radial_1d_of_pattern(
             self._test_pattern, self._test_center)
-        inv_a = float(self._inv_ang.get())
+        inv_a = self._eff_inv_ang()   # source-aware (class avg ≠ raw)
         rc_inva = rc_px * inv_a       # 1/Å
         # background subtract for visibility
         p = np.clip(prof - np.median(prof), 0, None)
@@ -1347,7 +1385,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                           for p in patterns_list]
         bv = build_bragg_vectors(
             peak_arrays, centers=centers_list,
-            inv_ang_per_pixel=float(self._inv_ang.get()),
+            inv_ang_per_pixel=self._eff_inv_ang(),
             Rshape=Rshape)
         names = list(self._phase_crystals.keys())
         crystals = list(self._phase_crystals.values())
@@ -1483,7 +1521,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                     res = acom_single_pattern(
                         cr, self._test_pattern,
                         center=self._test_center,
-                        inv_ang_per_pixel=float(self._inv_ang.get()),
+                        inv_ang_per_pixel=self._eff_inv_ang(),
                         detect_kw=dict(
                             min_sigma=float(self._det_min.get()),
                             max_sigma=float(self._det_max.get()),
@@ -1601,7 +1639,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                 res = acom_single_pattern(
                     cr, self._test_pattern,
                     center=self._test_center,
-                    inv_ang_per_pixel=float(self._inv_ang.get()),
+                    inv_ang_per_pixel=self._eff_inv_ang(),
                     detect_kw=dict(
                         min_sigma=float(self._det_min.get()),
                         max_sigma=float(self._det_max.get()),
@@ -1786,6 +1824,17 @@ class ACOMTabPanel(ctk.CTkFrame):
             cfg = SAMPLES[sample]
             Ny, Nx = cfg["scan_shape"]
             inv_a = float(self._inv_ang.get())
+            # Class-avg batch patterns are 192-cart-cropped (raw →
+            # resize192 → CenterCrop140 → resize192), so their q-per-px
+            # is scaled vs raw.  Grain avgs and full-dataset patterns
+            # are raw-resolution → factor 1.
+            if mode in ("classes", "mp_classes"):
+                try:
+                    _ds = LoadPRZ(cfg["path"], resize=192,
+                                     vmax=float(cfg.get("vmax", 5.0)))
+                    inv_a = inv_a * (float(_ds.H) / 192.0) * (140.0 / 192.0)
+                except Exception:
+                    pass
             detect_kw = dict(
                 min_sigma=float(self._det_min.get()),
                 max_sigma=float(self._det_max.get()),
