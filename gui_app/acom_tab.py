@@ -172,27 +172,35 @@ class ACOMTabPanel(ctk.CTkFrame):
         src_row = ctk.CTkFrame(sidebar, fg_color="transparent")
         src_row.pack(fill="x", padx=10, pady=2)
         for label, val in (
-                ("dp_max  (per-pixel max over whole scan)", "dp_max"),
-                ("dp_mean (mean over whole scan)", "dp_mean"),
-                ("class avg", "class_avg"),
-                ("grain @ click", "grain"),
-                ("single scan pos @ click", "scan_pos")):
+                ("dp_max  (per-pixel max — DATASET only)", "dp_max"),
+                ("dp_mean (mean — DATASET only)", "dp_mean"),
+                ("scan pos (y, x) — DATASET only", "scan_pos"),
+                ("class avg  (needs trained run)", "class_avg"),
+                ("grain @ click  (needs trained run)", "grain")):
             ctk.CTkRadioButton(src_row, text=label,
                                 variable=self._source_var,
                                 value=val
                                 ).pack(anchor="w", padx=2)
         cls_row = ctk.CTkFrame(sidebar, fg_color="transparent")
         cls_row.pack(fill="x", padx=10, pady=2)
-        ctk.CTkLabel(cls_row, text="class id:",
-                       width=70, anchor="w").pack(side="left")
+        ctk.CTkLabel(cls_row, text="class:", width=44,
+                       anchor="w").pack(side="left")
         self._src_class = ctk.StringVar(value="0")
         ctk.CTkEntry(cls_row, textvariable=self._src_class,
-                       width=50).pack(side="left", padx=2)
-        ctk.CTkButton(cls_row, text="Load source →",
-                       width=130,
+                       width=40).pack(side="left", padx=2)
+        ctk.CTkLabel(cls_row, text="(y,x):", width=44,
+                       anchor="w").pack(side="left", padx=(8, 2))
+        self._src_y = ctk.StringVar(value="64")
+        self._src_x = ctk.StringVar(value="64")
+        ctk.CTkEntry(cls_row, textvariable=self._src_y,
+                       width=40).pack(side="left", padx=2)
+        ctk.CTkEntry(cls_row, textvariable=self._src_x,
+                       width=40).pack(side="left", padx=2)
+        ctk.CTkButton(sidebar, text="Load source →",
+                       width=240,
                        fg_color=("#4D6FB0", "#3A5380"),
                        command=self._load_source
-                       ).pack(side="left", padx=4)
+                       ).pack(anchor="w", padx=10, pady=2)
         self._source_status = ctk.CTkLabel(sidebar,
             text="(no source loaded)",
             font=("Consolas", 9),
@@ -503,31 +511,60 @@ class ACOMTabPanel(ctk.CTkFrame):
     def _posthoc(self):
         return getattr(self.app, "posthoc", None)
 
+    # --- dataset (no model needed) vs inference (needs trained run) ---
+    def _active_sample(self):
+        """Sample key from the global session OR a linked posthoc run.
+        Requires only a DATASET — works before any training."""
+        sess = getattr(self.app, "session", None)
+        if sess is not None and sess.sample and sess.sample in SAMPLES:
+            return sess.sample
+        ph = self._posthoc()
+        if ph is not None and ph.sample in SAMPLES:
+            return ph.sample
+        return None
+
+    def _active_scan_shape(self):
+        s = self._active_sample()
+        return SAMPLES[s]["scan_shape"] if s else None
+
+    def _need_dataset(self):
+        """Gate for sources that need only the cube (dp_max/dp_mean/
+        scan pos / full-dataset ACOM) — no trained model required."""
+        s = self._active_sample()
+        if s is None:
+            messagebox.showinfo("ACOM",
+                "Load a DATASET first — pick one with the topbar "
+                "'dataset' badge (no trained run needed for dp_max / "
+                "single-pattern / full-dataset ACOM).")
+        return s
+
     def _need_posthoc_inference(self):
-        # Prefer the global Session; fall back to the legacy posthoc
-        # panel if a tab hasn't migrated yet.
+        """Gate for sources that need DINO inference (class avg / grain
+        modes).  Falls back to the legacy posthoc panel."""
         sess = getattr(self.app, "session", None)
         ph = self._posthoc()
         if (sess is None or not sess.has_dataset()
                 or not sess.has_inference()):
             if ph is None or ph.sample is None or ph._inf is None:
                 messagebox.showinfo("ACOM",
-                    "Load a run via the topbar dataset / run badges "
-                    "(or in the Post-hoc → Analysis tab) first.")
+                    "This mode (grain / class average) needs DINO "
+                    "inference — load a trained run via the topbar "
+                    "'run' badge.  dp_max / single-pattern / "
+                    "full-dataset ACOM work with just a dataset.")
                 return None
         return ph
 
-    def _compute_dp_max_mean(self, ph):
+    def _compute_dp_max_mean(self, sample):
         """Stream over the cube to build (dp_max, dp_mean) without
-        loading the whole thing into RAM.  Cached per sample."""
-        sample = ph.sample
+        loading the whole thing into RAM.  Cached per sample.
+        Needs only the dataset (no model)."""
         if (sample in self._cached_dp_max
                 and sample in self._cached_dp_mean):
             return (self._cached_dp_max[sample],
                     self._cached_dp_mean[sample])
         cfg = SAMPLES[sample]
         from gui_app.posthoc_panel import _open_lazy
-        cube = _open_lazy(cfg["path"], scan_shape=ph._scan_shape)
+        cube = _open_lazy(cfg["path"], scan_shape=cfg["scan_shape"])
         Ny, Nx, H, W = cube.shape
         dp_max = np.zeros((H, W), dtype=np.float32)
         dp_sum = np.zeros((H, W), dtype=np.float64)
@@ -552,16 +589,14 @@ class ACOMTabPanel(ctk.CTkFrame):
         return dp_max, dp_mean
 
     def _load_source(self):
-        ph = self._need_posthoc_inference()
-        if ph is None: return
         src = self._source_var.get()
-        cfg = SAMPLES[ph.sample]
+        # dp_max / dp_mean / scan_pos need only the DATASET.
         if src in ("dp_max", "dp_mean"):
-            # Compute (and cache) dp_max + dp_mean by streaming the
-            # cube row-by-row.  ~5-30 s depending on cube size.
+            sample = self._need_dataset()
+            if sample is None: return
             def _w():
                 try:
-                    dpm, dpu = self._compute_dp_max_mean(ph)
+                    dpm, dpu = self._compute_dp_max_mean(sample)
                 except Exception as e:
                     err = repr(e)
                     self.after(0, lambda: messagebox.showerror(
@@ -572,7 +607,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                 H, W = pat.shape
                 self._test_center = (H / 2.0, W / 2.0)
                 self._test_origin = (f"{src}  ({pat.shape[0]}×{pat.shape[1]})  "
-                                      f"sample={ph.sample}")
+                                      f"sample={sample}")
                 def _done():
                     self._source_status.configure(
                         text=f"loaded: {self._test_origin}")
@@ -582,6 +617,35 @@ class ACOMTabPanel(ctk.CTkFrame):
             self._source_status.configure(
                 text=f"computing {src}… (streams the cube; ~5–30 s)")
             return
+        if src == "scan_pos":
+            # single position by (y,x) index — dataset only.
+            sample = self._need_dataset()
+            if sample is None: return
+            cfg = SAMPLES[sample]
+            Ny, Nx = cfg["scan_shape"]
+            try:
+                y = int(self._src_y.get()); x = int(self._src_x.get())
+            except Exception:
+                self._source_status.configure(
+                    text="enter scan (y, x), or click the class map "
+                         "(needs a trained run)"); return
+            if not (0 <= y < Ny and 0 <= x < Nx):
+                messagebox.showerror("scan_pos",
+                    f"(y,x) out of range [0..{Ny-1}],[0..{Nx-1}]"); return
+            ds = LoadPRZ(cfg["path"], resize=192, vmax=cfg["vmax"])
+            self._test_pattern = ds.get_raw(
+                y * Nx + x).astype(np.float32)
+            H, W = self._test_pattern.shape
+            self._test_center = (H / 2.0, W / 2.0)
+            self._test_origin = f"scan pos ({y}, {x})  sample={sample}"
+            self._source_status.configure(
+                text=f"loaded: {self._test_origin}")
+            self._detect_and_redraw()
+            return
+        # class_avg / grain need DINO inference.
+        ph = self._need_posthoc_inference()
+        if ph is None: return
+        cfg = SAMPLES[ph.sample]
         if src == "class_avg":
             try:
                 cid = int(self._src_class.get())
@@ -1542,8 +1606,12 @@ class ACOMTabPanel(ctk.CTkFrame):
                                 "py4DSTEM call, then exiting…")
 
     def _run_batch(self, mode):
-        ph = self._need_posthoc_inference()
-        if ph is None: return
+        # full / mp_full need only the DATASET; classes/grains need
+        # DINO inference (they operate on class avgs / grains).
+        if mode in ("full", "mp_full"):
+            if self._need_dataset() is None: return
+        else:
+            if self._need_posthoc_inference() is None: return
         if not self._phase_crystals:
             messagebox.showinfo("Batch",
                 "Build at least one CIF (step 3)."); return
@@ -1593,17 +1661,28 @@ class ACOMTabPanel(ctk.CTkFrame):
 
     def _peak_cache_path(self, stride, detect_kw):
         """Path of the peak cache for (run, stride, detect params).
-        Independent of CIF/phase so any phase run reuses it."""
+        Independent of CIF/phase so any phase run reuses it.
+        Stored under <run>/acom/ when a trained run is linked, else
+        next to the cube in <cube_dir>/_acom_peakcache/ (dataset-only
+        mode)."""
         import json, hashlib
+        sample = self._active_sample()
+        if sample is None:
+            return None
+        Ny, Nx = SAMPLES[sample]["scan_shape"]
+        kh = hashlib.md5(json.dumps(
+            {"sample": sample, "stride": stride, "kw": detect_kw,
+               "shape": [Ny, Nx]},
+            sort_keys=True, default=str).encode()).hexdigest()[:10]
         ph = self._posthoc()
         run = getattr(ph, "outdir", None) if ph else None
-        if not run or ph._scan_shape is None:
-            return None
-        Ny, Nx = ph._scan_shape
-        kh = hashlib.md5(json.dumps(
-            {"stride": stride, "kw": detect_kw, "shape": [Ny, Nx]},
-            sort_keys=True, default=str).encode()).hexdigest()[:10]
-        return os.path.join(run, "acom", f"peaks_full_{kh}.npz")
+        if run and os.path.isdir(run):
+            base = os.path.join(run, "acom")
+        else:
+            base = os.path.join(
+                os.path.dirname(SAMPLES[sample]["path"]),
+                "_acom_peakcache")
+        return os.path.join(base, f"peaks_full_{kh}.npz")
 
     def _peak_cache_info(self, path):
         try:
@@ -1623,12 +1702,9 @@ class ACOMTabPanel(ctk.CTkFrame):
                                             zone_axis_from_matrix)
         ph = self._posthoc()
         try:
-            cfg = SAMPLES[ph.sample]
-            Ny, Nx = ph._scan_shape
-            assigns = ph._inf["assigns"]
-            soft = ph._inf["soft_probs"]
-            K = int(soft.shape[1])
-            assigns_grid = assigns.reshape(Ny, Nx)
+            sample = self._active_sample()
+            cfg = SAMPLES[sample]
+            Ny, Nx = cfg["scan_shape"]
             inv_a = float(self._inv_ang.get())
             detect_kw = dict(
                 min_sigma=float(self._det_min.get()),
@@ -1641,10 +1717,19 @@ class ACOMTabPanel(ctk.CTkFrame):
             mar = float(self._mp_margin.get())
             crystals = dict(self._phase_crystals)
             t0 = time.time()
+            # Inference-derived arrays are only needed for class/grain
+            # modes — leave them None for full / mp_full (dataset-only).
+            assigns = soft = assigns_grid = None
+            K = 0
+            if mode not in ("full", "mp_full"):
+                assigns = ph._inf["assigns"]
+                soft = ph._inf["soft_probs"]
+                K = int(soft.shape[1])
+                assigns_grid = assigns.reshape(Ny, Nx)
 
             if mode in ("full", "mp_full"):
                 from gui_app.posthoc_panel import _open_lazy
-                cube = _open_lazy(cfg["path"], scan_shape=ph._scan_shape)
+                cube = _open_lazy(cfg["path"], scan_shape=(Ny, Nx))
                 stride = max(int(self._full_stride.get()), 1)
                 def _prog(done, total, stage):
                     if stage == "detect" and done % 256 == 0:
@@ -1807,19 +1892,10 @@ class ACOMTabPanel(ctk.CTkFrame):
         Returns (peaks_all, centers_all).
         """
         from gui_app.acom_core import detect_peaks_2d
-        import json, hashlib
         cube = np.asarray(cube) if not hasattr(cube, "shape") else cube
         Ny, Nx, H, W = cube.shape
         center = (H / 2.0, W / 2.0)
-        ph = self._posthoc()
-        run = getattr(ph, "outdir", None) if ph else None
-        cache_path = None
-        if run:
-            kh = hashlib.md5(json.dumps(
-                {"stride": stride, "kw": detect_kw, "shape": [Ny, Nx]},
-                sort_keys=True, default=str).encode()).hexdigest()[:10]
-            cache_path = os.path.join(run, "acom",
-                                          f"peaks_full_{kh}.npz")
+        cache_path = self._peak_cache_path(stride, detect_kw)
         # Honour the user's cache decision made in _run_batch
         # (defaults to True for any direct caller).
         use_cache = getattr(self, "_use_cached_peaks", True)
