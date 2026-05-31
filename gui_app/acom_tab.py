@@ -2208,20 +2208,31 @@ class ACOMTabPanel(ctk.CTkFrame):
         self._popup_diffraction(pat, title)
 
     def _popup_diffraction(self, pat, title):
-        """Small diffraction popup with vmax/log controls + hover-q."""
+        """Small diffraction popup with log toggle + hover-q.
+
+        Uses PLAIN tkinter widgets only — mixing customtkinter widgets
+        as siblings of a matplotlib FigureCanvasTkAgg triggers a CTk
+        resize crash ('FigureCanvasTkAgg has no attribute
+        winfo_exists').
+        """
         from matplotlib.backends.backend_tkagg import (
             FigureCanvasTkAgg, NavigationToolbar2Tk)
         from gui_app._ui import attach_hover_q
         win = tk.Toplevel(self)
         win.title(title); win.geometry("620x660")
-        ctrl = ctk.CTkFrame(win, fg_color="transparent")
-        ctrl.pack(side="top", fill="x", padx=6, pady=4)
-        log_var = ctk.BooleanVar(value=True)
-        ctk.CTkLabel(ctrl, text=title, font=("Consolas", 10),
-                       anchor="w").pack(side="left", padx=4)
+        ctrl = tk.Frame(win, bg="#f4f4f4")
+        ctrl.pack(side="top", fill="x")
+        log_var = tk.BooleanVar(value=True)
+        tk.Label(ctrl, text=title, font=("Consolas", 9),
+                   bg="#f4f4f4", anchor="w").pack(side="left", padx=6,
+                                                     pady=4)
         fig = Figure(figsize=(6, 6), dpi=110, facecolor="white")
         ax = fig.add_subplot(111)
         rp = self._recip_per_px()
+        canvas_holder = tk.Frame(win)
+        canvas_holder.pack(side="top", fill="both", expand=True)
+        canv = FigureCanvasTkAgg(fig, master=canvas_holder)
+        canv.get_tk_widget().pack(fill="both", expand=True)
         def _draw():
             ax.clear()
             img = (np.log1p(np.clip(pat, 0, None)) if log_var.get()
@@ -2231,13 +2242,13 @@ class ACOMTabPanel(ctk.CTkFrame):
             ax.set_xticks([]); ax.set_yticks([])
             ax.set_title(title, fontsize=9)
             canv.draw_idle()
-        ctk.CTkCheckBox(ctrl, text="log", variable=log_var,
-                          command=_draw, width=50).pack(side="right",
-                                                            padx=6)
-        canv = FigureCanvasTkAgg(fig, master=win)
-        canv.get_tk_widget().pack(fill="both", expand=True)
-        tb = NavigationToolbar2Tk(canv, win, pack_toolbar=False)
-        tb.update(); tb.pack(side="bottom", fill="x")
+        tk.Checkbutton(ctrl, text="log", variable=log_var,
+                         command=_draw, bg="#f4f4f4").pack(side="right",
+                                                              padx=8)
+        tb_frame = tk.Frame(win)
+        tb_frame.pack(side="bottom", fill="x")
+        tb = NavigationToolbar2Tk(canv, tb_frame, pack_toolbar=False)
+        tb.update(); tb.pack(side="left", fill="x")
         _draw()
         if rp > 0:
             H, W = pat.shape
