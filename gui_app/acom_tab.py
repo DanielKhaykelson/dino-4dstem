@@ -1568,18 +1568,15 @@ class ACOMTabPanel(ctk.CTkFrame):
                             self._set_status(f"{mode} {s}…"))
 
                 if mode == "full":
-                    if len(crystals) != 1:
-                        # Use the FIRST built crystal.
-                        cr = next(iter(crystals.values()))
-                    else:
-                        cr = next(iter(crystals.values()))
+                    cr = next(iter(crystals.values()))
                     omap, bv, scan_shape = acom_full_dataset(
                         cr, cube, inv_ang_per_pixel=inv_a,
                         detect_kw=detect_kw,
                         subsample_stride=stride, progress_cb=_prog)
                     dt = time.time() - t0
-                    self.after(0, lambda: self._render_full_singlephase(
-                        omap, scan_shape, stride, dt))
+                    self.after(0, lambda:
+                        self._render_classical_orientation_strain(
+                            cr, omap, bv, scan_shape, stride, dt))
                 else:
                     # Mirror the notebook: build PointListArray over
                     # the full cube → match_orientations per phase →
@@ -1872,6 +1869,103 @@ class ACOMTabPanel(ctk.CTkFrame):
         self._fig.tight_layout(rect=[0, 0, 1, 0.96])
         # Stash on the panel so the user can save later.
         self._last_full_cp = cp
+        self._canvas.draw_idle()
+
+    def _render_classical_orientation_strain(self, crystal, omap, bv,
+                                                    scan_shape, stride,
+                                                    elapsed_s):
+        """Classical py4DSTEM ACOM output: IPF orientation map +
+        relative-rotation (strain) map, styled like the colab/PANDA
+        notebooks — correlation-masked, diverging colormap centred on
+        the median, robust range, nm scalebar.
+
+        Renders into the main canvas as a 2-up.  Falls back gracefully
+        if calculate_strain / plot_orientation_maps aren't available.
+        """
+        import matplotlib.pyplot as plt
+        from mpl_toolkits.axes_grid1.anchored_artists import (
+            AnchoredSizeBar)
+        Ny, Nx = scan_shape
+        self._fig.clf()
+        gs = self._fig.add_gridspec(1, 2, wspace=0.15)
+        ax_ipf = self._fig.add_subplot(gs[0, 0])
+        ax_rot = self._fig.add_subplot(gs[0, 1])
+
+        # --- (1) IPF orientation map via py4DSTEM ---
+        import io
+        from matplotlib.image import imread
+        try:
+            res = crystal.plot_orientation_maps(
+                orientation_map=omap, orientation_ind=0,
+                corr_range=[0.0, 1.0], figsize=(6, 6),
+                returnfig=True)
+            ofig = res[0] if isinstance(res, (tuple, list)) else res
+            buf = io.BytesIO()
+            ofig.savefig(buf, format="png", dpi=130,
+                            bbox_inches="tight", facecolor="white")
+            plt.close(ofig); buf.seek(0)
+            ax_ipf.imshow(imread(buf), aspect="auto")
+            ax_ipf.set_title("orientation (IPF)", fontsize=11)
+        except Exception as e:
+            ax_ipf.text(0.5, 0.5, f"orientation map\nunavailable:\n{e!r}",
+                          ha="center", va="center", fontsize=9,
+                          color="#a33", transform=ax_ipf.transAxes)
+        ax_ipf.set_xticks([]); ax_ipf.set_yticks([])
+
+        # --- (2) relative-rotation map from calculate_strain ---
+        try:
+            strain = crystal.calculate_strain(
+                bv, omap, min_num_peaks=3,
+                rotation_range=np.pi / 2)
+            # strain[3] = rotation (rad); strain[4] = correlation mask
+            rot_deg = np.degrees(np.asarray(strain[3], dtype=float))
+            corr_mask_raw = np.asarray(strain[4], dtype=float)
+            # Correlation filter (notebook uses 0.3–1.0).
+            mask = np.isfinite(rot_deg) & (corr_mask_raw >= 0.3)
+            delta = np.full_like(rot_deg, np.nan)
+            if mask.any():
+                ref = np.nanmedian(rot_deg[mask])
+                delta[mask] = rot_deg[mask] - ref
+                # Robust symmetric range (5–95 pct of |Δθ|).
+                finite = delta[np.isfinite(delta)]
+                vmax = (np.percentile(np.abs(finite), 95)
+                          if finite.size else 5.0)
+                vmax = float(max(vmax, 0.5))
+            else:
+                vmax = 5.0
+            im = ax_rot.imshow(delta, cmap="RdBu_r",
+                                  vmin=-vmax, vmax=vmax,
+                                  interpolation="nearest", aspect="equal")
+            cb = self._fig.colorbar(im, ax=ax_rot, fraction=0.045,
+                                       pad=0.02)
+            cb.set_label("Δθ  (deg, rel. median)", fontsize=9)
+            ax_rot.set_title("relative rotation", fontsize=11)
+            # nm scalebar from topbar real_res.
+            try:
+                nm_per_px = (float(self.app.real_res.get())
+                               if self.app else 0.0)
+                if nm_per_px > 0:
+                    bar_nm = 50.0
+                    sb = AnchoredSizeBar(
+                        ax_rot.transData,
+                        bar_nm / nm_per_px, f"{bar_nm:.0f} nm",
+                        "lower right", pad=0.4, color="black",
+                        frameon=False, size_vertical=max(Ny * 0.01, 1))
+                    ax_rot.add_artist(sb)
+            except Exception:
+                pass
+        except Exception as e:
+            ax_rot.text(0.5, 0.5,
+                          f"strain map\nunavailable:\n{e!r}",
+                          ha="center", va="center", fontsize=9,
+                          color="#a33", transform=ax_rot.transAxes)
+        ax_rot.set_xticks([]); ax_rot.set_yticks([])
+
+        self._fig.suptitle(
+            f"Classical ACOM — orientation + relative rotation  "
+            f"(stride={stride}, {elapsed_s:.0f}s)",
+            fontsize=11)
+        self._fig.tight_layout(rect=[0, 0, 1, 0.95])
         self._canvas.draw_idle()
 
     def _render_full_singlephase(self, omap, scan_shape, stride,
