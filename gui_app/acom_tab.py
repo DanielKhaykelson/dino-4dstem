@@ -494,6 +494,13 @@ class ACOMTabPanel(ctk.CTkFrame):
         # Hover handler for CIF-ring (h,k,l) tooltip on the 1D panel.
         self._hover_cid = self._canvas.mpl_connect(
             "motion_notify_event", self._on_1d_hover)
+        # Double-click any panel → enlarge it in its own popup window.
+        self._dclick_cid = self._canvas.mpl_connect(
+            "button_press_event", self._on_panel_double_click)
+        ctk.CTkLabel(canvas_holder,
+            text="(double-click any panel to enlarge it)",
+            font=("Segoe UI", 9), text_color=("#888", "#888")
+            ).pack(side="bottom", anchor="e", padx=8)
 
     def _build_axes(self):
         self._fig.clf()
@@ -1463,9 +1470,17 @@ class ACOMTabPanel(ctk.CTkFrame):
                     [self._test_center],
                     Rshape=(1, 1))
                 kmax = float(self._kmax.get())
-                # Per the notebook: experiment markers are radius
-                # scaled by peak intensity ∝ 0.02; calculated marker
-                # base ∝ 100.
+                # Auto-scale marker sizes so the experimental (gray)
+                # circles are actually visible — fixed 0.02 makes them
+                # vanish when peak intensities are small.  Target a
+                # median marker of ~120 px² for each set.
+                try:
+                    pl0 = bv.cal[0, 0]
+                    ei = np.asarray(pl0.data["intensity"], dtype=float)
+                    ei = ei[ei > 0]
+                    s_exp = float(120.0 / np.median(ei)) if ei.size else 50.0
+                except Exception:
+                    s_exp = 50.0
                 res = cp.quantify_single_pattern(
                     bv, xy_position=(0, 0), k_max=kmax,
                     corr_kernel_size=0.04,
@@ -1477,9 +1492,9 @@ class ACOMTabPanel(ctk.CTkFrame):
                     plot_result=True, returnfig=True,
                     verbose=False,
                     plot_unmatched_peaks=True,
-                    scale_markers_experiment=0.02,
-                    scale_markers_calculated=100,
-                    figsize=(7.5, 5.5))
+                    scale_markers_experiment=s_exp,
+                    scale_markers_calculated=s_exp,
+                    figsize=(8.5, 6.5))
                 # Return is
                 # (phase_weights, residual, reliability, int_total,
                 #  fig, ax)
@@ -2406,6 +2421,53 @@ class ACOMTabPanel(ctk.CTkFrame):
                     size_vertical=max(Ny * 0.01, 1)))
         except Exception:
             pass
+
+    def _on_panel_double_click(self, event):
+        """Double-click any panel → re-render it full-size in a popup.
+
+        Image axes (pattern / fit / classmap / batch maps) are
+        reproduced from their imshow array + overlaid scatter; the 1D
+        panel routes to the dedicated 1D popup.
+        """
+        if not getattr(event, "dblclick", False):
+            return
+        ax = event.inaxes
+        if ax is None:
+            return
+        # 1D radial → dedicated popup.
+        if ax is getattr(self, "_ax_1d", None):
+            try: self._open_1d_popup()
+            except Exception: pass
+            return
+        # Image-based axes → copy the displayed image + scatter.
+        imgs = ax.get_images()
+        if not imgs:
+            return
+        im0 = imgs[0]
+        arr = im0.get_array()
+        cmap = im0.get_cmap(); clim = im0.get_clim()
+        fig = Figure(figsize=(8.0, 7.5), dpi=120, facecolor="white")
+        bax = fig.add_subplot(111)
+        # If it's an RGB(A) image, draw as-is; else apply cmap/clim.
+        if hasattr(arr, "ndim") and arr.ndim == 3:
+            bax.imshow(arr, interpolation="nearest", aspect="equal")
+        else:
+            bax.imshow(arr, cmap=cmap, vmin=clim[0], vmax=clim[1],
+                          interpolation="nearest", aspect="equal")
+        # Re-draw any scatter overlays (detected peaks etc.).
+        for coll in ax.collections:
+            try:
+                off = coll.get_offsets()
+                if off is not None and len(off):
+                    bax.scatter(off[:, 0], off[:, 1], s=60,
+                                   facecolors="none", edgecolors="cyan",
+                                   linewidths=1.2)
+            except Exception:
+                pass
+        bax.set_title(ax.get_title() or "panel", fontsize=11)
+        bax.set_xticks([]); bax.set_yticks([])
+        fig.tight_layout()
+        self._popup_figure(fig, "enlarged panel")
 
     def _popup_figure(self, fig, title):
         """Show a matplotlib Figure full-size in its own tk window
