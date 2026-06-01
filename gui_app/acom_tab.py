@@ -482,6 +482,12 @@ class ACOMTabPanel(ctk.CTkFrame):
         self._build_axes()
         self._redraw_all()
 
+        # Force a redraw whenever the canvas becomes visible again
+        # (CTk tabview hides/re-packs widgets on tab switch; a TkAgg
+        # canvas can come back blank until something triggers a draw).
+        self._canvas.get_tk_widget().bind(
+            "<Map>", lambda _e: self._canvas.draw_idle())
+
         # Classmap click handler
         self._click_cid = self._canvas.mpl_connect(
             "button_press_event", self._on_classmap_click)
