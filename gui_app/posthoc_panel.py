@@ -1146,7 +1146,8 @@ class PostHocPanel(ctk.CTkFrame):
         ax.set_title(
             f"{self.sample} — class map (K_active = {K})  counts = {counts}\n"
             f"left-click → single pattern   |   "
-            f"right-click → grain average",
+            f"right-click → grain average   |   "
+            f"shift+left-click → add grain to stack",
             fontsize=10)
         cb = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02,
                            ticks=list(range(K)))
@@ -1169,7 +1170,12 @@ class PostHocPanel(ctk.CTkFrame):
                 self._attr_source.set("frame")
             except Exception:
                 pass
-            if event.button == 1:
+            shift = bool(event.key) and ("shift" in str(event.key).lower())
+            if event.button == 1 and shift:
+                # Shift+left-click accumulates grains into a stacked
+                # comparison window (one grain per row).
+                self._add_grain_to_stack(y, x)
+            elif event.button == 1:
                 self._show_pattern_popup(y, x)
             else:
                 self._show_grain_popup(y, x)
@@ -2274,6 +2280,110 @@ class PostHocPanel(ctk.CTkFrame):
             fontsize=11)
         self._fig.tight_layout(rect=[0, 0, 1, 0.97])
         self._canvas.draw_idle()
+
+    # ------------------------------------------------------------------
+    # Multi-grain stacking (shift+left-click on the class map)
+    # ------------------------------------------------------------------
+    def _add_grain_to_stack(self, y, x):
+        """Append the grain at (y, x) to the shift-click selection and
+        (re)draw the stacked-comparison window: one grain per row,
+        [class-map w/ grain highlighted | grain-average diffraction]."""
+        gi = self._compute_grain_average(y, x, apply_filters=True)
+        if gi is None:
+            self._set_status("grain lookup failed: pixel not in any grain")
+            return
+        if not hasattr(self, "_grain_stack") or self._grain_stack is None:
+            self._grain_stack = []
+        # De-dupe: same grain (same class + overlapping mask at click) is
+        # skipped so repeated clicks in one grain don't pile up rows.
+        for rec in self._grain_stack:
+            if rec["cls"] == gi["cls"] and rec["grain_mask"][y, x]:
+                self._set_status("grain already in stack")
+                return
+        self._grain_stack.append(dict(y=y, x=x, **gi))
+        self._refresh_grain_stack_window()
+        self._set_status(
+            f"added grain p{gi['cls']} @ (y={y}, x={x}) — "
+            f"{len(self._grain_stack)} grain(s) stacked")
+
+    def _refresh_grain_stack_window(self):
+        """Build / rebuild the stacked-grains Toplevel from
+        ``self._grain_stack``.  Tall figures live inside a scrollable
+        frame so an arbitrary number of grains can be compared."""
+        import matplotlib.pyplot as plt  # noqa: F401 (parity w/ popups)
+        from matplotlib.colors import ListedColormap
+        cfg = SAMPLES[self.sample]
+        Ny, Nx = self._scan_shape
+        assigns = self._inf["assigns"]
+        assigns_grid = assigns.reshape(Ny, Nx)
+        K = int(self._inf["soft_probs"].shape[1])
+        stack = getattr(self, "_grain_stack", []) or []
+        n = len(stack)
+        if n == 0:
+            return
+
+        win = getattr(self, "_grain_stack_win", None)
+        if win is None or not bool(win.winfo_exists()):
+            win = tk.Toplevel(self)
+            win.title("stacked grains (shift+click selection)")
+            win.geometry("900x720")
+            bar = ctk.CTkFrame(win, fg_color="transparent")
+            bar.pack(side="top", fill="x", padx=6, pady=4)
+            self._grain_stack_count = ctk.CTkLabel(bar, text="")
+            self._grain_stack_count.pack(side="left", padx=6)
+            ctk.CTkButton(bar, text="Clear", width=70,
+                          command=self._clear_grain_stack).pack(
+                              side="right", padx=4)
+            holder = ctk.CTkScrollableFrame(win, fg_color="transparent")
+            holder.pack(side="top", fill="both", expand=True)
+            self._grain_stack_win = win
+            self._grain_stack_holder = holder
+        else:
+            for w in self._grain_stack_holder.winfo_children():
+                w.destroy()
+        holder = self._grain_stack_holder
+        try:
+            self._grain_stack_count.configure(text=f"{n} grain(s) stacked")
+        except Exception:
+            pass
+
+        cmap = ListedColormap(plt.cm.tab20(np.linspace(0, 1, max(K, 2))))
+        fig = Figure(figsize=(8.4, 2.4 * n), dpi=104, facecolor="white")
+        train_vmax = float(cfg["vmax"])
+        for r, rec in enumerate(stack):
+            ax_map = fig.add_subplot(n, 2, 2 * r + 1)
+            ax_pat = fig.add_subplot(n, 2, 2 * r + 2)
+            disp = assigns_grid.astype(float).copy()
+            ax_map.imshow(disp, cmap=cmap, vmin=0, vmax=max(K - 1, 1),
+                          interpolation="nearest")
+            ys, xs = np.where(rec["grain_mask"])
+            ax_map.imshow(np.where(rec["grain_mask"], 1.0, np.nan),
+                          cmap=ListedColormap(["black"]),
+                          interpolation="nearest", alpha=0.9)
+            ax_map.set_title(f"p{rec['cls']} @ (y={rec['y']}, x={rec['x']})  "
+                             f"{rec['n_pix']}px  conf={rec['mean_conf']:.2f}",
+                             fontsize=8)
+            ax_map.set_xticks([]); ax_map.set_yticks([])
+            ax_pat.imshow(rec["grain_avg"], cmap="magma",
+                          vmin=0, vmax=train_vmax, interpolation="nearest")
+            ax_pat.set_title("grain-average diffraction", fontsize=8)
+            ax_pat.set_xticks([]); ax_pat.set_yticks([])
+        fig.tight_layout()
+        canvas = FigureCanvasTkAgg(fig, master=holder)
+        canvas.draw()
+        canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
+        try:
+            win.lift(); win.focus_force()
+        except Exception:
+            pass
+
+    def _clear_grain_stack(self):
+        self._grain_stack = []
+        win = getattr(self, "_grain_stack_win", None)
+        if win is not None and bool(win.winfo_exists()):
+            win.destroy()
+        self._grain_stack_win = None
+        self._set_status("grain stack cleared")
 
     def _compute_grain_average(self, y, x, apply_filters=True):
         """Return the (raw-detector) average diffraction pattern for the

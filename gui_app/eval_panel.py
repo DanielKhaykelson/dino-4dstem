@@ -130,6 +130,21 @@ class EvalPanel(ctk.CTkFrame):
 
         self._sync_mode()
 
+        # When the user navigates back to this tab, make sure the live
+        # watch is still running (re-arm if it stopped) so it stays
+        # "always connected to the current kmap".
+        self.bind("<Map>", lambda _e: self._ensure_polling())
+
+    def _ensure_polling(self):
+        """Re-arm the LIVE poll loop if a run is linked but the
+        self.after chain isn't currently scheduled."""
+        try:
+            if (self._mode_var.get() == "LIVE" and self.outdir is not None
+                    and self._poll_after is None):
+                self._start_polling()
+        except Exception:
+            pass
+
     def _sync_mode(self):
         if self._mode_var.get() == "LIVE":
             self._load_box.pack_forget()
@@ -166,15 +181,28 @@ class EvalPanel(ctk.CTkFrame):
         self._poll_after = self.after(2000, self._poll)
 
     def _poll(self):
-        if self.outdir is None or not os.path.isdir(self.outdir):
-            self._poll_after = self.after(2000, self._poll); return
-        cks = list_ckpts(self.outdir)
-        if cks:
-            ep, p = cks[-1]
-            if ep > self._last_ckpt_epoch and not self._busy:
-                self._last_ckpt_epoch = ep
-                self._render_from_ckpt(p, label=f"ep{ep}")
-        self._poll_after = self.after(2000, self._poll)
+        # Self-healing watch loop: ANY transient error (a half-written
+        # mid-training checkpoint, an infer hiccup) must NOT kill the
+        # poll chain — otherwise the tab "dies" and only a full reload
+        # revives it.  Always reschedule in finally.
+        try:
+            if self.outdir is not None and os.path.isdir(self.outdir):
+                cks = list_ckpts(self.outdir)
+                if cks:
+                    ep, p = cks[-1]
+                    if ep > self._last_ckpt_epoch and not self._busy:
+                        self._last_ckpt_epoch = ep
+                        self._render_from_ckpt(p, label=f"ep{ep}")
+        except Exception as e:
+            try:
+                print(f"[eval] poll error (continuing): {e!r}", flush=True)
+            except Exception:
+                pass
+        finally:
+            try:
+                self._poll_after = self.after(2000, self._poll)
+            except Exception:
+                self._poll_after = None
 
     # ---- LOAD mode ----
     def _load_dir_dialog(self):
