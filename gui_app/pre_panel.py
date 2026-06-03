@@ -1421,10 +1421,12 @@ class PrePanel(ctk.CTkFrame):
                 shape=(Ny, Nx, H, W))
             t0 = time.time()
             for y in range(Ny):
-                # Read a full row, blur each pattern in it.
-                row = np.asarray(self.cube[y]).astype(np.float32)
+                # Index per-frame with the universal 2-tuple cube[y, x]
+                # so this works for BOTH 4D .npy cubes and 3D-backed h5
+                # wrappers (the latter reject a single-int row index).
                 for x in range(Nx):
-                    out[y, x] = gaussian_filter(row[x], sigma=sig)
+                    frame = np.asarray(self.cube[y, x], dtype=np.float32)
+                    out[y, x] = gaussian_filter(frame, sigma=sig)
                 if (y + 1) % max(1, Ny // 40) == 0:
                     dt = time.time() - t0
                     eta = dt * (Ny - y - 1) / max(y + 1, 1)
