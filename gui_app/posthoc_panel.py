@@ -1147,7 +1147,7 @@ class PostHocPanel(ctk.CTkFrame):
             f"{self.sample} — class map (K_active = {K})  counts = {counts}\n"
             f"left-click → single pattern   |   "
             f"right-click → grain average   |   "
-            f"shift+left-click → add grain to stack",
+            f"shift+right-click → add grain to stack",
             fontsize=10)
         cb = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02,
                            ticks=list(range(K)))
@@ -1171,8 +1171,8 @@ class PostHocPanel(ctk.CTkFrame):
             except Exception:
                 pass
             shift = bool(event.key) and ("shift" in str(event.key).lower())
-            if event.button == 1 and shift:
-                # Shift+left-click accumulates grains into a stacked
+            if event.button == 3 and shift:
+                # Shift+right-click accumulates grains into a stacked
                 # comparison window (one grain per row).
                 self._add_grain_to_stack(y, x)
             elif event.button == 1:
@@ -2285,9 +2285,10 @@ class PostHocPanel(ctk.CTkFrame):
     # Multi-grain stacking (shift+left-click on the class map)
     # ------------------------------------------------------------------
     def _add_grain_to_stack(self, y, x):
-        """Append the grain at (y, x) to the shift-click selection and
-        (re)draw the stacked-comparison window: one grain per row,
-        [class-map w/ grain highlighted | grain-average diffraction]."""
+        """Append the grain at (y, x) to the shift+right-click selection
+        and (re)draw the stacked-comparison window: one grain per row,
+        [class-map w/ grain highlighted | grain-average diffraction
+        (+ GradCAM once computed)]."""
         gi = self._compute_grain_average(y, x, apply_filters=True)
         if gi is None:
             self._set_status("grain lookup failed: pixel not in any grain")
@@ -2300,82 +2301,173 @@ class PostHocPanel(ctk.CTkFrame):
             if rec["cls"] == gi["cls"] and rec["grain_mask"][y, x]:
                 self._set_status("grain already in stack")
                 return
-        self._grain_stack.append(dict(y=y, x=x, **gi))
-        self._refresh_grain_stack_window()
+        self._grain_stack.append(dict(y=y, x=x, cam=None, **gi))
+        self._ensure_grain_stack_window()
+        self._redraw_grain_stack()
         self._set_status(
             f"added grain p{gi['cls']} @ (y={y}, x={x}) — "
             f"{len(self._grain_stack)} grain(s) stacked")
 
-    def _refresh_grain_stack_window(self):
-        """Build / rebuild the stacked-grains Toplevel from
-        ``self._grain_stack``.  Tall figures live inside a scrollable
-        frame so an arbitrary number of grains can be compared."""
-        import matplotlib.pyplot as plt  # noqa: F401 (parity w/ popups)
-        from matplotlib.colors import ListedColormap
-        cfg = SAMPLES[self.sample]
-        Ny, Nx = self._scan_shape
-        assigns = self._inf["assigns"]
-        assigns_grid = assigns.reshape(Ny, Nx)
-        K = int(self._inf["soft_probs"].shape[1])
-        stack = getattr(self, "_grain_stack", []) or []
-        n = len(stack)
-        if n == 0:
+    def _ensure_grain_stack_window(self):
+        """Create the stacked-grains Toplevel (with vmax / log / GradCAM
+        controls) once; reuse it on subsequent shift+right-clicks."""
+        win = getattr(self, "_grain_stack_win", None)
+        if win is not None and bool(win.winfo_exists()):
             return
+        win = tk.Toplevel(self)
+        win.title("stacked grains (shift+right-click selection)")
+        win.geometry("1200x900")
+        bar = ctk.CTkFrame(win, fg_color="transparent")
+        bar.pack(side="top", fill="x", padx=6, pady=4)
+        self._grain_stack_count = ctk.CTkLabel(bar, text="")
+        self._grain_stack_count.pack(side="left", padx=6)
 
+        train_vmax = float(SAMPLES[self.sample]["vmax"])
+        self._gs_vmax_var = ctk.DoubleVar(value=train_vmax)
+        self._gs_log_var = ctk.BooleanVar(value=False)
+        ctk.CTkLabel(bar, text="vmax:").pack(side="left", padx=(12, 2))
+        ent = ctk.CTkEntry(bar, textvariable=self._gs_vmax_var, width=70)
+        ent.pack(side="left", padx=2)
+        ent.bind("<Return>", lambda _e: self._redraw_grain_stack())
+        ctk.CTkButton(bar, text="reset", width=56,
+                      command=lambda: (self._gs_vmax_var.set(train_vmax),
+                                       self._redraw_grain_stack())
+                      ).pack(side="left", padx=2)
+        ctk.CTkCheckBox(bar, text="log stretch", variable=self._gs_log_var,
+                        command=self._redraw_grain_stack).pack(side="left",
+                                                               padx=8)
+        self._gs_cam_btn = ctk.CTkButton(
+            bar, text="Compute GradCAM", width=150,
+            fg_color=("#2D7A2D", "#1F7A1F"),
+            command=self._compute_grain_stack_gradcam)
+        self._gs_cam_btn.pack(side="left", padx=8)
+        ctk.CTkButton(bar, text="Clear", width=64,
+                      command=self._clear_grain_stack).pack(side="right",
+                                                            padx=4)
+        holder = ctk.CTkScrollableFrame(win, fg_color="transparent")
+        holder.pack(side="top", fill="both", expand=True)
+        self._grain_stack_win = win
+        self._grain_stack_holder = holder
+        self._gs_canvas = None
+
+    def _redraw_grain_stack(self):
+        """Render every stacked grain as a row into the scrollable
+        holder, honouring the vmax / log controls and showing GradCAM
+        columns for any grain that has one computed."""
+        import matplotlib.pyplot as plt
+        from matplotlib.colors import ListedColormap
         win = getattr(self, "_grain_stack_win", None)
         if win is None or not bool(win.winfo_exists()):
-            win = tk.Toplevel(self)
-            win.title("stacked grains (shift+click selection)")
-            win.geometry("900x720")
-            bar = ctk.CTkFrame(win, fg_color="transparent")
-            bar.pack(side="top", fill="x", padx=6, pady=4)
-            self._grain_stack_count = ctk.CTkLabel(bar, text="")
-            self._grain_stack_count.pack(side="left", padx=6)
-            ctk.CTkButton(bar, text="Clear", width=70,
-                          command=self._clear_grain_stack).pack(
-                              side="right", padx=4)
-            holder = ctk.CTkScrollableFrame(win, fg_color="transparent")
-            holder.pack(side="top", fill="both", expand=True)
-            self._grain_stack_win = win
-            self._grain_stack_holder = holder
-        else:
-            for w in self._grain_stack_holder.winfo_children():
-                w.destroy()
+            return
+        stack = getattr(self, "_grain_stack", []) or []
+        n = len(stack)
         holder = self._grain_stack_holder
+        for w in holder.winfo_children():
+            w.destroy()
         try:
             self._grain_stack_count.configure(text=f"{n} grain(s) stacked")
         except Exception:
             pass
+        if n == 0:
+            return
+
+        cfg = SAMPLES[self.sample]
+        Ny, Nx = self._scan_shape
+        assigns_grid = self._inf["assigns"].reshape(Ny, Nx)
+        K = int(self._inf["soft_probs"].shape[1])
+        try:
+            vm = max(float(self._gs_vmax_var.get()), 1e-6)
+        except Exception:
+            vm = float(cfg["vmax"])
+        log_on = bool(self._gs_log_var.get())
+        has_cam = any(rec.get("cam") is not None for rec in stack)
+        ncols = 3 if has_cam else 2
 
         cmap = ListedColormap(plt.cm.tab20(np.linspace(0, 1, max(K, 2))))
-        fig = Figure(figsize=(8.4, 2.4 * n), dpi=104, facecolor="white")
-        train_vmax = float(cfg["vmax"])
+        # Larger rows: ~3.6" tall each, ~4.0" per column wide.
+        fig = Figure(figsize=(4.0 * ncols, 3.6 * n), dpi=110,
+                     facecolor="white")
         for r, rec in enumerate(stack):
-            ax_map = fig.add_subplot(n, 2, 2 * r + 1)
-            ax_pat = fig.add_subplot(n, 2, 2 * r + 2)
-            disp = assigns_grid.astype(float).copy()
-            ax_map.imshow(disp, cmap=cmap, vmin=0, vmax=max(K - 1, 1),
-                          interpolation="nearest")
-            ys, xs = np.where(rec["grain_mask"])
+            ax_map = fig.add_subplot(n, ncols, ncols * r + 1)
+            ax_pat = fig.add_subplot(n, ncols, ncols * r + 2)
+            ax_map.imshow(assigns_grid.astype(float), cmap=cmap,
+                          vmin=0, vmax=max(K - 1, 1), interpolation="nearest")
             ax_map.imshow(np.where(rec["grain_mask"], 1.0, np.nan),
                           cmap=ListedColormap(["black"]),
                           interpolation="nearest", alpha=0.9)
             ax_map.set_title(f"p{rec['cls']} @ (y={rec['y']}, x={rec['x']})  "
                              f"{rec['n_pix']}px  conf={rec['mean_conf']:.2f}",
-                             fontsize=8)
+                             fontsize=9)
             ax_map.set_xticks([]); ax_map.set_yticks([])
-            ax_pat.imshow(rec["grain_avg"], cmap="magma",
-                          vmin=0, vmax=train_vmax, interpolation="nearest")
-            ax_pat.set_title("grain-average diffraction", fontsize=8)
+            img = np.clip(rec["grain_avg"] / vm, 0.0, 1.0)
+            if log_on:
+                img = np.log1p(img * 50)
+            ax_pat.imshow(img, cmap="inferno", interpolation="nearest")
+            stag = "  log1p×50" if log_on else ""
+            ax_pat.set_title(f"grain-avg diffraction [vmax={vm:.3g}{stag}]",
+                             fontsize=9)
             ax_pat.set_xticks([]); ax_pat.set_yticks([])
+            if has_cam:
+                ax_cam = fig.add_subplot(n, ncols, ncols * r + 3)
+                cam = rec.get("cam")
+                if cam is not None:
+                    avg_cart, cam_cart = cam
+                    ax_cam.imshow(avg_cart, cmap="gray",
+                                  interpolation="nearest")
+                    ax_cam.imshow(cam_cart, cmap="jet", alpha=0.55,
+                                  interpolation="nearest")
+                    ax_cam.set_title("GradCAM", fontsize=9)
+                else:
+                    ax_cam.text(0.5, 0.5, "(pending)", ha="center",
+                                va="center", fontsize=9)
+                ax_cam.set_xticks([]); ax_cam.set_yticks([])
         fig.tight_layout()
         canvas = FigureCanvasTkAgg(fig, master=holder)
         canvas.draw()
         canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
+        self._gs_canvas = canvas
         try:
-            win.lift(); win.focus_force()
+            win.lift()
         except Exception:
             pass
+
+    def _compute_grain_stack_gradcam(self):
+        """Compute GradCAM (+ avg cartesian) for every grain in the
+        stack in a worker thread, then redraw with the GradCAM column."""
+        stack = getattr(self, "_grain_stack", []) or []
+        if not stack:
+            return
+        ckpt = self._best_ckpt()
+        if ckpt is None:
+            messagebox.showinfo("GradCAM", "No checkpoint available.")
+            return
+        try:
+            self._gs_cam_btn.configure(state="disabled", text="computing…")
+        except Exception:
+            pass
+
+        def _worker():
+            for rec in stack:
+                if rec.get("cam") is not None:
+                    continue
+                try:
+                    avg_cart, cam_cart, _ig = (
+                        self._compute_gradcam_and_ig_from_raw(
+                            ckpt, int(rec["cls"]), rec["grain_avg"]))
+                    rec["cam"] = (avg_cart, cam_cart)
+                except Exception as e:
+                    print(f"[stack-gradcam] grain p{rec['cls']} "
+                          f"failed: {e!r}", flush=True)
+
+            def _done():
+                try:
+                    self._gs_cam_btn.configure(state="normal",
+                                               text="Compute GradCAM")
+                except Exception:
+                    pass
+                self._redraw_grain_stack()
+            self.after(0, _done)
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _clear_grain_stack(self):
         self._grain_stack = []
