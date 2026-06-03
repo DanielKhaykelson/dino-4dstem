@@ -105,6 +105,7 @@ class PrePanel(ctk.CTkFrame):
         # NBED-centering state
         self._nbed_busy = False
         self._blur_busy = False
+        self._bin_busy = False
         self._ellip_busy = False
         self._nbed_overlay_center: "tuple[float, float] | None" = None
         # Last-fit ellipse for the raw-pane overlay.  None if no fit
@@ -360,6 +361,55 @@ class PrePanel(ctk.CTkFrame):
             font=("Consolas", 9), justify="left",
             text_color=("#444", "#aaa"))
         self._blur_status.pack(anchor="w", padx=10, pady=(0, 4))
+
+        # ---- Binning section -----------------------------------------
+        # Down-sample the dataset two ways:
+        #   real-space : average every n×n block of scan positions
+        #                (fewer, higher-SNR diffraction patterns).
+        #   q-space    : average every n×n block of detector pixels
+        #                (coarser reciprocal sampling per pattern).
+        # Writes a brand-new .cube.npy and switches to it — the ORIGINAL
+        # cube file is never modified.
+        bin_box = ctk.CTkFrame(ctrl, border_width=1)
+        bin_box.pack(fill="x", padx=6, pady=(8, 4))
+        bt = ctk.CTkFrame(bin_box, fg_color="transparent")
+        bt.pack(fill="x", padx=4, pady=(4, 0))
+        ctk.CTkLabel(bt, text="Binning (down-sample → new dataset)",
+                      font=("Segoe UI", 11, "bold")).pack(side="left")
+        add_help_button(bt,
+            "Real-space binning: every n×n block of scan positions is "
+            "averaged into one diffraction pattern (scan grid shrinks "
+            "by n, detector unchanged).\n\n"
+            "Q-space binning: every n×n block of detector pixels is "
+            "averaged within each pattern (detector shrinks by n, scan "
+            "grid unchanged).\n\n"
+            "A NEW .cube.npy is written and the GUI switches to it; the "
+            "original cube file is untouched.").pack(side="left",
+                                                     padx=(6, 0))
+        bin_row = ctk.CTkFrame(bin_box, fg_color="transparent")
+        bin_row.pack(fill="x", padx=8, pady=(4, 2))
+        self._bin_mode = ctk.StringVar(value="real")
+        ctk.CTkRadioButton(bin_row, text="real-space (n×n scan positions)",
+                            variable=self._bin_mode, value="real"
+                            ).pack(side="left", padx=(2, 10))
+        ctk.CTkRadioButton(bin_row, text="q-space (n×n detector px)",
+                            variable=self._bin_mode, value="q"
+                            ).pack(side="left", padx=2)
+        bin_row2 = ctk.CTkFrame(bin_box, fg_color="transparent")
+        bin_row2.pack(fill="x", padx=8, pady=(0, 4))
+        ctk.CTkLabel(bin_row2, text="bin factor n:").pack(side="left",
+                                                          padx=(2, 2))
+        self._bin_factor = ctk.StringVar(value="2")
+        ctk.CTkEntry(bin_row2, textvariable=self._bin_factor,
+                     width=50).pack(side="left", padx=2)
+        ctk.CTkButton(bin_row2,
+            text="Apply binning →  (write new .cube.npy)",
+            width=300, command=self._bin_apply_all).pack(side="left",
+                                                         padx=8)
+        self._bin_status = ctk.CTkLabel(bin_box, text="",
+            font=("Consolas", 9), justify="left",
+            text_color=("#444", "#aaa"))
+        self._bin_status.pack(anchor="w", padx=10, pady=(0, 4))
 
         # Pair-labels section (semi-supervised, pre-train labels).
         # Lets the user click through random pairs and answer
@@ -1441,6 +1491,188 @@ class PrePanel(ctk.CTkFrame):
         self._blur_status.configure(
             text=f"blur σ={sig:g} done.  active sample: {self.sample_key}")
         # Status bar so other tabs see the new sample.
+        try:
+            if self.on_state_change is not None:
+                self.on_state_change(
+                    "loaded", sample_key=self.sample_key,
+                    path=final_path)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Binning (real-space n×n scan positions, or q-space n×n detector px)
+    # Writes a NEW cube and switches to it; original file untouched.
+    # ------------------------------------------------------------------
+    def _bin_apply_all(self):
+        if self.cube is None:
+            messagebox.showinfo("cube", "Load a cube first."); return
+        if self._bin_busy:
+            messagebox.showinfo("binning",
+                "Binning already in progress."); return
+        if self._blur_busy or self._nbed_busy or self._ellip_busy:
+            messagebox.showinfo("binning",
+                "Another full-cube op is in progress — wait first.")
+            return
+        try:
+            n = int(self._bin_factor.get())
+        except Exception:
+            messagebox.showerror("binning",
+                "Bin factor must be an integer."); return
+        if n < 2:
+            messagebox.showinfo("binning",
+                "Bin factor must be ≥ 2."); return
+        mode = self._bin_mode.get()
+        Ny, Nx, H, W = self.cube.shape
+        if mode == "real":
+            nY, nX = Ny // n, Nx // n
+            if nY < 1 or nX < 1:
+                messagebox.showerror("binning",
+                    f"n={n} too large for {Ny}×{Nx} scan."); return
+            msg = (f"Real-space bin n={n}: average every {n}×{n} block "
+                    f"of scan positions.\n\nScan grid {Ny}×{Nx} → "
+                    f"{nY}×{nX}  (detector {H}×{W} unchanged).")
+            if (Ny % n) or (Nx % n):
+                msg += (f"\n\nRemainder dropped: {Ny%n} row(s), "
+                         f"{Nx%n} col(s).")
+        else:
+            hH, wW = H // n, W // n
+            if hH < 1 or wW < 1:
+                messagebox.showerror("binning",
+                    f"n={n} too large for {H}×{W} detector."); return
+            msg = (f"Q-space bin n={n}: average every {n}×{n} block of "
+                    f"detector pixels per pattern.\n\nDetector {H}×{W} → "
+                    f"{hH}×{wW}  (scan grid {Ny}×{Nx} unchanged).")
+            if (H % n) or (W % n):
+                msg += (f"\n\nRemainder px dropped: {H%n} row(s), "
+                         f"{W%n} col(s).")
+        msg += ("\n\nWrites a NEW .cube.npy and switches to it.  The "
+                 "ORIGINAL cube file is NOT modified.")
+        if not messagebox.askyesno("Apply binning to entire cube", msg):
+            return
+        self._bin_busy = True
+        self._bin_status.configure(text="binning: starting…")
+        threading.Thread(target=self._bin_worker,
+                          args=(mode, n), daemon=True).start()
+
+    def _bin_worker(self, mode: str, n: int):
+        try:
+            base = os.path.splitext(self.path)[0]
+            base = base[:-5] if base.endswith(".cube") else base
+            tag = f"_binr{n}" if mode == "real" else f"_binq{n}"
+            new_basename = os.path.basename(base) + tag
+            tmp_dir = tempfile.mkdtemp(prefix="dinosr_bin_")
+            tmp_path = os.path.join(tmp_dir, new_basename + ".cube.npy")
+            Ny, Nx, H, W = self.cube.shape
+            # Always float32 — averaging produces fractional counts that
+            # an integer source dtype (e.g. uint16) would truncate.
+            dtype = np.float32
+            t0 = time.time()
+            # NOTE: index with the universal 2-tuple cube[y, x] so this
+            # works for BOTH 4D .npy cubes and 3D-backed h5 wrappers
+            # (the latter only accept a 2-tuple index).
+            if mode == "real":
+                nY, nX = Ny // n, Nx // n
+                inv = 1.0 / float(n * n)
+                out = np.lib.format.open_memmap(
+                    tmp_path, mode="w+", dtype=dtype,
+                    shape=(nY, nX, H, W))
+                for Y in range(nY):
+                    for X in range(nX):
+                        acc = np.zeros((H, W), dtype=np.float32)
+                        for dy in range(n):
+                            for dx in range(n):
+                                acc += np.asarray(
+                                    self.cube[Y*n + dy, X*n + dx],
+                                    dtype=np.float32)
+                        out[Y, X] = (acc * inv).astype(dtype, copy=False)
+                    if (Y + 1) % max(1, nY // 40) == 0:
+                        dt = time.time() - t0
+                        eta = dt * (nY - Y - 1) / max(Y + 1, 1)
+                        self.after(0, lambda Y=Y, eta=eta, nY=nY:
+                            self._bin_status.configure(
+                                text=f"real-space bin n={n}: "
+                                      f"{Y+1}/{nY} rows "
+                                      f"({100*(Y+1)/nY:.0f}%)  "
+                                      f"eta {eta:.0f}s"))
+            else:
+                hH, wW = H // n, W // n
+                out = np.lib.format.open_memmap(
+                    tmp_path, mode="w+", dtype=dtype,
+                    shape=(Ny, Nx, hH, wW))
+                for y in range(Ny):
+                    for x in range(Nx):
+                        f = np.asarray(self.cube[y, x], dtype=np.float32)
+                        f = (f[:hH*n, :wW*n]
+                                 .reshape(hH, n, wW, n).mean(axis=(1, 3)))
+                        out[y, x] = f.astype(dtype, copy=False)
+                    if (y + 1) % max(1, Ny // 40) == 0:
+                        dt = time.time() - t0
+                        eta = dt * (Ny - y - 1) / max(y + 1, 1)
+                        self.after(0, lambda y=y, eta=eta, Ny=Ny:
+                            self._bin_status.configure(
+                                text=f"q-space bin n={n}: "
+                                      f"{y+1}/{Ny} rows "
+                                      f"({100*(y+1)/Ny:.0f}%)  "
+                                      f"eta {eta:.0f}s"))
+            out.flush(); del out
+            self.after(0, lambda: self._bin_finish(
+                tmp_path, mode, n, base, new_basename))
+        except Exception as e:
+            err = repr(e)
+            self.after(0, lambda: messagebox.showerror(
+                "binning failed", err))
+            self.after(0, lambda: self._bin_status.configure(
+                text=f"binning failed: {err}"))
+        finally:
+            self._bin_busy = False
+
+    def _bin_finish(self, tmp_path: str, mode: str, n: int,
+                     original_base: str, new_basename: str):
+        tag = f"_binr{n}" if mode == "real" else f"_binq{n}"
+        permanent_path = original_base + tag + ".cube.npy"
+        kind = "real-space" if mode == "real" else "q-space"
+        save = messagebox.askyesno(
+            "Save binned cube?",
+            f"Binning ({kind} n={n}) applied.\n\n"
+            f"Save permanently to:\n  {permanent_path}\n\n"
+            f"  Yes → keep file (re-loadable in future sessions).\n"
+            f"  No  → keep this run only; temp file deleted on exit.")
+        if save:
+            try:
+                shutil.move(tmp_path, permanent_path)
+                final_path = permanent_path
+                try: os.rmdir(os.path.dirname(tmp_path))
+                except Exception: pass
+            except Exception as e:
+                messagebox.showerror("save failed",
+                    f"Could not move temp file:\n{e}\n"
+                    f"Cube usable from: {tmp_path}")
+                final_path = tmp_path
+                _register_atexit_cleanup(tmp_path)
+        else:
+            final_path = tmp_path
+            _register_atexit_cleanup(
+                tmp_path, cleanup_dir=os.path.dirname(tmp_path))
+        # Swap the active cube to the binned one and re-register so every
+        # downstream tab (training / eval / post-hoc / ACOM) runs on it.
+        try:
+            self.cube = np.load(final_path, mmap_mode="r",
+                                  allow_pickle=True)
+            Ny, Nx, _H, _W = self.cube.shape
+            self.path = final_path
+            self._path_var.set(final_path)
+            self.sample_key = register_runtime_sample(
+                final_path, scan_shape=(Ny, Nx),
+                vmax=float(self.vmax.get()),
+                center_mask_radius=self._effective_center_mask_radius())
+        except Exception as e:
+            messagebox.showerror("reload failed",
+                f"Binned cube is at:\n{final_path}\n\nbut reload "
+                f"failed: {e}"); return
+        self._refresh()
+        self._bin_status.configure(
+            text=f"binning {kind} n={n} done.  "
+                  f"active sample: {self.sample_key}")
         try:
             if self.on_state_change is not None:
                 self.on_state_change(
