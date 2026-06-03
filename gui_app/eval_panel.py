@@ -133,7 +133,14 @@ class EvalPanel(ctk.CTkFrame):
         # When the user navigates back to this tab, make sure the live
         # watch is still running (re-arm if it stopped) so it stays
         # "always connected to the current kmap".
-        self.bind("<Map>", lambda _e: self._ensure_polling())
+        # NOTE: self._canvas is the matplotlib canvas (shadows CTkFrame's
+        # internal _canvas), so self.bind() is broken here — bind the
+        # underlying tk widget instead.
+        try:
+            self._canvas.get_tk_widget().bind(
+                "<Map>", lambda _e: self._ensure_polling(), add="+")
+        except Exception:
+            pass
 
     def _ensure_polling(self):
         """Re-arm the LIVE poll loop if a run is linked but the
