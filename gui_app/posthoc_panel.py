@@ -2387,6 +2387,8 @@ class PostHocPanel(ctk.CTkFrame):
         # Larger rows: ~3.6" tall each, ~4.0" per column wide.
         fig = Figure(figsize=(4.0 * ncols, 3.6 * n), dpi=110,
                      facecolor="white")
+        rp = self._recip_per_px() or 0.0
+        pat_axes = []   # (ax, H, W) for hover-q wiring
         for r, rec in enumerate(stack):
             ax_map = fig.add_subplot(n, ncols, ncols * r + 1)
             ax_pat = fig.add_subplot(n, ncols, ncols * r + 2)
@@ -2407,6 +2409,8 @@ class PostHocPanel(ctk.CTkFrame):
             ax_pat.set_title(f"grain-avg diffraction [vmax={vm:.3g}{stag}]",
                              fontsize=9)
             ax_pat.set_xticks([]); ax_pat.set_yticks([])
+            H, W = rec["grain_avg"].shape
+            pat_axes.append((ax_pat, H, W))
             if has_cam:
                 ax_cam = fig.add_subplot(n, ncols, ncols * r + 3)
                 cam = rec.get("cam")
@@ -2426,6 +2430,18 @@ class PostHocPanel(ctk.CTkFrame):
         canvas.draw()
         canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
         self._gs_canvas = canvas
+        # Hover-q readout (px / q / d-spacing) on each grain-avg image.
+        # Grain averages are at raw-detector resolution, so the recip
+        # calibration applies directly (q_per_disp_px = rp).
+        if rp > 0:
+            try:
+                from gui_app._ui import attach_hover_q
+                for ax_pat, H, W in pat_axes:
+                    attach_hover_q(canvas, ax_pat,
+                                   center=(H / 2.0, W / 2.0),
+                                   q_per_disp_px=rp, units="nm⁻¹")
+            except Exception:
+                pass
         try:
             win.lift()
         except Exception:
