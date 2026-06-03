@@ -568,9 +568,13 @@ class NMFPanel(ctk.CTkFrame):
         ctk.CTkEntry(f_row, textvariable=self._vars["frame_idx"],
                        width=60).pack(side="left", padx=4)
 
+        ctk.CTkButton(sb, text="Open interactive map…",
+                       fg_color=("#4D6FB0", "#3A5380"),
+                       command=self._open_interactive_map
+                       ).pack(fill="x", padx=8, pady=(8, 2))
         ctk.CTkButton(sb, text="Show class averages…",
                        command=self._open_class_averages_popup
-                       ).pack(fill="x", padx=8, pady=(8, 2))
+                       ).pack(fill="x", padx=8, pady=(2, 2))
         ctk.CTkButton(sb, text="Save snapshot",
                        command=self._save_snapshot
                        ).pack(fill="x", padx=8, pady=(2, 4))
@@ -587,6 +591,11 @@ class NMFPanel(ctk.CTkFrame):
         self._canvas = FigureCanvasTkAgg(self._fig, master=canv)
         self._canvas.get_tk_widget().pack(fill="both", expand=True)
         NavigationToolbar2Tk(self._canvas, canv)
+        # Double-click any inline class map -> open the big interactive
+        # viewer at that method (left/right/shift+right click inside).
+        self._map_axes = {}     # ax -> method name
+        self._canvas.mpl_connect("button_press_event",
+                                  self._on_inline_map_click)
         self._render_idle()
 
         # Populate sample default once.
@@ -998,8 +1007,10 @@ class NMFPanel(ctk.CTkFrame):
                 ax_s.grid(alpha=0.3)
 
         # ---- Class maps per clustering method ----
+        self._map_axes = {}
         for col, (method, lbl) in enumerate(labels.items()):
             ax = self._fig.add_subplot(gs[map_row, col])
+            self._map_axes[ax] = method
             n_classes = int(lbl.max()) + 1
             # Match DINO class-map style: tab10/tab20 ListedColormap.
             base = "tab20" if n_classes > 10 else "tab10"
@@ -1035,6 +1046,47 @@ class NMFPanel(ctk.CTkFrame):
         self._fig.suptitle(title, fontsize=11)
         self._fig.tight_layout()
         self._canvas.draw_idle()
+
+    # ----- interactive map --------------------------------------------
+    def _recip_per_px(self):
+        try:
+            return float(self.app.recip_res.get()) if self.app else 0.0
+        except Exception:
+            return 0.0
+
+    def _open_interactive_map(self, method=None):
+        from data import SAMPLES
+        if self._last is None or not self._last.get("labels"):
+            messagebox.showinfo("interactive map",
+                "Run NMF + clustering first."); return
+        if not self.sample or self.sample not in SAMPLES:
+            messagebox.showinfo("interactive map",
+                "No dataset loaded for this sample."); return
+        if not self._scan_shape:
+            messagebox.showinfo("interactive map",
+                "Scan shape unknown — cannot map clusters to positions.")
+            return
+        labels = self._last["labels"]
+        if method in labels:        # open with the clicked method first
+            labels = {method: labels[method],
+                       **{m: l for m, l in labels.items() if m != method}}
+        try:
+            from gui_app.cluster_interactive import (
+                open_interactive_clustermap)
+            open_interactive_clustermap(
+                self, sample=self.sample, scan_shape=self._scan_shape,
+                labels=labels, recip_per_px=self._recip_per_px(),
+                title=f"NMF + cluster — {self.sample}")
+        except Exception as e:
+            messagebox.showerror("interactive map", repr(e))
+
+    def _on_inline_map_click(self, event):
+        # Double-click an inline class map -> big interactive viewer.
+        if not getattr(event, "dblclick", False):
+            return
+        method = self._map_axes.get(event.inaxes)
+        if method is not None:
+            self._open_interactive_map(method)
 
     # ----- save / export ---------------------------------------------
     def _save_snapshot(self):

@@ -575,11 +575,17 @@ class DINOClusterPanel(ctk.CTkFrame):
                        command=self._show_class_attentions
                        ).pack(fill="x", padx=8, pady=(2, 2))
         ctk.CTkLabel(sb,
-            text="left-click on a class map → single-pattern attention\n"
-                  "right-click on a class map → grain-average attention",
+            text="inline class map: left-click → single-pattern attention,"
+                  " right-click → grain attention.\n"
+                  "Big viewer: left → pattern, right → cluster-grain avg,"
+                  " shift+right → stack.",
             font=("Segoe UI", 9), justify="left",
             text_color=("#666", "#aaa"), wraplength=300
             ).pack(anchor="w", padx=8, pady=(2, 4))
+        ctk.CTkButton(sb, text="Open interactive map…",
+                       fg_color=("#4D6FB0", "#3A5380"),
+                       command=self._open_interactive_map
+                       ).pack(fill="x", padx=8, pady=(2, 2))
         ctk.CTkButton(sb, text="Save snapshot",
                        command=self._save_snapshot
                        ).pack(fill="x", padx=8, pady=(2, 4))
@@ -981,6 +987,36 @@ class DINOClusterPanel(ctk.CTkFrame):
         self._click_cid = self._canvas.mpl_connect(
             "button_press_event", _on_click)
         self._canvas.draw_idle()
+
+    # ----- interactive map --------------------------------------------
+    def _recip_per_px(self):
+        try:
+            return float(self.app.recip_res.get()) if self.app else 0.0
+        except Exception:
+            return 0.0
+
+    def _open_interactive_map(self):
+        from data import SAMPLES
+        if self._last is None or not self._last.get("labels"):
+            messagebox.showinfo("interactive map",
+                "Run DINO + clustering first."); return
+        if not self.sample or self.sample not in SAMPLES:
+            messagebox.showinfo("interactive map",
+                "No dataset loaded for this sample."); return
+        if not self._scan_shape:
+            messagebox.showinfo("interactive map",
+                "Scan shape unknown — cannot map clusters to positions.")
+            return
+        try:
+            from gui_app.cluster_interactive import (
+                open_interactive_clustermap)
+            open_interactive_clustermap(
+                self, sample=self.sample, scan_shape=self._scan_shape,
+                labels=self._last["labels"],
+                recip_per_px=self._recip_per_px(),
+                title=f"DINO + cluster — {self.sample}")
+        except Exception as e:
+            messagebox.showerror("interactive map", repr(e))
 
     # ----- save --------------------------------------------------------
     def _save_snapshot(self):
