@@ -99,6 +99,55 @@ def _save_fig(fig, path: str, dpi: int = 140):
     _log(f"saved {os.path.relpath(path, start=os.path.dirname(path))}")
 
 
+def _palette(K: int, cmap_name: str | None = None):
+    """Discrete class-id colormap, consistent across single + combined
+    figures.  Defaults: tab10 (K<=10), tab20 (K<=20), turbo (more)."""
+    if cmap_name is None:
+        cmap_name = ("tab10" if K <= 10
+                      else "tab20" if K <= 20 else "turbo")
+    base = plt.get_cmap(cmap_name)
+    if K > base.N:
+        cols = [base(i / max(K - 1, 1)) for i in range(K)]
+    else:
+        cols = [base(i) for i in range(K)]
+    return ListedColormap(cols)
+
+
+def _save_single_map(labels_2d, K: int, title: str, path: str,
+                      *, cmap_name: str | None = None, dpi: int = 160):
+    """Save ONE class map as a standalone square PNG (no colorbar,
+    no neighbours) so individual maps can be assembled into custom
+    comparisons."""
+    pal = _palette(K, cmap_name)
+    fig = plt.figure(figsize=(6.0, 6.0))
+    ax = fig.add_subplot(111)
+    ax.imshow(labels_2d, cmap=pal, vmin=-0.5, vmax=K - 0.5,
+               interpolation="nearest", aspect="equal")
+    ax.set_title(title, fontsize=12)
+    ax.set_xticks([]); ax.set_yticks([])
+    _save_fig(fig, path, dpi=dpi)
+
+
+def _save_side_by_side(maps, path: str, *, suptitle: str | None = None,
+                        dpi: int = 160):
+    """Save a row of class maps side by side (no confusion / extras).
+
+    ``maps`` is a list of (labels_2d, K, title, cmap_name) tuples."""
+    n = max(1, len(maps))
+    fig = plt.figure(figsize=(6.0 * n, 6.2))
+    for i, (lab2d, K, title, cmap_name) in enumerate(maps):
+        ax = fig.add_subplot(1, n, i + 1)
+        pal = _palette(K, cmap_name)
+        ax.imshow(lab2d, cmap=pal, vmin=-0.5, vmax=K - 0.5,
+                   interpolation="nearest", aspect="equal")
+        ax.set_title(title, fontsize=12)
+        ax.set_xticks([]); ax.set_yticks([])
+    if suptitle:
+        fig.suptitle(suptitle, fontsize=13)
+    fig.tight_layout(rect=[0, 0, 1, 0.95] if suptitle else None)
+    _save_fig(fig, path, dpi=dpi)
+
+
 def _find_sample_lock(start_dir: str, max_walk: int = 5):
     cur = os.path.abspath(start_dir)
     for _ in range(int(max_walk)):
@@ -273,6 +322,13 @@ def render_cluster_maps(sample_key: str, nmf_result, outdir: str):
         fontsize=11)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     _save_fig(fig, os.path.join(outdir, "01c_nmf_cluster_maps.png"))
+    # Autosave each method's map as a standalone PNG for custom comparisons.
+    for m in ("K-means", "Aglo", "HDBSCAN", "FCM"):
+        lab = nmf_result["cluster_labels"][m]
+        K_act = int(lab.max()) + 1
+        _save_single_map(
+            lab.reshape(Ny, Nx), K_act, f"NMF-{m}  (K={K_act})",
+            os.path.join(outdir, f"01c_map_NMF-{m}.png"))
 
 
 # ---------------------------------------------------------------------------
@@ -338,10 +394,40 @@ def compare_dino_vs_nmf(sample_key: str, nmf_result, dino_inf,
         fontsize=11)
     fig.colorbar(im, ax=ax, fraction=0.045, pad=0.02)
     fig.suptitle(
-        f"§2 — DINO vs NMF (KMeans) classification of IMC_SI5",
+        f"§2 — DINO vs NMF (KMeans) classification of {sample_key}",
         fontsize=12)
     fig.tight_layout(rect=[0, 0, 1, 0.94])
     _save_fig(fig, os.path.join(outdir, "02_nmf_vs_dino.png"))
+
+    # ---- autosave standalone single-image PNGs (for custom comparisons)
+    dino_grid = dino_lab.reshape(Ny, Nx)
+    nmf_grid  = nmf_lab.reshape(Ny, Nx)
+    _save_single_map(dino_grid, Kd, f"DINO  K_active={Kd}",
+                      os.path.join(outdir, "02_dino_map.png"))
+    _save_single_map(nmf_grid, Kn, f"NMF-KMeans  K={Kn}",
+                      os.path.join(outdir, "02_nmf_kmeans_map.png"),
+                      cmap_name="tab10" if Kn <= 10 else "tab20")
+    # Confusion alone.
+    figc = plt.figure(figsize=(6.0, 5.2))
+    axc = figc.add_subplot(111)
+    imc = axc.imshow(Cn, cmap="viridis", aspect="auto",
+                      vmin=0, vmax=1, interpolation="nearest")
+    axc.set_xlabel(f"NMF class (K={Kn})")
+    axc.set_ylabel(f"DINO class (K={Kd})")
+    axc.set_title(f"Confusion (row-norm)\n"
+                   f"ARI={ari:.3f}  NMI={nmi:.3f}  V={vm:.3f}", fontsize=11)
+    figc.colorbar(imc, ax=axc, fraction=0.045, pad=0.02)
+    figc.tight_layout()
+    _save_fig(figc, os.path.join(outdir, "02_confusion.png"))
+
+    # ---- side-by-side DINO | NMF (no confusion) ----
+    _save_side_by_side(
+        [(dino_grid, Kd, f"DINO  K_active={Kd}", None),
+         (nmf_grid,  Kn, f"NMF-KMeans  K={Kn}",
+          "tab10" if Kn <= 10 else "tab20")],
+        os.path.join(outdir, "02_dino_vs_nmf_sidebyside.png"),
+        suptitle=f"DINO vs NMF (KMeans) — {sample_key}")
+
     _log(f"§2 metrics: ARI={ari:.3f}  NMI={nmi:.3f}  V={vm:.3f}")
     return metrics, C
 
@@ -1117,7 +1203,18 @@ def assemble_report(run_dir, sample_key, outdir, dino_inf,
         f"",
         f"## §2 — DINO vs NMF (KMeans)",
         f"",
+        f"Side-by-side (no confusion):",
+        f"",
+        f"![dino_vs_nmf_sidebyside](02_dino_vs_nmf_sidebyside.png)",
+        f"",
+        f"Full comparison (with confusion):",
+        f"",
         f"![nmf_vs_dino](02_nmf_vs_dino.png)",
+        f"",
+        f"Standalone maps: "
+        f"[DINO](02_dino_map.png) · "
+        f"[NMF-KMeans](02_nmf_kmeans_map.png) · "
+        f"[confusion](02_confusion.png)",
         f"",
         f"| metric | value |",
         f"|---|---|",
