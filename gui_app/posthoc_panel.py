@@ -105,6 +105,23 @@ class PostHocPanel(ctk.CTkFrame):
         except Exception:
             return 0.0
 
+    @staticmethod
+    def _event_shift(event) -> bool:
+        """Reliable shift-held test for a matplotlib mouse event.
+
+        matplotlib's `event.key` is only populated when the canvas holds
+        keyboard focus, so shift+click is frequently MISSED.  The raw Tk
+        event (`event.guiEvent`) carries a modifier bitmask that is
+        always correct (Shift = 0x0001 on Tk), so prefer that.
+        """
+        ge = getattr(event, "guiEvent", None)
+        if ge is not None:
+            try:
+                return bool(int(ge.state) & 0x0001)
+            except Exception:
+                pass
+        return bool(event.key) and ("shift" in str(event.key).lower())
+
     def _real_per_px(self):
         try:
             return float(self.app.real_res.get()) if self.app else 0.0
@@ -1170,14 +1187,14 @@ class PostHocPanel(ctk.CTkFrame):
                 self._attr_source.set("frame")
             except Exception:
                 pass
-            shift = bool(event.key) and ("shift" in str(event.key).lower())
+            shift = self._event_shift(event)
             if event.button == 3 and shift:
                 # Shift+right-click accumulates grains into a stacked
                 # comparison window (one grain per row).
                 self._add_grain_to_stack(y, x)
             elif event.button == 1:
                 self._show_pattern_popup(y, x)
-            else:
+            elif event.button == 3:
                 self._show_grain_popup(y, x)
         self._click_cid = self._canvas.mpl_connect("button_press_event",
                                                      _on_click)
@@ -2282,14 +2299,25 @@ class PostHocPanel(ctk.CTkFrame):
         self._canvas.draw_idle()
 
     # ------------------------------------------------------------------
-    # Multi-grain stacking (shift+left-click on the class map)
+    # Multi-grain stacking (shift+right-click on the class map)
     # ------------------------------------------------------------------
     def _add_grain_to_stack(self, y, x):
         """Append the grain at (y, x) to the shift+right-click selection
         and (re)draw the stacked-comparison window: one grain per row,
         [class-map w/ grain highlighted | grain-average diffraction
         (+ GradCAM once computed)]."""
-        gi = self._compute_grain_average(y, x, apply_filters=True)
+        # Immediate feedback — averaging a big grain can take a moment;
+        # without this the GUI looks "stuck" while it reads frames.
+        self._set_status(f"stacking grain @ (y={y}, x={x}) …")
+        try:
+            self.update_idletasks()
+        except Exception:
+            pass
+        try:
+            gi = self._compute_grain_average(y, x, apply_filters=True)
+        except Exception as e:
+            self._set_status(f"grain stack failed: {e!r}")
+            return
         if gi is None:
             self._set_status("grain lookup failed: pixel not in any grain")
             return
@@ -2298,12 +2326,21 @@ class PostHocPanel(ctk.CTkFrame):
         # De-dupe: same grain (same class + overlapping mask at click) is
         # skipped so repeated clicks in one grain don't pile up rows.
         for rec in self._grain_stack:
-            if rec["cls"] == gi["cls"] and rec["grain_mask"][y, x]:
-                self._set_status("grain already in stack")
-                return
+            try:
+                if (rec["cls"] == gi["cls"]
+                        and rec["grain_mask"].shape == gi["grain_mask"].shape
+                        and rec["grain_mask"][y, x]):
+                    self._set_status("grain already in stack")
+                    return
+            except Exception:
+                continue
         self._grain_stack.append(dict(y=y, x=x, cam=None, **gi))
-        self._ensure_grain_stack_window()
-        self._redraw_grain_stack()
+        try:
+            self._ensure_grain_stack_window()
+            self._redraw_grain_stack()
+        except Exception as e:
+            self._set_status(f"grain stack render failed: {e!r}")
+            return
         self._set_status(
             f"added grain p{gi['cls']} @ (y={y}, x={x}) — "
             f"{len(self._grain_stack)} grain(s) stacked")
@@ -2442,8 +2479,12 @@ class PostHocPanel(ctk.CTkFrame):
                                    q_per_disp_px=rp, units="nm⁻¹")
             except Exception:
                 pass
+        # Reliably surface the window: a CTkScrollableFrame sometimes
+        # leaves the embedded matplotlib canvas blank until the toplevel
+        # is mapped/raised, which reads as "stuck / didn't open".
         try:
-            win.lift()
+            win.deiconify(); win.lift()
+            win.update_idletasks()
         except Exception:
             pass
 

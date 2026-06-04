@@ -118,19 +118,35 @@ class _ClusterMapViewer:
         self.canvas.draw_idle()
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _shift_held(event) -> bool:
+        # event.key needs canvas keyboard focus (often missed); the raw
+        # Tk event carries a reliable modifier bitmask (Shift = 0x0001).
+        ge = getattr(event, "guiEvent", None)
+        if ge is not None:
+            try:
+                return bool(int(ge.state) & 0x0001)
+            except Exception:
+                pass
+        return bool(event.key) and ("shift" in str(event.key).lower())
+
     def _on_click(self, event):
         if event.inaxes is not self.ax or event.xdata is None:
             return
         Ny, Nx = self.scan_shape
         x = int(round(event.xdata)); y = int(round(event.ydata))
         x = max(0, min(Nx - 1, x)); y = max(0, min(Ny - 1, y))
-        shift = bool(event.key) and ("shift" in str(event.key).lower())
-        if event.button == 3 and shift:
-            self._add_grain_to_stack(y, x)
-        elif event.button == 1:
-            self._show_pattern(y, x)
-        elif event.button == 3:
-            self._show_grain(y, x)
+        shift = self._shift_held(event)
+        try:
+            if event.button == 3 and shift:
+                self._add_grain_to_stack(y, x)
+            elif event.button == 1:
+                self._show_pattern(y, x)
+            elif event.button == 3:
+                self._show_grain(y, x)
+        except Exception as e:
+            print(f"[cluster-interactive] click handler failed: {e!r}",
+                  flush=True)
 
     # ---- raw access --------------------------------------------------
     def _dataset(self):
@@ -323,7 +339,7 @@ class _ClusterMapViewer:
             except Exception:
                 pass
         try:
-            win.lift()
+            win.deiconify(); win.lift(); win.update_idletasks()
         except Exception:
             pass
 
