@@ -137,17 +137,25 @@ class PostHocPanel(ctk.CTkFrame):
         except Exception:
             pass
 
-    def link_run(self, outdir, sample):
+    def link_run(self, outdir, sample, native_sample="__keep__"):
         self.outdir = outdir
         self.sample = sample
+        # The run's trained dataset.  Default: the linked sample IS the
+        # trained one (single-dataset runs).  `_load_dir_dialog` passes
+        # native_sample=None for MULTI runs (no single trained dataset),
+        # which keys every dataset's inference cache separately.
+        if native_sample != "__keep__":
+            self._run_native_sample = native_sample
+        else:
+            self._run_native_sample = sample
         self._inf = None
         self._BF = None; self._HA = None
         cfg = SAMPLES[sample]
         self._cube_path = cfg.get("path") or (cfg.get("paths") or [None])[0]
         self._scan_shape = cfg["scan_shape"]
         self._info.configure(
-            text=f"linked run: {outdir}\nsample = {sample}    "
-                  f"scan = {self._scan_shape}")
+            text=f"linked run: {outdir}\nsample = {sample}  (auto-linked)"
+                  f"    scan = {self._scan_shape}")
         self._maybe_load_inference()
         self._refresh_class_dropdown()
         # Phase B: refresh the fine-tune status panel for this sample.
@@ -170,12 +178,31 @@ class PostHocPanel(ctk.CTkFrame):
                 ac.refresh_from_posthoc()
         except Exception: pass
 
+    def _inference_cache_path(self):
+        """Per-dataset inference cache path.
+
+        The run's NATIVE (trained) dataset keeps the canonical
+        ``eval/inference.npz`` (back-compat).  Running the model on ANY
+        other dataset writes to ``eval/inference__<dataset>.npz`` so we
+        never clobber the trained dataset's cached inference.  A
+        multi-trained run has NO single native dataset, so every
+        constituent cube is keyed.
+        """
+        eval_dir = os.path.join(self.outdir, "eval")
+        native = getattr(self, "_run_native_sample", None)
+        if native is not None and self.sample == native:
+            return os.path.join(eval_dir, "inference.npz")
+        safe = "".join(c if (c.isalnum() or c in "._-") else "_"
+                        for c in str(self.sample))
+        return os.path.join(eval_dir, f"inference__{safe}.npz")
+
     def _maybe_load_inference(self):
-        """Load <outdir>/eval/inference.npz if it exists; otherwise leave
-        None and let the heavy renders run inference on demand."""
+        """Load the cached inference for the CURRENT dataset if present;
+        otherwise leave None and let the heavy renders run inference on
+        demand."""
         if self.outdir is None:
             return
-        ip = os.path.join(self.outdir, "eval", "inference.npz")
+        ip = self._inference_cache_path()
         if os.path.exists(ip):
             inf = np.load(ip, allow_pickle=True)
             self._inf = dict(soft_probs=inf["soft_probs"],
@@ -190,12 +217,15 @@ class PostHocPanel(ctk.CTkFrame):
         ctk.CTkButton(top, text="Load run dir…", width=110,
                        command=self._load_dir_dialog).pack(side="left",
                                                              padx=4)
+        ctk.CTkLabel(top, text="dataset:").pack(side="left", padx=(8, 1))
         self._sample_var = ctk.StringVar(value="")
         self._sample_menu = ctk.CTkOptionMenu(top, variable=self._sample_var,
                             values=sorted(SAMPLES.keys()),
                             width=180,
                             command=lambda _v: self._on_sample_change())
-        self._sample_menu.pack(side="left", padx=4)
+        self._sample_menu.pack(side="left", padx=2)
+        ctk.CTkButton(top, text="Browse cube…", width=100,
+                       command=self._browse_dataset).pack(side="left", padx=2)
         self._info = ctk.CTkLabel(top, text="(no run linked)",
                                     font=("Consolas", 10), anchor="w",
                                     justify="left")
@@ -623,6 +653,54 @@ class PostHocPanel(ctk.CTkFrame):
         self._sb.configure(text=msg)
         self.update_idletasks()
 
+    def _browse_dataset(self):
+        """Pick ANY cube to run the loaded model on (decouples the run
+        dir / model from the dataset).  Registers it, selects it, and
+        links it just like a dropdown change."""
+        if self.outdir is None:
+            messagebox.showinfo("dataset",
+                "Load a run dir (model) first, then pick a dataset.")
+            return
+        p = filedialog.askopenfilename(
+            title="Pick a dataset cube to run the model on",
+            filetypes=[("Cube files", "*.prz *.npz *.npy *.h5 *.hdf5"),
+                        ("All files", "*.*")])
+        if not p:
+            return
+        scan_override = None
+        if p.lower().endswith((".h5", ".hdf5")):
+            try:
+                import h5py
+                from data import (_h5_find_data_path, _h5_infer_scan_shape)
+                with h5py.File(p, "r") as fh:
+                    dpath, ndim = _h5_find_data_path(fh)
+                    s = tuple(fh[dpath].shape)
+                    if ndim == 3:
+                        scan_override = _h5_infer_scan_shape(fh, s[0])
+                        if scan_override is None:
+                            from gui_app._dialogs import ask_scan_shape
+                            scan_override = ask_scan_shape(
+                                self, s[0], s[1], s[2])
+                            if scan_override is None:
+                                return
+            except Exception as e:
+                messagebox.showerror("dataset",
+                    f"could not read h5 shape:\n{e}"); return
+        try:
+            from data import register_runtime_sample
+            key = register_runtime_sample(
+                p, scan_shape=(tuple(scan_override) if scan_override
+                                else None))
+        except Exception as e:
+            messagebox.showerror("dataset",
+                f"could not register cube:\n{e}"); return
+        try:
+            self._sample_menu.configure(values=sorted(SAMPLES.keys()))
+        except Exception:
+            pass
+        self._sample_var.set(key)
+        self._on_sample_change()
+
     def _on_sample_change(self):
         s = self._sample_var.get()
         if s and s in SAMPLES:
@@ -630,9 +708,34 @@ class PostHocPanel(ctk.CTkFrame):
             cfg = SAMPLES[s]
             self._cube_path = cfg.get("path") or (cfg.get("paths") or [None])[0]
             self._scan_shape = cfg["scan_shape"]
+            # Dataset changed -> drop the old inference (the previous bug:
+            # the stale class map was reused).  Load this dataset's cache
+            # if present; otherwise the next render computes it.
+            self._inf = None
+            self._BF = None; self._HA = None
+            self._maybe_load_inference()
+            native = getattr(self, "_run_native_sample", None)
+            if native is not None and s == native:
+                link = "native (trained) dataset — auto-linked"
+            else:
+                link = ("OTHER dataset — model will be RUN on it "
+                         "(not the trained set)")
+            cached = "  [inference cached]" if self._inf is not None \
+                else "  [click a render to run inference]"
             self._info.configure(
                 text=f"linked run: {self.outdir}\nsample = {s}    "
-                      f"scan = {self._scan_shape}")
+                      f"scan = {self._scan_shape}\n{link}{cached}")
+            try:
+                self._refresh_class_dropdown()
+            except Exception:
+                pass
+            # Keep the global session in step so ACOM/Blob/etc. follow.
+            try:
+                sess = getattr(self.app, "session", None)
+                if sess is not None and self.outdir:
+                    sess.set(run_dir=self.outdir, sample=s)
+            except Exception:
+                pass
 
     @staticmethod
     def _find_sample_lock(start_dir, max_walk=5):
@@ -713,36 +816,78 @@ class PostHocPanel(ctk.CTkFrame):
 
         # 2b) Fallback for runs created in the GUI (not the sweep):
         # `_train_kwargs.json` carries the same info under
-        # `_sample_config`.
-        if sample_inferred and sample_inferred not in SAMPLES:
-            tk_path = os.path.join(d, "_train_kwargs.json")
-            if os.path.exists(tk_path):
-                try:
-                    kw = json.load(open(tk_path, encoding="utf-8"))
-                    cfg = kw.get("_sample_config")
-                    if cfg and cfg.get("path"):
-                        from data import register_runtime_sample
-                        scan_shape = cfg.get("scan_shape")
-                        register_runtime_sample(
-                            cfg["path"],
-                            scan_shape=(tuple(scan_shape)
-                                          if scan_shape else None),
-                            vmax=float(cfg.get("vmax", 2.0)),
-                            center_mask_radius=int(
-                                cfg.get("center_mask_radius", 15)),
-                            key=sample_inferred,
-                        )
-                        # Update dropdown values + selection
+        # `_sample_config`.  MULTI runs list every constituent cube.
+        multi_keys = []
+        tk_path = os.path.join(d, "_train_kwargs.json")
+        if os.path.exists(tk_path):
+            try:
+                kw = json.load(open(tk_path, encoding="utf-8"))
+                cfg = kw.get("_sample_config")
+                from data import register_runtime_sample
+                if cfg and cfg.get("is_multi") and cfg.get("paths"):
+                    for pth in cfg["paths"]:
                         try:
-                            self._sample_menu.configure(
-                                values=sorted(SAMPLES.keys()))
-                        except Exception:
-                            pass
-                except Exception as e:
-                    print(f"[posthoc] auto-register from "
-                           f"_train_kwargs failed: {e!r}", flush=True)
+                            multi_keys.append(register_runtime_sample(
+                                pth, vmax=float(cfg.get("vmax", 2.0)),
+                                center_mask_radius=int(
+                                    cfg.get("center_mask_radius", 15))))
+                        except Exception as e:
+                            print(f"[posthoc] multi cube register "
+                                   f"failed for {pth}: {e!r}", flush=True)
+                elif (sample_inferred and sample_inferred not in SAMPLES
+                        and cfg and cfg.get("path")):
+                    scan_shape = cfg.get("scan_shape")
+                    register_runtime_sample(
+                        cfg["path"],
+                        scan_shape=(tuple(scan_shape)
+                                      if scan_shape else None),
+                        vmax=float(cfg.get("vmax", 2.0)),
+                        center_mask_radius=int(
+                            cfg.get("center_mask_radius", 15)),
+                        key=sample_inferred,
+                    )
+                try:
+                    self._sample_menu.configure(
+                        values=sorted(SAMPLES.keys()))
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"[posthoc] auto-register from "
+                       f"_train_kwargs failed: {e!r}", flush=True)
+
+        # If the inferred sample is itself a multi entry already present,
+        # expand its constituents too.
+        if (not multi_keys and sample_inferred in SAMPLES
+                and SAMPLES[sample_inferred].get("is_multi")):
+            from data import register_runtime_sample
+            mc = SAMPLES[sample_inferred]
+            for pth in mc.get("paths", []):
+                try:
+                    multi_keys.append(register_runtime_sample(
+                        pth, vmax=float(mc.get("vmax", 2.0)),
+                        center_mask_radius=int(
+                            mc.get("center_mask_radius", 15))))
+                except Exception:
+                    pass
+            try:
+                self._sample_menu.configure(values=sorted(SAMPLES.keys()))
+            except Exception:
+                pass
 
         # 3) Final selection
+        if multi_keys:
+            # MULTI run: NO single trained dataset, so we do NOT silently
+            # auto-link to one.  Populate the dropdown with the cubes and
+            # link the first, but state clearly it's not auto-linked.
+            first = multi_keys[0]
+            self._sample_var.set(first)
+            self.link_run(d, first, native_sample=None)
+            self._info.configure(
+                text=f"linked run: {d}\nMULTI-dataset run ({len(multi_keys)} "
+                      f"cubes) — NOT auto-linked to one dataset.\n"
+                      f"Pick a dataset in the 'dataset' dropdown to analyze "
+                      f"it (showing «{first}»).")
+            return
         if sample_inferred and sample_inferred in SAMPLES:
             sample = sample_inferred
             self._sample_var.set(sample)
@@ -808,10 +953,11 @@ class PostHocPanel(ctk.CTkFrame):
                           center_crop_size=ccrop,
                           com_centering=com, center_mask_radius=mask_r,
                           eval_temp=0.06, batch_size=128)
-        # cache to disk for future reuse
+        # cache to disk for future reuse (per-dataset key so running on a
+        # non-trained dataset never overwrites the trained inference).
         eval_dir = os.path.join(self.outdir, "eval")
         os.makedirs(eval_dir, exist_ok=True)
-        np.savez(os.path.join(eval_dir, "inference.npz"),
+        np.savez(self._inference_cache_path(),
                   soft_probs=inf["soft_probs"], assigns=inf["assigns"],
                   embeds=inf["embeds"])
         return dict(soft_probs=inf["soft_probs"],
