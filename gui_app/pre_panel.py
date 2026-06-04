@@ -723,17 +723,27 @@ class PrePanel(ctk.CTkFrame):
         except Exception as e:
             messagebox.showerror("Load multi",
                 f"failed:\n{e}"); return
-        self.sample_key = key
-        # Single-cube preview keeps showing the FIRST cube; the multi
-        # entry is only consumed by Training (LoadPRZMulti).
+        # Preview the FIRST cube.  NOTE: _load() re-registers cube-0 as a
+        # SINGLE-cube sample and makes THAT the active sample (firing
+        # on_state_change with the single key) — which is exactly why
+        # "multi" training silently used only one cube.  After the
+        # preview we restore the MULTI key as the active sample so
+        # Training defaults to ALL cubes (LoadPRZMulti).
         self._path_var.set(paths[0])
         self._load()
+        self.sample_key = key
+        try:
+            from data import SAMPLES as _S
+            self.on_state_change("loaded", path=paths[0], sample_key=key,
+                                  scan_shape=_S[key].get("scan_shape"))
+        except Exception:
+            pass
         messagebox.showinfo("Load multi",
-            f"Registered {len(paths)} cubes as «{key}».\n\n"
-            f"Training (DINO) will use all of them via LoadPRZMulti.\n"
-            f"This preview tab shows only the first cube — switch the "
-            f"sample dropdown in the Training tab to «{key}» before "
-            f"hitting Train.")
+            f"Registered {len(paths)} cubes as «{key}» and made it the "
+            f"ACTIVE sample.\n\n"
+            f"Training (DINO) will use ALL {len(paths)} cubes via "
+            f"LoadPRZMulti — the Training tab is already set to «{key}».\n\n"
+            f"(This preview pane shows only the first cube.)")
 
     def _load(self):
         p = self._path_var.get().strip()
