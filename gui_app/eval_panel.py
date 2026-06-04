@@ -97,17 +97,27 @@ class EvalPanel(ctk.CTkFrame):
                                          justify="left")
         self._live_info.pack(side="left", padx=8)
 
-        # Load-mode controls (hidden by default)
+        # Load-mode controls (hidden by default).  Two logical halves:
+        #   (1) MODEL  : the run dir whose checkpoint we load.
+        #   (2) DATASET: ANY cube to run that model on — a built-in key,
+        #                a constituent cube of a multi-run, or an
+        #                arbitrary cube file via "Browse cube…".
         self._load_box = ctk.CTkFrame(top, fg_color="transparent")
-        ctk.CTkButton(self._load_box, text="Load run dir…", width=110,
+        ctk.CTkButton(self._load_box, text="Load run dir… (model)",
+                       width=150,
                        command=self._load_dir_dialog).pack(side="left", padx=4)
         self._load_path_var = ctk.StringVar()
         ctk.CTkEntry(self._load_box, textvariable=self._load_path_var,
-                       width=420).pack(side="left", padx=2)
+                       width=300).pack(side="left", padx=2)
+        ctk.CTkLabel(self._load_box, text="dataset:").pack(side="left",
+                                                           padx=(10, 2))
         self._sample_var = ctk.StringVar(value="Na007b")
-        ctk.CTkOptionMenu(self._load_box, variable=self._sample_var,
-                            values=sorted(SAMPLES.keys()), width=180
-                            ).pack(side="left", padx=4)
+        self._sample_menu = ctk.CTkOptionMenu(
+            self._load_box, variable=self._sample_var,
+            values=sorted(SAMPLES.keys()), width=200)
+        self._sample_menu.pack(side="left", padx=2)
+        ctk.CTkButton(self._load_box, text="Browse cube…", width=110,
+                       command=self._browse_dataset).pack(side="left", padx=2)
         ctk.CTkButton(self._load_box, text="Render", width=90,
                        command=self._render_from_load
                        ).pack(side="left", padx=4)
@@ -265,8 +275,29 @@ class EvalPanel(ctk.CTkFrame):
                 try:
                     kw = json.load(open(tk_path, encoding="utf-8"))
                     cfg = kw.get("_sample_config")
-                    if cfg and cfg.get("path"):
-                        from data import register_runtime_sample
+                    from data import register_runtime_sample
+                    if cfg and cfg.get("is_multi") and cfg.get("paths"):
+                        # MULTI run: register each constituent cube as its
+                        # own dataset so eval can show each one.  The
+                        # combined key has no single 2D scan grid.
+                        reg = []
+                        for pth in cfg["paths"]:
+                            try:
+                                reg.append(register_runtime_sample(
+                                    pth, vmax=float(cfg.get("vmax", 2.0)),
+                                    center_mask_radius=int(
+                                        cfg.get("center_mask_radius", 15))))
+                            except Exception as e:
+                                print(f"[eval] multi cube register "
+                                       f"failed for {pth}: {e!r}", flush=True)
+                        self._sync_sample_choices(
+                            select=(reg[0] if reg else None))
+                        if reg:
+                            self._status.configure(
+                                text=f"multi-run: {len(reg)} cubes — pick "
+                                      f"each in the 'dataset' dropdown, "
+                                      f"then Render")
+                    elif cfg and cfg.get("path"):
                         scan_shape = cfg.get("scan_shape")
                         register_runtime_sample(
                             cfg["path"],
@@ -277,16 +308,86 @@ class EvalPanel(ctk.CTkFrame):
                                 cfg.get("center_mask_radius", 15)),
                             key=sample_inferred,
                         )
-                        try:
-                            self._sample_menu.configure(
-                                values=sorted(SAMPLES.keys()))
-                        except Exception:
-                            pass
+                        self._sync_sample_choices()
                 except Exception as e:
                     print(f"[eval] auto-register from "
                            f"_train_kwargs failed: {e!r}", flush=True)
-        if sample_inferred and sample_inferred in SAMPLES:
-            self._sample_var.set(sample_inferred)
+        # If the inferred sample IS a multi entry already present, expand
+        # its constituent cubes into the dataset dropdown too.
+        if (sample_inferred and sample_inferred in SAMPLES
+                and SAMPLES[sample_inferred].get("is_multi")):
+            from data import register_runtime_sample
+            reg = []
+            for pth in SAMPLES[sample_inferred].get("paths", []):
+                try:
+                    reg.append(register_runtime_sample(
+                        pth,
+                        vmax=float(SAMPLES[sample_inferred].get("vmax", 2.0)),
+                        center_mask_radius=int(
+                            SAMPLES[sample_inferred].get(
+                                "center_mask_radius", 15))))
+                except Exception:
+                    pass
+            self._sync_sample_choices(select=(reg[0] if reg else None))
+            if reg:
+                self._status.configure(
+                    text=f"multi-run: {len(reg)} cubes — pick each in the "
+                          f"'dataset' dropdown, then Render")
+        elif sample_inferred and sample_inferred in SAMPLES:
+            self._sync_sample_choices(select=sample_inferred)
+
+    def _sync_sample_choices(self, select: "str | None" = None):
+        """Refresh the dataset dropdown's options from SAMPLES, optionally
+        selecting `select`."""
+        try:
+            keys = sorted(SAMPLES.keys())
+            self._sample_menu.configure(values=keys)
+            if select and select in keys:
+                self._sample_var.set(select)
+        except Exception:
+            pass
+
+    def _browse_dataset(self):
+        """Pick ANY cube file to run the currently-loaded model on
+        (decouples the model run-dir from the dataset)."""
+        p = filedialog.askopenfilename(
+            title="Pick a dataset cube to run the model on",
+            filetypes=[("Cube files", "*.prz *.npz *.npy *.h5 *.hdf5"),
+                        ("All files", "*.*")])
+        if not p:
+            return
+        scan_override = None
+        if p.lower().endswith((".h5", ".hdf5")):
+            # 3D Eiger/Dectris masters may not carry the scan grid.
+            try:
+                import h5py
+                from data import (_h5_find_data_path, _h5_infer_scan_shape)
+                with h5py.File(p, "r") as fh:
+                    dpath, ndim = _h5_find_data_path(fh)
+                    s = tuple(fh[dpath].shape)
+                    if ndim == 3:
+                        scan_override = _h5_infer_scan_shape(fh, s[0])
+                        if scan_override is None:
+                            from gui_app._dialogs import ask_scan_shape
+                            scan_override = ask_scan_shape(
+                                self, s[0], s[1], s[2])
+                            if scan_override is None:
+                                return
+            except Exception as e:
+                messagebox.showerror("dataset",
+                    f"could not read h5 shape:\n{e}"); return
+        try:
+            from data import register_runtime_sample
+            key = register_runtime_sample(
+                p, scan_shape=(tuple(scan_override) if scan_override
+                                else None))
+        except Exception as e:
+            messagebox.showerror("dataset",
+                f"could not register cube:\n{e}"); return
+        self._sync_sample_choices(select=key)
+        self._status.configure(
+            text=f"dataset → {key}   (now click Render to run the "
+                  f"loaded model on it)")
 
     def _render_from_load(self):
         d = self._load_path_var.get().strip()
