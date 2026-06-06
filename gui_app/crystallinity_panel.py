@@ -120,11 +120,15 @@ def compute_crystallinity_ratio(pat: np.ndarray,
 # SNIP halo baseline, continuous peak/halo ratio.  NO 2D peak finding, so
 # weak peaks (boosted by azimuthal integration) aren't lost.
 # ---------------------------------------------------------------------------
-def _radial_mean_var(pat: np.ndarray, center: tuple):
+def _radial_mean_var(pat: np.ndarray, center: tuple, beam_px: float = 0.0):
     """Azimuthal mean m(r) and variance v(r) per integer radial bin.
 
     v(r) is the variance of intensity AROUND the ring at radius r — high
     for spotty (crystalline) rings, ~0 for smooth amorphous rings.
+
+    ``beam_px`` masks the direct beam: bins inside that radius are zeroed
+    (mean/var/count → 0) so the (huge) central beam can't dominate the
+    radial profile, the SNIP baseline, or the scattered-intensity sum.
     """
     H, W = pat.shape
     cy, cx = center
@@ -139,6 +143,11 @@ def _radial_mean_var(pat: np.ndarray, center: tuple):
     cntc = np.maximum(cnt, 1.0)
     m = s1 / cntc
     v = np.maximum(s2 / cntc - m * m, 0.0)
+    nb = int(max(0, min(round(beam_px), n_bins)))
+    if nb > 0:
+        m[:nb] = 0.0
+        v[:nb] = 0.0
+        cnt[:nb] = 0.0
     return m, v, cnt
 
 
@@ -162,7 +171,8 @@ def _snip_baseline(y: np.ndarray, n_iter: int = 14) -> np.ndarray:
 
 def compute_crystallinity_1d(pat: np.ndarray, r_lo_px: float, r_hi_px: float,
                               *, center: tuple | None = None,
-                              snip_window: int = 14) -> dict | None:
+                              snip_window: int = 14,
+                              beam_px: float = 0.0) -> dict | None:
     """1D crystallinity from a single 2D pattern.
 
     Returns a dict with:
@@ -174,7 +184,7 @@ def compute_crystallinity_1d(pat: np.ndarray, r_lo_px: float, r_hi_px: float,
     """
     H, W = pat.shape
     cy, cx = center if center is not None else (H / 2.0, W / 2.0)
-    m_all, v_all, _cnt = _radial_mean_var(pat, (cy, cx))
+    m_all, v_all, _cnt = _radial_mean_var(pat, (cy, cx), beam_px)
     return _crystallinity_window(m_all, v_all, round(r_lo_px),
                                   round(r_hi_px), snip_window)
 
@@ -234,6 +244,40 @@ class CrystallinityPanel(ctk.CTkFrame):
             return float(self.app.recip_res.get()) if self.app else 0.0
         except Exception:
             return 0.0
+
+    def _beam_radius_px(self) -> int:
+        try:
+            return max(int(float(self._beam_px.get())), 0)
+        except Exception:
+            return 0
+
+    def _ensure_beam_mask(self, sample: str, H: int):
+        """Resolve the direct-beam mask radius (detector px) for `sample`.
+
+        Use the dataset's center_mask_radius (scaled from the 192-px model
+        space to this raw detector) when known; otherwise pop a dialog
+        asking the user.  Runs ONCE per sample (main thread only)."""
+        if (self._beam_radius_px() > 0
+                and getattr(self, "_beam_sample", None) == sample):
+            return
+        cfg = SAMPLES.get(sample, {})
+        cmr = cfg.get("center_mask_radius")
+        if cmr:
+            guess = int(round(float(cmr) * (H / 192.0)))
+        else:
+            guess = max(6, int(H // 24))
+        val = None
+        if not cmr:
+            # No mask recorded for this dataset → ask the user.
+            from tkinter import simpledialog
+            val = simpledialog.askinteger(
+                "Direct-beam mask",
+                f"No center mask recorded for this dataset.\n\n"
+                f"Direct-beam mask radius in DETECTOR px "
+                f"(pattern is {H}px):",
+                initialvalue=guess, minvalue=0, parent=self)
+        self._beam_px.set(int(val if val is not None else guess))
+        self._beam_sample = sample
 
     def _inv_ang_per_px(self):
         try:
@@ -316,6 +360,19 @@ class CrystallinityPanel(ctk.CTkFrame):
         self._inv_ang = ctk.DoubleVar(value=round(rp * 0.1, 6))
         ctk.CTkEntry(cal_row, textvariable=self._inv_ang,
                        width=80).pack(side="left", padx=2)
+        # Direct-beam mask (detector px).  Defaults to the dataset's
+        # center_mask_radius on load (else a dialog asks).  Bins inside
+        # this radius are zeroed everywhere so the beam can't dominate
+        # the radial profile / SNIP baseline / scattered-intensity.
+        beam_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        beam_row.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(beam_row, text="beam mask (px):",
+                       width=110, anchor="w").pack(side="left")
+        self._beam_px = ctk.IntVar(value=0)
+        eb = ctk.CTkEntry(beam_row, textvariable=self._beam_px, width=56)
+        eb.pack(side="left", padx=2)
+        eb.bind("<Return>", lambda _e: self._recompute_test())
+        self._beam_sample = None
 
         # 3. R WINDOW
         _section_header(sidebar, "3.  Radial window  (1/Å)")
@@ -694,6 +751,14 @@ class CrystallinityPanel(ctk.CTkFrame):
         self._test_origin = origin
         H, W = self._test_pattern.shape
         self._test_center = (H / 2.0, W / 2.0)
+        # Resolve the direct-beam mask for this dataset (uses the data's
+        # center mask if known, else asks) before computing anything.
+        ph = self._posthoc()
+        if ph is not None and ph.sample is not None:
+            try:
+                self._ensure_beam_mask(ph.sample, H)
+            except Exception:
+                pass
         self._test_polar = cart_to_polar(self._test_pattern,
                                               n_theta=192,
                                               center=self._test_center)
@@ -741,7 +806,8 @@ class CrystallinityPanel(ctk.CTkFrame):
         try:
             res = compute_crystallinity_1d(
                 self._test_pattern, r_min_px, r_max_px,
-                center=self._test_center, snip_window=snipw)
+                center=self._test_center, snip_window=snipw,
+                beam_px=self._beam_radius_px())
         except Exception as e:
             self._test_status.configure(text=f"err: {e!r}"); return
         if res is None:
@@ -774,6 +840,13 @@ class CrystallinityPanel(ctk.CTkFrame):
                               (r["r_max_px"], "#33ddff")):
             ax.add_patch(Circle((cx, cy), rad, color=color,
                                   fill=False, lw=1.5, linestyle="--"))
+        # direct-beam mask (everything inside is zeroed)
+        bpx = self._beam_radius_px()
+        if bpx > 0:
+            ax.add_patch(Circle((cx, cy), bpx, color="#ff3b3b",
+                                  fill=True, alpha=0.28, lw=1.0))
+            ax.add_patch(Circle((cx, cy), bpx, color="#ff3b3b",
+                                  fill=False, lw=1.2))
         ax.set_xticks([]); ax.set_yticks([])
         ax.set_title(f"{self._test_origin}    "
                        f"peak/halo = {r['ratio']:.4f}", fontsize=10)
@@ -901,6 +974,7 @@ class CrystallinityPanel(ctk.CTkFrame):
             except Exception:
                 snipw = 14
             lo0 = max(0, int(round(r_min_px)))   # post-beam truncation
+            beam = self._beam_radius_px()
             ratio_map = np.full((Ny, Nx), np.nan, dtype=np.float32)
             var_map = np.full((Ny, Nx), np.nan, dtype=np.float32)
             scatter_map = np.full((Ny, Nx), np.nan, dtype=np.float32)
@@ -915,7 +989,8 @@ class CrystallinityPanel(ctk.CTkFrame):
                     except Exception:
                         continue
                     try:
-                        m_all, v_all, cnt = _radial_mean_var(pat, center)
+                        m_all, v_all, cnt = _radial_mean_var(
+                            pat, center, beam)
                         # post-beam scattered intensity (vacuum/noise test)
                         scatter_map[rx, ry] = float(
                             (m_all[lo0:] * cnt[lo0:]).sum())
@@ -1143,6 +1218,14 @@ class CrystallinityPanel(ctk.CTkFrame):
             messagebox.showinfo("Report all", "dr must be > 0."); return
         if self._busy:
             return
+        # Resolve the beam mask on the main thread (may pop a dialog).
+        try:
+            from gui_app.posthoc_panel import _open_lazy
+            shp = _open_lazy(SAMPLES[ph.sample]["path"],
+                              scan_shape=ph._scan_shape).shape
+            self._ensure_beam_mask(ph.sample, int(shp[2]))
+        except Exception:
+            pass
         self._busy = True
         threading.Thread(target=self._report_all_worker,
                           daemon=True).start()
@@ -1170,6 +1253,7 @@ class CrystallinityPanel(ctk.CTkFrame):
             lo0 = int(round(float(self._r_min.get()) / max(inv_a, 1e-12)))
             step = max(int(round(dr / max(inv_a, 1e-12))), 1)
             lo0 = max(lo0, 0)
+            beam = self._beam_radius_px()
             windows = []
             lo = lo0
             while lo + step <= n_bins:
@@ -1196,7 +1280,8 @@ class CrystallinityPanel(ctk.CTkFrame):
                     except Exception:
                         continue
                     # ONE radial pass per pattern; evaluate every window.
-                    m_all, v_all, cnt = _radial_mean_var(pat, center)
+                    m_all, v_all, cnt = _radial_mean_var(
+                        pat, center, beam)
                     # post-beam scattered intensity (window-independent)
                     scatter_map[rx, ry] = float(
                         (m_all[lo0:] * cnt[lo0:]).sum())
@@ -1257,6 +1342,7 @@ class CrystallinityPanel(ctk.CTkFrame):
                 vac_pct_val = 0.0
             manifest = dict(sample=ph.sample, inv_ang_per_px=inv_a,
                              dr=dr, dr_bins=step, r_min=float(self._r_min.get()),
+                             beam_mask_px=beam,
                              stride=stride, snip_window=snipw,
                              vac_pctile=vac_pct_val,
                              vac_cutoff=(vac_cut if vac_cut is not None
