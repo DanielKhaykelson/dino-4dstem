@@ -175,9 +175,19 @@ def compute_crystallinity_1d(pat: np.ndarray, r_lo_px: float, r_hi_px: float,
     H, W = pat.shape
     cy, cx = center if center is not None else (H / 2.0, W / 2.0)
     m_all, v_all = _radial_mean_var(pat, (cy, cx))
+    return _crystallinity_window(m_all, v_all, round(r_lo_px),
+                                  round(r_hi_px), snip_window)
+
+
+def _crystallinity_window(m_all: np.ndarray, v_all: np.ndarray,
+                           lo: int, hi: int, snip_window: int = 14):
+    """Evaluate peak/halo + azimuthal-variance crystallinity over the
+    radial-bin window [lo, hi) from PRECOMPUTED azimuthal mean/variance
+    profiles — so Report-all can sweep many windows with ONE radial pass
+    per pattern."""
     n = m_all.size
-    lo = int(max(0, min(n - 1, round(r_lo_px))))
-    hi = int(min(n, round(r_hi_px)))
+    lo = int(max(0, min(n - 1, lo)))
+    hi = int(min(n, hi))
     if hi - lo < 8:
         return None
     m = m_all[lo:hi]
@@ -395,6 +405,27 @@ class CrystallinityPanel(ctk.CTkFrame):
         ctk.CTkButton(sidebar, text="Save map  (npy + png)",
                        width=240,
                        command=self._save_map
+                       ).pack(anchor="w", padx=10, pady=2)
+
+        # 6. REPORT-ALL: sweep sliding windows [r, r+dr] from the
+        # center-beam truncation outward; both maps for every window.
+        _section_header(sidebar, "6.  Report all  (r-sweep)")
+        _hint(sidebar,
+              "Sweeps non-overlapping windows of width dr from r_min "
+              "(your center-beam truncation) to the detector edge.  For "
+              "EACH window it computes both maps (peak/halo + variance) "
+              "and saves every .npy + .png plus montages to one folder.")
+        dr_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        dr_row.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(dr_row, text="dr (1/Å):", width=70,
+                       anchor="w").pack(side="left")
+        self._dr_var = ctk.DoubleVar(value=0.05)
+        ctk.CTkEntry(dr_row, textvariable=self._dr_var,
+                       width=70).pack(side="left", padx=2)
+        ctk.CTkButton(sidebar, text="Report all ▶",
+                       width=240,
+                       fg_color=("#7A4DA0", "#5A3A80"),
+                       command=self._report_all
                        ).pack(anchor="w", padx=10, pady=2)
         self._full_status = ctk.CTkLabel(sidebar,
             text="(no full-dataset run yet)",
@@ -904,3 +935,169 @@ class CrystallinityPanel(ctk.CTkFrame):
         self._full_status.configure(
             text=f"saved {', '.join(saved)} (.npy + .png) → "
                   f"{os.path.basename(out)}/")
+
+    # ------------------------------------------------------------------
+    def _report_all(self):
+        ph = self._posthoc()
+        if ph is None or ph.sample is None:
+            messagebox.showinfo("Report all",
+                "Load a run / dataset in the Post-hoc tab first."); return
+        try:
+            dr = float(self._dr_var.get())
+        except Exception:
+            dr = 0.0
+        if dr <= 0:
+            messagebox.showinfo("Report all", "dr must be > 0."); return
+        if self._busy:
+            return
+        self._busy = True
+        threading.Thread(target=self._report_all_worker,
+                          daemon=True).start()
+
+    def _report_all_worker(self):
+        try:
+            import json
+            from datetime import datetime
+            from gui_app.posthoc_panel import _open_lazy
+            ph = self._posthoc()
+            cfg = SAMPLES[ph.sample]
+            cube = _open_lazy(cfg["path"], scan_shape=ph._scan_shape)
+            Ny, Nx, H, W = cube.shape
+            center = (H / 2.0, W / 2.0)
+            n_bins = int(min(H, W) // 2)
+            inv_a = float(self._inv_ang.get())
+            dr = float(self._dr_var.get())
+            stride = max(int(self._full_stride.get()), 1)
+            try:
+                snipw = int(float(self._snip_win.get()))
+            except Exception:
+                snipw = 14
+            # Windows in radial-bin px: start at r_min (center-beam
+            # truncation), step by dr, non-overlapping, to detector edge.
+            lo0 = int(round(float(self._r_min.get()) / max(inv_a, 1e-12)))
+            step = max(int(round(dr / max(inv_a, 1e-12))), 1)
+            lo0 = max(lo0, 0)
+            windows = []
+            lo = lo0
+            while lo + step <= n_bins:
+                windows.append((lo, lo + step))
+                lo += step
+            if not windows:
+                self.after(0, lambda: messagebox.showinfo(
+                    "Report all",
+                    "No windows fit — dr too large or r_min too high."))
+                return
+            nW = len(windows)
+            ratio_maps = [np.full((Ny, Nx), np.nan, np.float32)
+                           for _ in range(nW)]
+            var_maps = [np.full((Ny, Nx), np.nan, np.float32)
+                         for _ in range(nW)]
+            t0 = time.time()
+            total = (Ny // stride) * (Nx // stride)
+            done = 0
+            for rx in range(0, Ny, stride):
+                for ry in range(0, Nx, stride):
+                    try:
+                        pat = np.asarray(cube[rx, ry], dtype=np.float32)
+                    except Exception:
+                        continue
+                    # ONE radial pass per pattern; evaluate every window.
+                    m_all, v_all = _radial_mean_var(pat, center)
+                    for w, (a, b) in enumerate(windows):
+                        res = _crystallinity_window(m_all, v_all, a, b, snipw)
+                        if res is not None:
+                            ratio_maps[w][rx, ry] = res["ratio"]
+                            var_maps[w][rx, ry] = res["var_index"]
+                    done += 1
+                if (rx & 3) == 0:
+                    dt = time.time() - t0
+                    eta = (dt / max(done, 1)) * (total - done)
+                    self.after(0, lambda d=done, t=total, dt=dt, eta=eta,
+                                  nw=nW: self._full_status.configure(
+                        text=f"Report-all: pos {d}/{t} × {nw} windows  "
+                              f"({dt:.0f}s, ETA {eta:.0f}s)"))
+
+            def _fill(arr):
+                cur = arr.copy(); mask = ~np.isnan(cur)
+                for _ in range(stride):
+                    nxt = cur.copy()
+                    for sh in (1, -1):
+                        for ax_ in (0, 1):
+                            rolled = np.roll(cur, sh, axis=ax_)
+                            new = ~mask & ~np.isnan(rolled)
+                            nxt[new] = rolled[new]; mask = mask | new
+                    cur = nxt
+                return cur
+            if stride > 1:
+                ratio_maps = [_fill(a) for a in ratio_maps]
+                var_maps = [_fill(a) for a in var_maps]
+
+            # ---- save everything to one folder ----
+            outdir = (ph.outdir if ph and ph.outdir
+                       else os.path.join("runs", "_crystallinity"))
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            folder = os.path.join(outdir, "crystallinity",
+                                   f"report_all_{stamp}")
+            os.makedirs(folder, exist_ok=True)
+            manifest = dict(sample=ph.sample, inv_ang_per_px=inv_a,
+                             dr=dr, dr_bins=step, r_min=float(self._r_min.get()),
+                             stride=stride, snip_window=snipw,
+                             n_bins=n_bins, n_windows=nW, windows=[])
+            for w, (a, b) in enumerate(windows):
+                qa, qb = a * inv_a, b * inv_a
+                tag = f"w{w:02d}_q{qa:.3f}-{qb:.3f}"
+                np.save(os.path.join(folder, f"peakhalo_{tag}.npy"),
+                          ratio_maps[w])
+                np.save(os.path.join(folder, f"azimvar_{tag}.npy"),
+                          var_maps[w])
+                for name, mp in (("peakhalo", ratio_maps[w]),
+                                  ("azimvar", var_maps[w])):
+                    fig = Figure(figsize=(6, 5.4), facecolor="white")
+                    ax = fig.add_subplot(111)
+                    im = ax.imshow(mp, cmap="viridis",
+                                     interpolation="nearest", aspect="equal")
+                    ax.set_title(f"{name}  q={qa:.3f}–{qb:.3f} 1/Å",
+                                  fontsize=11)
+                    ax.set_xticks([]); ax.set_yticks([])
+                    fig.colorbar(im, ax=ax, fraction=0.045, pad=0.02)
+                    fig.savefig(os.path.join(folder, f"{name}_{tag}.png"),
+                                  dpi=160, bbox_inches="tight",
+                                  facecolor="white")
+                manifest["windows"].append(
+                    dict(idx=w, lo_px=a, hi_px=b, q_lo=qa, q_hi=qb))
+
+            # ---- montage grids (one per metric) ----
+            ncol = int(np.ceil(np.sqrt(nW)))
+            nrow = int(np.ceil(nW / ncol))
+            for name, maps in (("peakhalo", ratio_maps),
+                                ("azimvar", var_maps)):
+                fig = Figure(figsize=(2.6 * ncol, 2.6 * nrow),
+                              facecolor="white")
+                for w, (a, b) in enumerate(windows):
+                    ax = fig.add_subplot(nrow, ncol, w + 1)
+                    mp = maps[w]
+                    finite = mp[np.isfinite(mp)]
+                    vmin = float(np.percentile(finite, 2)) if finite.size else 0
+                    vmax = float(np.percentile(finite, 98)) if finite.size else 1
+                    ax.imshow(mp, cmap="viridis", vmin=vmin, vmax=vmax,
+                                interpolation="nearest", aspect="equal")
+                    ax.set_title(f"{a*inv_a:.3f}–{b*inv_a:.3f}", fontsize=7)
+                    ax.set_xticks([]); ax.set_yticks([])
+                fig.suptitle(f"{name} — r-sweep (dr={dr:g} 1/Å)  {ph.sample}",
+                              fontsize=11)
+                fig.tight_layout(rect=[0, 0, 1, 0.96])
+                fig.savefig(os.path.join(folder, f"_montage_{name}.png"),
+                              dpi=150, bbox_inches="tight", facecolor="white")
+            with open(os.path.join(folder, "manifest.json"), "w") as f:
+                json.dump(manifest, f, indent=2)
+
+            dt = time.time() - t0
+            self.after(0, lambda: self._full_status.configure(
+                text=f"Report-all done ({dt:.0f}s): {nW} windows × 2 maps "
+                      f"→ {os.path.basename(folder)}/"))
+        except Exception as e:
+            err = repr(e)
+            self.after(0, lambda: messagebox.showerror(
+                "Report all", err))
+        finally:
+            self._busy = False
