@@ -456,13 +456,20 @@ class CrystallinityPanel(ctk.CTkFrame):
         self._build_axes()
         self._refresh_from_posthoc()
 
-    def _build_axes(self):
+    def _reset_axes(self):
+        """Rebuild the 2×2 axes from scratch.  Rebuilding (rather than
+        ax.clear()) is essential: each render adds a twinx() axis and a
+        map colorbar, which otherwise STACK up every time the source
+        changes."""
         self._fig.clf()
         gs = self._fig.add_gridspec(2, 2, hspace=0.28, wspace=0.18)
         self._ax_cart  = self._fig.add_subplot(gs[0, 0])
         self._ax_polar = self._fig.add_subplot(gs[0, 1])
         self._ax_1d    = self._fig.add_subplot(gs[1, 0])
         self._ax_map   = self._fig.add_subplot(gs[1, 1])
+
+    def _build_axes(self):
+        self._reset_axes()
         for ax, txt in ((self._ax_cart,  "(load source — step 1)"),
                           (self._ax_polar, "(polar view appears here)"),
                           (self._ax_1d,    "(1D radial appears here)"),
@@ -739,10 +746,13 @@ class CrystallinityPanel(ctk.CTkFrame):
     def _render_test_panels(self):
         if self._test_pattern is None or self._test_result is None:
             return
+        # Rebuild axes from scratch so twin axes / colorbars from the
+        # previous source don't stack up.
+        self._reset_axes()
         r = self._test_result
         cy, cx = self._test_center
         # ---- cart pattern + annulus (no 2D peak finding) ----
-        ax = self._ax_cart; ax.clear()
+        ax = self._ax_cart
         img = np.log1p(np.clip(self._test_pattern, 0, None))
         ax.imshow(img, cmap="inferno", aspect="equal",
                     interpolation="nearest")
