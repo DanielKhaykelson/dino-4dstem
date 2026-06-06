@@ -169,10 +169,46 @@ def _snip_baseline(y: np.ndarray, n_iter: int = 14) -> np.ndarray:
     return z
 
 
+def _als_baseline(y: np.ndarray, lam: float = 1e4, p: float = 0.01,
+                   n_iter: int = 10) -> np.ndarray:
+    """Asymmetric Least Squares (Eilers) baseline on a 1D signal.
+
+    Penalised smoothing pulled to the lower envelope by asymmetric
+    weights (peaks get weight p, background 1-p).  `lam` = smoothness.
+    """
+    y = np.asarray(y, dtype=np.float64)
+    L = y.size
+    if L < 5:
+        return y.copy()
+    try:
+        from scipy import sparse
+        from scipy.sparse.linalg import spsolve
+    except Exception:
+        return _snip_baseline(y, 14)     # graceful fallback
+    D = sparse.diags([1.0, -2.0, 1.0], [0, 1, 2], shape=(L - 2, L))
+    DTD = lam * (D.transpose() @ D)
+    w = np.ones(L)
+    z = y.copy()
+    for _ in range(int(n_iter)):
+        W = sparse.spdiags(w, 0, L, L)
+        z = spsolve((W + DTD).tocsc(), w * y)
+        w = p * (y > z) + (1.0 - p) * (y <= z)
+    return z
+
+
+def _baseline_log(log_I: np.ndarray, method: str = "snip",
+                   snip_window: int = 14) -> np.ndarray:
+    """Dispatch the halo baseline (in log space) by method name."""
+    if str(method).lower() == "als":
+        return _als_baseline(log_I)
+    return _snip_baseline(log_I, snip_window)
+
+
 def compute_crystallinity_1d(pat: np.ndarray, r_lo_px: float, r_hi_px: float,
                               *, center: tuple | None = None,
                               snip_window: int = 14,
-                              beam_px: float = 0.0) -> dict | None:
+                              beam_px: float = 0.0,
+                              baseline: str = "snip") -> dict | None:
     """1D crystallinity from a single 2D pattern.
 
     Returns a dict with:
@@ -186,11 +222,12 @@ def compute_crystallinity_1d(pat: np.ndarray, r_lo_px: float, r_hi_px: float,
     cy, cx = center if center is not None else (H / 2.0, W / 2.0)
     m_all, v_all, _cnt = _radial_mean_var(pat, (cy, cx), beam_px)
     return _crystallinity_window(m_all, v_all, round(r_lo_px),
-                                  round(r_hi_px), snip_window)
+                                  round(r_hi_px), snip_window, baseline)
 
 
 def _crystallinity_window(m_all: np.ndarray, v_all: np.ndarray,
-                           lo: int, hi: int, snip_window: int = 14):
+                           lo: int, hi: int, snip_window: int = 14,
+                           baseline: str = "snip"):
     """Evaluate peak/halo + azimuthal-variance crystallinity over the
     radial-bin window [lo, hi) from PRECOMPUTED azimuthal mean/variance
     profiles — so Report-all can sweep many windows with ONE radial pass
@@ -202,10 +239,10 @@ def _crystallinity_window(m_all: np.ndarray, v_all: np.ndarray,
         return None
     m = m_all[lo:hi]
     v = v_all[lo:hi]
-    # peak/halo via SNIP baseline in log space (handles the steep,
-    # power-law-ish amorphous halo); ratio in LINEAR intensity.
+    # peak/halo via baseline (SNIP or ALS) in log space (handles the
+    # steep amorphous halo); ratio in LINEAR intensity.
     log_I = np.log(np.clip(m, 1e-6, None))
-    base_log = _snip_baseline(log_I, snip_window)
+    base_log = _baseline_log(log_I, baseline, snip_window)
     halo = np.exp(base_log)
     peak = np.clip(m - halo, 0.0, None)
     tot = float(m.sum()) + 1e-12
@@ -326,6 +363,13 @@ class CrystallinityPanel(ctk.CTkFrame):
             return max(int(float(self._beam_px.get())), 0)
         except Exception:
             return 0
+
+    def _r_max_q(self) -> float:
+        """Window end in 1/Å = r_min + dr."""
+        try:
+            return float(self._r_min.get()) + float(self._dr_var.get())
+        except Exception:
+            return float(self._r_min.get())
 
     def _ensure_beam_mask(self, sample: str, H: int):
         """Resolve the direct-beam mask radius (detector px) for `sample`.
@@ -450,23 +494,21 @@ class CrystallinityPanel(ctk.CTkFrame):
         eb.bind("<Return>", lambda _e: self._recompute_test())
         self._beam_sample = None
 
-        # 3. R WINDOW
+        # 3. R WINDOW — start (r_min) + width (dr); window = [r_min, r_min+dr]
         _section_header(sidebar, "3.  Radial window  (1/Å)")
         _hint(sidebar,
-              "Sets the q-range where peak/background ratio is "
-              "computed.  Sliders re-tune in real-time.  Default = "
-              "first-3rd ring band.")
+              "Analysis window = [r_min, r_min+dr].  r_min is the start "
+              "(set it just past the beam); dr is the width.  Report-all "
+              "sweeps this same dr outward from r_min.")
         # Slider range is updated dynamically from the loaded pattern's
         # half-size × calibration (see _update_r_slider_range).  Start
         # from a 256-px-radius guess (512 detector) so it isn't tiny.
         max_q_default = 256 * (self._recip_per_px() * 0.1 or 0.00185)
-        self._r_min = ctk.DoubleVar(value=max(max_q_default * 0.10,
-                                                     0.02))
-        self._r_max = ctk.DoubleVar(value=max(max_q_default * 0.60,
-                                                     0.2))
+        self._r_min = ctk.DoubleVar(value=max(max_q_default * 0.10, 0.02))
+        self._dr_var = ctk.DoubleVar(value=max(max_q_default * 0.50, 0.05))
         self._r_sliders = []
         for label, var in (("r_min", self._r_min),
-                              ("r_max", self._r_max)):
+                              ("dr", self._dr_var)):
             row = ctk.CTkFrame(sidebar, fg_color="transparent")
             row.pack(fill="x", padx=10, pady=1)
             ctk.CTkLabel(row, text=label, width=60,
@@ -501,6 +543,16 @@ class CrystallinityPanel(ctk.CTkFrame):
                             variable=self._snip_win, width=240,
                             command=lambda _v: self._recompute_test())
         sl.pack(anchor="w", padx=10, pady=1)
+        base_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        base_row.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(base_row, text="baseline:", width=66,
+                       anchor="w").pack(side="left")
+        self._baseline_method = ctk.StringVar(value="SNIP")
+        ctk.CTkSegmentedButton(
+            base_row, values=["SNIP", "ALS"],
+            variable=self._baseline_method,
+            command=lambda _v: self._recompute_test()
+            ).pack(side="left", padx=2)
         metric_row = ctk.CTkFrame(sidebar, fg_color="transparent")
         metric_row.pack(fill="x", padx=10, pady=2)
         ctk.CTkLabel(metric_row, text="map metric:", width=78,
@@ -561,17 +613,10 @@ class CrystallinityPanel(ctk.CTkFrame):
         # center-beam truncation outward; both maps for every window.
         _section_header(sidebar, "6.  Report all  (r-sweep)")
         _hint(sidebar,
-              "Sweeps non-overlapping windows of width dr from r_min "
-              "(your center-beam truncation) to the detector edge.  For "
-              "EACH window it computes both maps (peak/halo + variance) "
-              "and saves every .npy + .png plus montages to one folder.")
-        dr_row = ctk.CTkFrame(sidebar, fg_color="transparent")
-        dr_row.pack(fill="x", padx=10, pady=2)
-        ctk.CTkLabel(dr_row, text="dr (1/Å):", width=70,
-                       anchor="w").pack(side="left")
-        self._dr_var = ctk.DoubleVar(value=0.05)
-        ctk.CTkEntry(dr_row, textvariable=self._dr_var,
-                       width=70).pack(side="left", padx=2)
+              "Sweeps non-overlapping windows of width dr (set in step 3) "
+              "from r_min to the detector edge.  For EACH window: both maps "
+              "(peak/halo + variance), per-dr 1D fits, dr overlays, and an "
+              "intrinsic quality score — all saved to one folder.")
         ctk.CTkButton(sidebar, text="Report all ▶",
                        width=240,
                        fg_color=("#7A4DA0", "#5A3A80"),
@@ -857,11 +902,11 @@ class CrystallinityPanel(ctk.CTkFrame):
         for sl in getattr(self, "_r_sliders", []):
             try: sl.configure(to=q_max)
             except Exception: pass
-        # If current r_max is below ~half the new range, open it up so
-        # the user sees the full q-span by default.
+        # If dr is tiny relative to the new range, open it up so the user
+        # sees a sensible default window.
         try:
-            if float(self._r_max.get()) < q_max * 0.3:
-                self._r_max.set(round(q_max * 0.6, 4))
+            if float(self._dr_var.get()) < q_max * 0.2:
+                self._dr_var.set(round(q_max * 0.5, 4))
         except Exception:
             pass
 
@@ -871,10 +916,10 @@ class CrystallinityPanel(ctk.CTkFrame):
             return
         inv_a = self._inv_ang_per_px()
         r_min_px = float(self._r_min.get()) / max(inv_a, 1e-12)
-        r_max_px = float(self._r_max.get()) / max(inv_a, 1e-12)
+        r_max_px = float(self._r_max_q()) / max(inv_a, 1e-12)
         if r_min_px >= r_max_px:
             self._test_status.configure(
-                text="r_min must be < r_max"); return
+                text="dr must be > 0"); return
         try:
             snipw = int(float(self._snip_win.get()))
         except Exception:
@@ -883,7 +928,8 @@ class CrystallinityPanel(ctk.CTkFrame):
             res = compute_crystallinity_1d(
                 self._test_pattern, r_min_px, r_max_px,
                 center=self._test_center, snip_window=snipw,
-                beam_px=self._beam_radius_px())
+                beam_px=self._beam_radius_px(),
+                baseline=self._baseline_method.get())
         except Exception as e:
             self._test_status.configure(text=f"err: {e!r}"); return
         if res is None:
@@ -972,7 +1018,7 @@ class CrystallinityPanel(ctk.CTkFrame):
         ax.set_yticks([])
         ax.set_title(
             f"polar view  (window q = "
-            f"{self._r_min.get():.3g}–{self._r_max.get():.3g} 1/Å)",
+            f"{self._r_min.get():.3g}–{self._r_max_q():.3g} 1/Å)",
             fontsize=10)
 
         # ---- 1D radial profile (lin-log, truncated): I(q) + SNIP halo +
@@ -983,7 +1029,7 @@ class CrystallinityPanel(ctk.CTkFrame):
         halo = np.clip(r["halo"], 1e-3, None)
         ax.semilogy(q, m, color="#1f77b4", lw=1.4, label="I(q) azim-mean")
         ax.semilogy(q, halo, color="#888", lw=1.2, ls="--",
-                       label="halo (SNIP)")
+                       label=f"halo ({self._baseline_method.get()})")
         ax.fill_between(q, halo, m, where=(m > halo),
                           color="#e0144c", alpha=0.25, label="peak")
         ax.set_xlabel("q  (1/Å)")
@@ -1056,12 +1102,13 @@ class CrystallinityPanel(ctk.CTkFrame):
             center = (H / 2.0, W / 2.0)
             inv_a = float(self._inv_ang.get())
             r_min_px = float(self._r_min.get()) / max(inv_a, 1e-12)
-            r_max_px = float(self._r_max.get()) / max(inv_a, 1e-12)
+            r_max_px = float(self._r_max_q()) / max(inv_a, 1e-12)
             stride = max(int(self._full_stride.get()), 1)
             try:
                 snipw = int(float(self._snip_win.get()))
             except Exception:
                 snipw = 14
+            method = self._baseline_method.get()
             lo0 = max(0, int(round(r_min_px)))   # post-beam truncation
             beam = self._beam_radius_px()
             ratio_map = np.full((Ny, Nx), np.nan, dtype=np.float32)
@@ -1085,7 +1132,7 @@ class CrystallinityPanel(ctk.CTkFrame):
                             (m_all[lo0:] * cnt[lo0:]).sum())
                         res = _crystallinity_window(
                             m_all, v_all, int(round(r_min_px)),
-                            int(round(r_max_px)), snipw)
+                            int(round(r_max_px)), snipw, baseline=method)
                         if res is not None:
                             ratio_map[rx, ry] = res["ratio"]
                             var_map[rx, ry] = res["var_index"]
@@ -1242,7 +1289,7 @@ class CrystallinityPanel(ctk.CTkFrame):
                 ax.set_title(
                     f"per-cluster crystallinity  "
                     f"(q = {self._r_min.get():.3g}–"
-                    f"{self._r_max.get():.3g} 1/Å)  ·  higher = more "
+                    f"{self._r_max_q():.3g} 1/Å)  ·  higher = more "
                     f"crystalline / spotty", fontsize=10)
         fig.tight_layout()
         c = FigureCanvasTkAgg(fig, master=win)
@@ -1269,7 +1316,7 @@ class CrystallinityPanel(ctk.CTkFrame):
         from datetime import datetime
         stamp = datetime.now().strftime("%H%M%S")
         qtag = (f"q = {self._r_min.get():.3g}–"
-                 f"{self._r_max.get():.3g} 1/Å")
+                 f"{self._r_max_q():.3g} 1/Å")
         saved = []
         for name, mp in (("peakhalo", self._apply_vac(self._cryst_map)),
                           ("azimvar",
@@ -1337,6 +1384,7 @@ class CrystallinityPanel(ctk.CTkFrame):
                 snipw = int(float(self._snip_win.get()))
             except Exception:
                 snipw = 14
+            method = self._baseline_method.get()
             # Windows in radial-bin px: start at r_min (center-beam
             # truncation), step by dr, non-overlapping, to detector edge.
             lo0 = int(round(float(self._r_min.get()) / max(inv_a, 1e-12)))
@@ -1379,7 +1427,8 @@ class CrystallinityPanel(ctk.CTkFrame):
                     scatter_map[rx, ry] = float(
                         (m_all[lo0:] * cnt[lo0:]).sum())
                     for w, (a, b) in enumerate(windows):
-                        res = _crystallinity_window(m_all, v_all, a, b, snipw)
+                        res = _crystallinity_window(m_all, v_all, a, b,
+                                                     snipw, baseline=method)
                         if res is not None:
                             ratio_maps[w][rx, ry] = res["ratio"]
                             var_maps[w][rx, ry] = res["var_index"]
@@ -1436,6 +1485,7 @@ class CrystallinityPanel(ctk.CTkFrame):
             manifest = dict(sample=ph.sample, inv_ang_per_px=inv_a,
                              dr=dr, dr_bins=step, r_min=float(self._r_min.get()),
                              beam_mask_px=beam,
+                             baseline=method,
                              stride=stride, snip_window=snipw,
                              vac_pctile=vac_pct_val,
                              vac_cutoff=(vac_cut if vac_cut is not None
@@ -1534,8 +1584,8 @@ class CrystallinityPanel(ctk.CTkFrame):
             for w, (a, b) in enumerate(windows):
                 qa, qb = a * inv_a, b * inv_a
                 mw = mean_prof[a:b]
-                halo = np.exp(_snip_baseline(
-                    np.log(np.clip(mw, 1e-6, None)), snipw))
+                halo = np.exp(_baseline_log(
+                    np.log(np.clip(mw, 1e-6, None)), method, snipw))
                 peak = np.clip(mw - halo, 0.0, None)
                 resid = mw - halo
                 noise = 1.4826 * np.median(
