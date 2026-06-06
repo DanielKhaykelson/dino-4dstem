@@ -832,19 +832,26 @@ class CrystallinityPanel(ctk.CTkFrame):
         cy, cx = self._test_center
         # ---- cart pattern + annulus (no 2D peak finding) ----
         ax = self._ax_cart
-        img = np.log1p(np.clip(self._test_pattern, 0, None))
-        ax.imshow(img, cmap="inferno", aspect="equal",
-                    interpolation="nearest")
+        bpx = self._beam_radius_px()
+        H0, W0 = self._test_pattern.shape
+        yy0, xx0 = np.indices((H0, W0))
+        beam_mask2d = (np.sqrt((yy0 - cy) ** 2 + (xx0 - cx) ** 2) < bpx) \
+            if bpx > 0 else np.zeros((H0, W0), bool)
+        disp = self._test_pattern.copy()
+        disp[beam_mask2d] = 0.0          # blank the beam so it can't
+        img = np.log1p(np.clip(disp, 0, None))   # dominate the contrast
+        # autoscale to the diffraction (exclude the masked beam region)
+        out = img[~beam_mask2d]
+        vmax = float(np.percentile(out, 99.5)) if out.size else float(img.max())
+        ax.imshow(img, cmap="inferno", aspect="equal", vmin=0.0,
+                    vmax=max(vmax, 1e-6), interpolation="nearest")
         # annulus rings mark the q-window used for the 1D analysis
         for rad, color in ((r["r_min_px"], "#33ddff"),
                               (r["r_max_px"], "#33ddff")):
             ax.add_patch(Circle((cx, cy), rad, color=color,
                                   fill=False, lw=1.5, linestyle="--"))
-        # direct-beam mask (everything inside is zeroed)
-        bpx = self._beam_radius_px()
+        # direct-beam mask outline (region blanked above)
         if bpx > 0:
-            ax.add_patch(Circle((cx, cy), bpx, color="#ff3b3b",
-                                  fill=True, alpha=0.28, lw=1.0))
             ax.add_patch(Circle((cx, cy), bpx, color="#ff3b3b",
                                   fill=False, lw=1.2))
         ax.set_xticks([]); ax.set_yticks([])
@@ -865,14 +872,20 @@ class CrystallinityPanel(ctk.CTkFrame):
 
         # ---- polar view + r-window band ----
         ax = self._ax_polar; ax.clear()
-        polar = self._test_polar
-        ax.imshow(np.log1p(np.clip(polar, 0, None)),
-                    cmap="inferno", aspect="auto",
-                    interpolation="nearest")
+        polar = np.array(self._test_polar, dtype=np.float32, copy=True)
         n_theta, n_r = polar.shape
-        # window x-pixels in polar frame: r-axis is 0..n_r-1 px
         inv_a = r["inv_a"]
         scale_x = n_r / max(self._test_pattern.shape[0] / 2, 1)
+        beam_cols = int(round(bpx * scale_x)) if bpx > 0 else 0
+        if beam_cols > 0:
+            polar[:, :min(beam_cols, n_r)] = 0.0   # blank the beam columns
+        pimg = np.log1p(np.clip(polar, 0, None))
+        pout = pimg[:, beam_cols:] if beam_cols < n_r else pimg
+        pvmax = float(np.percentile(pout, 99.5)) if pout.size \
+            else float(pimg.max())
+        ax.imshow(pimg, cmap="inferno", aspect="auto", vmin=0.0,
+                    vmax=max(pvmax, 1e-6), interpolation="nearest")
+        # window x-pixels in polar frame: r-axis is 0..n_r-1 px
         x_min = r["r_min_px"] * scale_x
         x_max = r["r_max_px"] * scale_x
         ax.axvspan(x_min, x_max, color="#33ddff", alpha=0.18)
