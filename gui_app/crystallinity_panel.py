@@ -337,7 +337,8 @@ class CrystallinityPanel(ctk.CTkFrame):
         super().__init__(master)
         self.app = app
         # State.
-        self._test_pattern = None
+        self._test_pattern = None        # raw
+        self._work_pattern = None        # blurred (what's analysed/shown)
         self._test_origin = "(none)"
         self._test_center = None
         self._test_polar = None
@@ -370,6 +371,23 @@ class CrystallinityPanel(ctk.CTkFrame):
             return float(self._r_min.get()) + float(self._dr_var.get())
         except Exception:
             return float(self._r_min.get())
+
+    def _blur_sigma_val(self) -> float:
+        try:
+            return max(float(self._blur_sigma.get()), 0.0)
+        except Exception:
+            return 0.0
+
+    def _blur_pat(self, pat):
+        """Optional Gaussian denoise of a 2D pattern (σ in detector px)."""
+        sig = self._blur_sigma_val()
+        if sig <= 0:
+            return pat
+        try:
+            from scipy.ndimage import gaussian_filter
+            return gaussian_filter(pat.astype(np.float32), sigma=sig)
+        except Exception:
+            return pat
 
     def _ensure_beam_mask(self, sample: str, H: int):
         """Resolve the direct-beam mask radius (detector px) for `sample`.
@@ -493,6 +511,16 @@ class CrystallinityPanel(ctk.CTkFrame):
         eb.pack(side="left", padx=2)
         eb.bind("<Return>", lambda _e: self._recompute_test())
         self._beam_sample = None
+        # Optional Gaussian denoise (σ in detector px) applied to every
+        # pattern before the radial profile — for very noisy data.  0 = off.
+        blur_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        blur_row.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(blur_row, text="blur σ (px):",
+                       width=110, anchor="w").pack(side="left")
+        self._blur_sigma = ctk.DoubleVar(value=0.0)
+        ebl = ctk.CTkEntry(blur_row, textvariable=self._blur_sigma, width=56)
+        ebl.pack(side="left", padx=2)
+        ebl.bind("<Return>", lambda _e: self._recompute_test())
 
         # 3. R WINDOW — start (r_min) + width (dr); window = [r_min, r_min+dr]
         _section_header(sidebar, "3.  Radial window  (1/Å)")
@@ -880,12 +908,11 @@ class CrystallinityPanel(ctk.CTkFrame):
                 self._ensure_beam_mask(ph.sample, H)
             except Exception:
                 pass
-        self._test_polar = cart_to_polar(self._test_pattern,
-                                              n_theta=192,
-                                              center=self._test_center)
         self._update_r_slider_range()
         self._test_status.configure(
             text=f"loaded: {origin}  ({H}×{W})")
+        # _recompute_test builds the (optionally blurred) working pattern,
+        # its polar view, and the metrics.
         self._recompute_test()
 
     def _update_r_slider_range(self):
@@ -914,6 +941,11 @@ class CrystallinityPanel(ctk.CTkFrame):
     def _recompute_test(self):
         if self._test_pattern is None:
             return
+        # Build the working pattern (optional Gaussian denoise) + its polar
+        # view; everything below analyses/displays THIS.
+        self._work_pattern = self._blur_pat(self._test_pattern)
+        self._test_polar = cart_to_polar(self._work_pattern, n_theta=192,
+                                           center=self._test_center)
         inv_a = self._inv_ang_per_px()
         r_min_px = float(self._r_min.get()) / max(inv_a, 1e-12)
         r_max_px = float(self._r_max_q()) / max(inv_a, 1e-12)
@@ -926,7 +958,7 @@ class CrystallinityPanel(ctk.CTkFrame):
             snipw = 14
         try:
             res = compute_crystallinity_1d(
-                self._test_pattern, r_min_px, r_max_px,
+                self._work_pattern, r_min_px, r_max_px,
                 center=self._test_center, snip_window=snipw,
                 beam_px=self._beam_radius_px(),
                 baseline=self._baseline_method.get())
@@ -953,13 +985,17 @@ class CrystallinityPanel(ctk.CTkFrame):
         r = self._test_result
         cy, cx = self._test_center
         # ---- cart pattern + annulus (no 2D peak finding) ----
+        # Show the WORKING pattern (post-blur) so the view matches what's
+        # analysed.
+        wp = self._work_pattern if self._work_pattern is not None \
+            else self._test_pattern
         ax = self._ax_cart
         bpx = self._beam_radius_px()
-        H0, W0 = self._test_pattern.shape
+        H0, W0 = wp.shape
         yy0, xx0 = np.indices((H0, W0))
         beam_mask2d = (np.sqrt((yy0 - cy) ** 2 + (xx0 - cx) ** 2) < bpx) \
             if bpx > 0 else np.zeros((H0, W0), bool)
-        disp = self._test_pattern.copy()
+        disp = wp.copy()
         disp[beam_mask2d] = 0.0          # blank the beam so it can't
         img = np.log1p(np.clip(disp, 0, None))   # dominate the contrast
         # autoscale to the diffraction (exclude the masked beam region)
@@ -1109,11 +1145,15 @@ class CrystallinityPanel(ctk.CTkFrame):
             except Exception:
                 snipw = 14
             method = self._baseline_method.get()
+            bsig = self._blur_sigma_val()
             lo0 = max(0, int(round(r_min_px)))   # post-beam truncation
             beam = self._beam_radius_px()
             ratio_map = np.full((Ny, Nx), np.nan, dtype=np.float32)
             var_map = np.full((Ny, Nx), np.nan, dtype=np.float32)
             scatter_map = np.full((Ny, Nx), np.nan, dtype=np.float32)
+            _gf = None
+            if bsig > 0:
+                from scipy.ndimage import gaussian_filter as _gf
             t0 = time.time()
             total = (Ny // stride) * (Nx // stride)
             done = 0
@@ -1124,6 +1164,8 @@ class CrystallinityPanel(ctk.CTkFrame):
                                             dtype=np.float32)
                     except Exception:
                         continue
+                    if _gf is not None:
+                        pat = _gf(pat, sigma=bsig)
                     try:
                         m_all, v_all, cnt = _radial_mean_var(
                             pat, center, beam)
@@ -1385,6 +1427,10 @@ class CrystallinityPanel(ctk.CTkFrame):
             except Exception:
                 snipw = 14
             method = self._baseline_method.get()
+            bsig = self._blur_sigma_val()
+            _gf = None
+            if bsig > 0:
+                from scipy.ndimage import gaussian_filter as _gf
             # Windows in radial-bin px: start at r_min (center-beam
             # truncation), step by dr, non-overlapping, to detector edge.
             lo0 = int(round(float(self._r_min.get()) / max(inv_a, 1e-12)))
@@ -1418,6 +1464,8 @@ class CrystallinityPanel(ctk.CTkFrame):
                         pat = np.asarray(cube[rx, ry], dtype=np.float32)
                     except Exception:
                         continue
+                    if _gf is not None:
+                        pat = _gf(pat, sigma=bsig)
                     # ONE radial pass per pattern; evaluate every window.
                     m_all, v_all, cnt = _radial_mean_var(
                         pat, center, beam)
@@ -1485,7 +1533,7 @@ class CrystallinityPanel(ctk.CTkFrame):
             manifest = dict(sample=ph.sample, inv_ang_per_px=inv_a,
                              dr=dr, dr_bins=step, r_min=float(self._r_min.get()),
                              beam_mask_px=beam,
-                             baseline=method,
+                             baseline=method, blur_sigma=bsig,
                              stride=stride, snip_window=snipw,
                              vac_pctile=vac_pct_val,
                              vac_cutoff=(vac_cut if vac_cut is not None
