@@ -300,6 +300,10 @@ class CrystallinityPanel(ctk.CTkFrame):
                        fg_color=("#4D6FB0", "#3A5380"),
                        command=self._load_source
                        ).pack(anchor="w", padx=10, pady=2)
+        ctk.CTkButton(sidebar, text="Pick point from BF / HAADF…",
+                       width=240,
+                       command=self._open_point_picker
+                       ).pack(anchor="w", padx=10, pady=2)
 
         # 2. CALIBRATION
         _section_header(sidebar, "2.  Calibration")
@@ -526,6 +530,125 @@ class CrystallinityPanel(ctk.CTkFrame):
                 return
         except Exception as e:
             messagebox.showerror("Source", repr(e))
+
+    # ------------------------------------------------------------------
+    # Point picker — click a virtual BF / HAADF image to choose (y, x).
+    # ------------------------------------------------------------------
+    def _open_point_picker(self):
+        ph = self._posthoc()
+        if ph is None or ph.sample is None:
+            messagebox.showinfo("Pick point",
+                "Load a run / dataset in the Post-hoc tab first."); return
+        # Reuse cached virtual images if the sample hasn't changed.
+        if (getattr(self, "_vimg_sample", None) == ph.sample
+                and getattr(self, "_bf_img", None) is not None):
+            self._show_picker_window(ph)
+            return
+        if self._busy:
+            return
+        self._busy = True
+        self._test_status.configure(
+            text="computing virtual BF/HAADF for the picker …")
+        threading.Thread(target=self._compute_virtual_images,
+                          args=(ph,), daemon=True).start()
+
+    def _compute_virtual_images(self, ph):
+        try:
+            from gui_app.posthoc_panel import _open_lazy
+            cfg = SAMPLES[ph.sample]
+            cube = _open_lazy(cfg["path"], scan_shape=ph._scan_shape)
+            Ny, Nx, H, W = cube.shape
+            cy, cx = H / 2.0, W / 2.0
+            R = min(H, W) / 2.0
+            yy, xx = np.indices((H, W))
+            rr = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+            bf_mask = rr <= (0.12 * R)                 # central beam (BF)
+            ha_mask = (rr >= 0.40 * R) & (rr <= 0.98 * R)   # outer (HAADF)
+            bf = np.zeros((Ny, Nx), np.float32)
+            ha = np.zeros((Ny, Nx), np.float32)
+            t0 = time.time()
+            for rx in range(Ny):
+                for ry in range(Nx):
+                    try:
+                        pat = np.asarray(cube[rx, ry], dtype=np.float32)
+                    except Exception:
+                        continue
+                    bf[rx, ry] = float(pat[bf_mask].sum())
+                    ha[rx, ry] = float(pat[ha_mask].sum())
+                if (rx & 7) == 0:
+                    dt = time.time() - t0
+                    eta = (dt / max(rx + 1, 1)) * (Ny - rx - 1)
+                    self.after(0, lambda r=rx, dt=dt, eta=eta:
+                        self._test_status.configure(
+                            text=f"virtual BF/HAADF: row {r+1}/{Ny}  "
+                                  f"({dt:.0f}s, ETA {eta:.0f}s)"))
+            self._bf_img = bf
+            self._haadf_img = ha
+            self._vimg_sample = ph.sample
+            self.after(0, lambda: self._show_picker_window(ph))
+            self.after(0, lambda: self._test_status.configure(
+                text="picker ready — click a point."))
+        except Exception as e:
+            err = repr(e)
+            self.after(0, lambda: messagebox.showerror(
+                "Pick point", err))
+        finally:
+            self._busy = False
+
+    def _show_picker_window(self, ph):
+        win = tk.Toplevel(self)
+        win.title(f"point picker — {ph.sample}")
+        win.geometry("640x680")
+        bar = ctk.CTkFrame(win, fg_color="transparent")
+        bar.pack(side="top", fill="x", padx=6, pady=4)
+        mode = ctk.StringVar(value="HAADF")
+        ctk.CTkLabel(bar, text="image:").pack(side="left", padx=(4, 2))
+        ctk.CTkSegmentedButton(bar, values=["BF", "HAADF"],
+                                 variable=mode,
+                                 command=lambda _v: _draw()
+                                 ).pack(side="left", padx=2)
+        picked = ctk.CTkLabel(bar, text="click to pick (y, x)")
+        picked.pack(side="left", padx=12)
+        fig = Figure(figsize=(6.0, 6.0), dpi=110, facecolor="white")
+        ax = fig.add_subplot(111)
+        canvas = FigureCanvasTkAgg(fig, master=win)
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+
+        def _draw():
+            ax.clear()
+            img = (self._bf_img if mode.get() == "BF" else self._haadf_img)
+            finite = img[np.isfinite(img)]
+            vmin = float(np.percentile(finite, 2)) if finite.size else 0
+            vmax = float(np.percentile(finite, 98)) if finite.size else 1
+            ax.imshow(img, cmap="gray", vmin=vmin, vmax=vmax,
+                       interpolation="nearest", aspect="equal")
+            ax.set_title(f"virtual {mode.get()} — click a scan position",
+                          fontsize=10)
+            ax.set_xticks([]); ax.set_yticks([])
+            # marker for the current selection
+            try:
+                yy = int(self._src_y.get()); xx = int(self._src_x.get())
+                ax.scatter([xx], [yy], s=80, facecolors="none",
+                            edgecolors="#e0144c", linewidths=1.6)
+            except Exception:
+                pass
+            canvas.draw_idle()
+
+        def _on_click(event):
+            if event.inaxes is not ax or event.xdata is None:
+                return
+            Ny, Nx = self._bf_img.shape
+            x = int(max(0, min(Nx - 1, round(event.xdata))))
+            y = int(max(0, min(Ny - 1, round(event.ydata))))
+            self._src_y.set(str(y)); self._src_x.set(str(x))
+            self._source_var.set("scan_pos")
+            picked.configure(text=f"picked (y={y}, x={x})")
+            _draw()
+            # Load that frame as the test pattern + recompute.
+            self._load_source()
+
+        canvas.mpl_connect("button_press_event", _on_click)
+        _draw()
 
     def _load_dp_async(self, ph, cfg, src):
         try:
