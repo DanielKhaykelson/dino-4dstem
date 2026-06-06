@@ -13,8 +13,13 @@ a user-chosen radial window [r_min, r_max] (1/Å, truncated to start
     rings.  Catches single-grain/spotty signal the mean dilutes.
 
 Two complementary scalars per position -> two virtual maps (Ny × Nx).
-**Run on full dataset** computes both; the map panel toggles between
-them.  **Per-cluster** aggregates both per DINO class (median ± IQR).
+
+The panel is for TUNING: pick frames by clicking the virtual HAADF
+(bottom-right panel), inspect the 1D radial fit, set the background
+thresholds (peak/halo + variance, each Auto-Otsu or manual).  The ONLY
+run mode is **Report all**: it sweeps the window outward in steps of dr,
+writing per-dr maps (background masked to NaN/black), per-dr 1D fits,
+dr overlays, and quality scores to one folder.
 """
 from __future__ import annotations
 import os, sys, time, threading
@@ -375,9 +380,8 @@ class CrystallinityPanel(ctk.CTkFrame):
         self._test_center = None
         self._test_polar = None
         self._test_result = None
-        self._cryst_map = None
-        self._var_map = None
-        self._scatter_map = None
+        self._haadf_img = None           # virtual HAADF for the picker panel
+        self._haadf_click_cid = None
         self._busy = False
         self._build()
 
@@ -410,11 +414,33 @@ class CrystallinityPanel(ctk.CTkFrame):
         except Exception:
             return 0.0
 
-    def _peak_k_val(self) -> float:
-        try:
-            return max(float(self._peak_k.get()), 0.0)
-        except Exception:
-            return 0.0
+    @staticmethod
+    def _otsu(vals):
+        """Otsu threshold of a 1D set of values (separates background vs
+        sample).  Returns nan if too few finite values."""
+        v = np.asarray(vals, dtype=np.float64)
+        v = v[np.isfinite(v)]
+        if v.size < 8:
+            return float("nan")
+        lo, hi = float(v.min()), float(v.max())
+        if hi - lo < 1e-12:
+            return float("nan")
+        hist, edges = np.histogram(v, bins=128, range=(lo, hi))
+        hist = hist.astype(np.float64)
+        tot = hist.sum()
+        if tot <= 0:
+            return float("nan")
+        p = hist / tot
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        w0 = np.cumsum(p)
+        w1 = 1.0 - w0
+        mu = np.cumsum(p * centers)
+        mu_t = mu[-1]
+        denom = w0 * w1
+        denom[denom < 1e-12] = 1e-12
+        sigma_b = (mu_t * w0 - mu) ** 2 / denom
+        k = int(np.nanargmax(sigma_b))
+        return float(centers[k])
 
     def _blur_pat(self, pat):
         """Optional Gaussian denoise of a 2D pattern (σ in detector px)."""
@@ -521,7 +547,7 @@ class CrystallinityPanel(ctk.CTkFrame):
                        fg_color=("#4D6FB0", "#3A5380"),
                        command=self._load_source
                        ).pack(anchor="w", padx=10, pady=2)
-        ctk.CTkButton(sidebar, text="Pick point from BF / HAADF…",
+        ctk.CTkButton(sidebar, text="Show HAADF (click to pick frames) ▶",
                        width=240,
                        command=self._open_point_picker
                        ).pack(anchor="w", padx=10, pady=2)
@@ -619,27 +645,6 @@ class CrystallinityPanel(ctk.CTkFrame):
             variable=self._baseline_method,
             command=lambda _v: self._recompute_test()
             ).pack(side="left", padx=2)
-        # Significance threshold: keep only residual > k×noise so the
-        # baseline noise-floor doesn't read as crystallinity (amorphous
-        # → ~0).  0 = off.
-        pk_row = ctk.CTkFrame(sidebar, fg_color="transparent")
-        pk_row.pack(fill="x", padx=10, pady=2)
-        ctk.CTkLabel(pk_row, text="peak thresh (kσ):", width=120,
-                       anchor="w").pack(side="left")
-        self._peak_k = ctk.DoubleVar(value=0.0)
-        epk = ctk.CTkEntry(pk_row, textvariable=self._peak_k, width=56)
-        epk.pack(side="left", padx=2)
-        epk.bind("<Return>", lambda _e: self._recompute_test())
-        metric_row = ctk.CTkFrame(sidebar, fg_color="transparent")
-        metric_row.pack(fill="x", padx=10, pady=2)
-        ctk.CTkLabel(metric_row, text="map metric:", width=78,
-                       anchor="w").pack(side="left")
-        self._map_metric = ctk.StringVar(value="ratio")
-        ctk.CTkSegmentedButton(
-            metric_row, values=["ratio", "variance"],
-            variable=self._map_metric,
-            command=lambda _v: self._render_test_panels()
-            ).pack(side="left", padx=2)
         ctk.CTkButton(sidebar, text="Recompute ▶",
                        width=240,
                        command=self._recompute_test
@@ -651,8 +656,42 @@ class CrystallinityPanel(ctk.CTkFrame):
             wraplength=290, justify="left", anchor="w")
         self._test_status.pack(anchor="w", padx=10, pady=(2, 4))
 
-        # 5. RUN FULL
-        _section_header(sidebar, "5.  Run on full dataset")
+        # 5. BACKGROUND / VACUUM MASK — per-metric threshold; below → NaN.
+        _section_header(sidebar, "5.  Background mask (→ black)")
+        _hint(sidebar,
+              "Frames that are just vacuum/background are set to NaN "
+              "(black) in the maps.  Peak/halo and variance EACH get a "
+              "threshold: a pixel is masked in a map if its value is "
+              "below that map's threshold.  Leave 0 = Auto (Otsu split "
+              "of background vs sample).  Click 'Auto' to fill values, or "
+              "type your own after reading the 1D radial of a frame you "
+              "click in the HAADF panel.")
+        t1 = ctk.CTkFrame(sidebar, fg_color="transparent")
+        t1.pack(fill="x", padx=10, pady=1)
+        ctk.CTkLabel(t1, text="peak/halo thr:", width=110,
+                       anchor="w").pack(side="left")
+        self._thr_ph = ctk.DoubleVar(value=0.0)
+        ctk.CTkEntry(t1, textvariable=self._thr_ph, width=80).pack(
+            side="left", padx=2)
+        t2 = ctk.CTkFrame(sidebar, fg_color="transparent")
+        t2.pack(fill="x", padx=10, pady=1)
+        ctk.CTkLabel(t2, text="variance thr:", width=110,
+                       anchor="w").pack(side="left")
+        self._thr_var = ctk.DoubleVar(value=0.0)
+        ctk.CTkEntry(t2, textvariable=self._thr_var, width=80).pack(
+            side="left", padx=2)
+        ctk.CTkButton(sidebar, text="Auto thresholds (Otsu) ▶",
+                       width=240,
+                       command=self._auto_thresholds
+                       ).pack(anchor="w", padx=10, pady=(2, 2))
+
+        # 6. REPORT-ALL: the ONLY run mode — sweep dr from r_min to edge.
+        _section_header(sidebar, "6.  Report all  (r-sweep)")
+        _hint(sidebar,
+              "Sweeps dr (step 3) from r_min to the detector edge.  For "
+              "EACH window: peak/halo + variance maps (background masked "
+              "to black), per-dr 1D fits, dr overlays, and a quality "
+              "score — all saved to one folder.")
         full_row = ctk.CTkFrame(sidebar, fg_color="transparent")
         full_row.pack(fill="x", padx=10, pady=2)
         ctk.CTkLabel(full_row, text="stride:",
@@ -660,54 +699,13 @@ class CrystallinityPanel(ctk.CTkFrame):
         self._full_stride = ctk.IntVar(value=1)
         ctk.CTkEntry(full_row, textvariable=self._full_stride,
                        width=44).pack(side="left", padx=2)
-        # Vacuum/noise mask: positions whose post-beam scattered intensity
-        # falls in the bottom percentile are NaN'd out (no scattering =
-        # empty/vacuum, or pure noise).  0 = off.  Applied non-
-        # destructively so you can tune it without re-running.
-        vac_row = ctk.CTkFrame(sidebar, fg_color="transparent")
-        vac_row.pack(fill="x", padx=10, pady=2)
-        ctk.CTkLabel(vac_row, text="mask vacuum <pctile:", width=140,
-                       anchor="w").pack(side="left")
-        self._vac_pct = ctk.DoubleVar(value=0.0)
-        ev = ctk.CTkEntry(vac_row, textvariable=self._vac_pct, width=50)
-        ev.pack(side="left", padx=2)
-        ev.bind("<Return>", lambda _e: self._render_test_panels())
-        ctk.CTkButton(sidebar, text="Run on full dataset ▶",
-                       width=240,
-                       fg_color=("#2D7A2D", "#1F7A1F"),
-                       command=self._run_full_dataset
-                       ).pack(anchor="w", padx=10, pady=2)
-        ctk.CTkButton(sidebar, text="Per-cluster crystallinity  (bars)",
-                       width=240,
-                       command=self._render_per_cluster
-                       ).pack(anchor="w", padx=10, pady=2)
-        ctk.CTkButton(sidebar, text="Save map  (npy + png)",
-                       width=240,
-                       command=self._save_map
-                       ).pack(anchor="w", padx=10, pady=2)
-
-        # 6. REPORT-ALL: sweep sliding windows [r, r+dr] from the
-        # center-beam truncation outward; both maps for every window.
-        _section_header(sidebar, "6.  Report all  (r-sweep)")
-        _hint(sidebar,
-              "Sweeps non-overlapping windows of width dr (set in step 3) "
-              "from r_min to the detector edge.  For EACH window: both maps "
-              "(peak/halo + variance), per-dr 1D fits, dr overlays, and an "
-              "intrinsic quality score — all saved to one folder.")
-        of_row = ctk.CTkFrame(sidebar, fg_color="transparent")
-        of_row.pack(fill="x", padx=10, pady=2)
-        ctk.CTkLabel(of_row, text="overlay floor %:", width=120,
-                       anchor="w").pack(side="left")
-        self._overlay_floor = ctk.DoubleVar(value=0.0)
-        ctk.CTkEntry(of_row, textvariable=self._overlay_floor,
-                       width=56).pack(side="left", padx=2)
         ctk.CTkButton(sidebar, text="Report all ▶",
                        width=240,
                        fg_color=("#7A4DA0", "#5A3A80"),
                        command=self._report_all
                        ).pack(anchor="w", padx=10, pady=2)
         self._full_status = ctk.CTkLabel(sidebar,
-            text="(no full-dataset run yet)",
+            text="(no report yet)",
             font=("Consolas", 9),
             text_color=("#666", "#aaa"),
             wraplength=290, justify="left", anchor="w")
@@ -748,12 +746,16 @@ class CrystallinityPanel(ctk.CTkFrame):
         for ax, txt in ((self._ax_cart,  "(load source — step 1)"),
                           (self._ax_polar, "(polar view appears here)"),
                           (self._ax_1d,    "(1D radial appears here)"),
-                          (self._ax_map,   "(map appears after step 5)")):
+                          (self._ax_map,   "(HAADF — click 'Show HAADF')")):
             ax.text(0.5, 0.5, txt, ha="center", va="center",
                      fontsize=10, color="#888", transform=ax.transAxes)
             ax.set_xticks([]); ax.set_yticks([])
         self._fig.tight_layout()
         self._canvas.draw_idle()
+        # Bind click on the HAADF panel → pick a frame.
+        if getattr(self, "_haadf_click_cid", None) is None:
+            self._haadf_click_cid = self._canvas.mpl_connect(
+                "button_press_event", self._on_canvas_click)
 
     # ------------------------------------------------------------------
     def _refresh_from_posthoc(self):
@@ -817,24 +819,23 @@ class CrystallinityPanel(ctk.CTkFrame):
     # Point picker — click a virtual BF / HAADF image to choose (y, x).
     # ------------------------------------------------------------------
     def _open_point_picker(self):
+        """Compute a virtual HAADF and show it in the 4th panel (clickable
+        to pick frames).  Cached per sample."""
         ph = self._posthoc()
         if ph is None or ph.sample is None:
-            messagebox.showinfo("Pick point",
+            messagebox.showinfo("HAADF",
                 "Load a run / dataset in the Post-hoc tab first."); return
-        # Reuse cached virtual images if the sample hasn't changed.
         if (getattr(self, "_vimg_sample", None) == ph.sample
-                and getattr(self, "_bf_img", None) is not None):
-            self._show_picker_window(ph)
-            return
+                and self._haadf_img is not None):
+            self._draw_haadf_panel(); self._canvas.draw_idle(); return
         if self._busy:
             return
         self._busy = True
-        self._test_status.configure(
-            text="computing virtual BF/HAADF for the picker …")
-        threading.Thread(target=self._compute_virtual_images,
+        self._test_status.configure(text="computing virtual HAADF …")
+        threading.Thread(target=self._compute_haadf,
                           args=(ph,), daemon=True).start()
 
-    def _compute_virtual_images(self, ph):
+    def _compute_haadf(self, ph):
         try:
             from gui_app.posthoc_panel import _open_lazy
             cfg = SAMPLES[ph.sample]
@@ -844,9 +845,7 @@ class CrystallinityPanel(ctk.CTkFrame):
             R = min(H, W) / 2.0
             yy, xx = np.indices((H, W))
             rr = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
-            bf_mask = rr <= (0.12 * R)                 # central beam (BF)
             ha_mask = (rr >= 0.40 * R) & (rr <= 0.98 * R)   # outer (HAADF)
-            bf = np.zeros((Ny, Nx), np.float32)
             ha = np.zeros((Ny, Nx), np.float32)
             t0 = time.time()
             for rx in range(Ny):
@@ -855,82 +854,26 @@ class CrystallinityPanel(ctk.CTkFrame):
                         pat = np.asarray(cube[rx, ry], dtype=np.float32)
                     except Exception:
                         continue
-                    bf[rx, ry] = float(pat[bf_mask].sum())
                     ha[rx, ry] = float(pat[ha_mask].sum())
                 if (rx & 7) == 0:
                     dt = time.time() - t0
                     eta = (dt / max(rx + 1, 1)) * (Ny - rx - 1)
                     self.after(0, lambda r=rx, dt=dt, eta=eta:
                         self._test_status.configure(
-                            text=f"virtual BF/HAADF: row {r+1}/{Ny}  "
+                            text=f"virtual HAADF: row {r+1}/{Ny}  "
                                   f"({dt:.0f}s, ETA {eta:.0f}s)"))
-            self._bf_img = bf
             self._haadf_img = ha
             self._vimg_sample = ph.sample
-            self.after(0, lambda: self._show_picker_window(ph))
+            self.after(0, self._draw_haadf_panel)
+            self.after(0, self._canvas.draw_idle)
             self.after(0, lambda: self._test_status.configure(
-                text="picker ready — click a point."))
+                text="HAADF ready — click a frame in the bottom-right "
+                      "panel."))
         except Exception as e:
             err = repr(e)
-            self.after(0, lambda: messagebox.showerror(
-                "Pick point", err))
+            self.after(0, lambda: messagebox.showerror("HAADF", err))
         finally:
             self._busy = False
-
-    def _show_picker_window(self, ph):
-        win = tk.Toplevel(self)
-        win.title(f"point picker — {ph.sample}")
-        win.geometry("640x680")
-        bar = ctk.CTkFrame(win, fg_color="transparent")
-        bar.pack(side="top", fill="x", padx=6, pady=4)
-        mode = ctk.StringVar(value="HAADF")
-        ctk.CTkLabel(bar, text="image:").pack(side="left", padx=(4, 2))
-        ctk.CTkSegmentedButton(bar, values=["BF", "HAADF"],
-                                 variable=mode,
-                                 command=lambda _v: _draw()
-                                 ).pack(side="left", padx=2)
-        picked = ctk.CTkLabel(bar, text="click to pick (y, x)")
-        picked.pack(side="left", padx=12)
-        fig = Figure(figsize=(6.0, 6.0), dpi=110, facecolor="white")
-        ax = fig.add_subplot(111)
-        canvas = FigureCanvasTkAgg(fig, master=win)
-        canvas.get_tk_widget().pack(fill="both", expand=True)
-
-        def _draw():
-            ax.clear()
-            img = (self._bf_img if mode.get() == "BF" else self._haadf_img)
-            finite = img[np.isfinite(img)]
-            vmin = float(np.percentile(finite, 2)) if finite.size else 0
-            vmax = float(np.percentile(finite, 98)) if finite.size else 1
-            ax.imshow(img, cmap="gray", vmin=vmin, vmax=vmax,
-                       interpolation="nearest", aspect="equal")
-            ax.set_title(f"virtual {mode.get()} — click a scan position",
-                          fontsize=10)
-            ax.set_xticks([]); ax.set_yticks([])
-            # marker for the current selection
-            try:
-                yy = int(self._src_y.get()); xx = int(self._src_x.get())
-                ax.scatter([xx], [yy], s=80, facecolors="none",
-                            edgecolors="#e0144c", linewidths=1.6)
-            except Exception:
-                pass
-            canvas.draw_idle()
-
-        def _on_click(event):
-            if event.inaxes is not ax or event.xdata is None:
-                return
-            Ny, Nx = self._bf_img.shape
-            x = int(max(0, min(Nx - 1, round(event.xdata))))
-            y = int(max(0, min(Ny - 1, round(event.ydata))))
-            self._src_y.set(str(y)); self._src_x.set(str(x))
-            self._source_var.set("scan_pos")
-            picked.configure(text=f"picked (y={y}, x={x})")
-            _draw()
-            # Load that frame as the test pattern + recompute.
-            self._load_source()
-
-        canvas.mpl_connect("button_press_event", _on_click)
-        _draw()
 
     def _load_dp_async(self, ph, cfg, src):
         try:
@@ -1017,8 +960,7 @@ class CrystallinityPanel(ctk.CTkFrame):
                 self._work_pattern, r_min_px, r_max_px,
                 center=self._test_center, snip_window=snipw,
                 beam_px=self._beam_radius_px(),
-                baseline=self._baseline_method.get(),
-                peak_k=self._peak_k_val())
+                baseline=self._baseline_method.get())
         except Exception as e:
             self._test_status.configure(text=f"err: {e!r}"); return
         if res is None:
@@ -1139,307 +1081,130 @@ class CrystallinityPanel(ctk.CTkFrame):
         except Exception:
             pass
 
-        # ---- map (placeholder until Run) — honours the metric toggle
-        #      and the vacuum/noise mask ----
-        ax = self._ax_map; ax.clear()
-        metric = getattr(self, "_map_metric", None)
-        is_var = bool(metric is not None and metric.get() == "variance")
-        the_map = (getattr(self, "_var_map", None) if is_var
-                    else self._cryst_map)
-        the_map = self._apply_vac(the_map)
-        if the_map is not None:
-            cut = self._vac_cutoff()
-            im = ax.imshow(the_map, cmap="viridis",
-                              interpolation="nearest", aspect="equal")
-            tag = (f"  (vac<{self._vac_pct.get():g}pct masked)"
-                    if cut is not None else "")
-            ax.set_title(("azim-variance map" if is_var
-                          else "peak/halo map") + tag, fontsize=10)
-            ax.set_xticks([]); ax.set_yticks([])
-            try:
-                self._fig.colorbar(im, ax=ax, fraction=0.045,
-                                      pad=0.02)
-            except Exception:
-                pass
-        else:
-            ax.text(0.5, 0.5,
-                       "(click 'Run on full dataset' below)",
-                       ha="center", va="center", fontsize=10,
-                       color="#888", transform=ax.transAxes)
-            ax.set_xticks([]); ax.set_yticks([])
+        # ---- HAADF picker panel ----
+        self._draw_haadf_panel()
         self._fig.tight_layout()
         self._canvas.draw_idle()
 
+    def _draw_haadf_panel(self):
+        """Render the virtual HAADF (frame picker) into the 4th panel."""
+        ax = self._ax_map
+        try:
+            ax.clear()
+        except Exception:
+            return
+        if self._haadf_img is not None:
+            img = self._haadf_img
+            finite = img[np.isfinite(img)]
+            vmin = float(np.percentile(finite, 2)) if finite.size else 0.0
+            vmax = float(np.percentile(finite, 98)) if finite.size else 1.0
+            ax.imshow(img, cmap="gray", vmin=vmin, vmax=max(vmax, vmin + 1e-6),
+                       interpolation="nearest", aspect="equal")
+            # mark the currently-picked scan position
+            try:
+                yy = int(self._src_y.get()); xx = int(self._src_x.get())
+                ax.scatter([xx], [yy], s=70, facecolors="none",
+                            edgecolors="#33ddff", linewidths=1.6)
+            except Exception:
+                pass
+            ax.set_title("virtual HAADF — click to pick a frame",
+                          fontsize=10)
+        else:
+            ax.text(0.5, 0.5, "(click 'Show HAADF' to pick frames)",
+                     ha="center", va="center", fontsize=10, color="#888",
+                     transform=ax.transAxes)
+        ax.set_xticks([]); ax.set_yticks([])
+
+    def _on_canvas_click(self, event):
+        """Click in the HAADF panel → load that scan frame as the test
+        pattern."""
+        if (self._haadf_img is None or event.inaxes is not self._ax_map
+                or event.xdata is None):
+            return
+        Ny, Nx = self._haadf_img.shape
+        x = int(max(0, min(Nx - 1, round(event.xdata))))
+        y = int(max(0, min(Ny - 1, round(event.ydata))))
+        try:
+            self._src_y.set(str(y)); self._src_x.set(str(x))
+            self._source_var.set("scan_pos")
+        except Exception:
+            pass
+        self._load_source()
+
     # ------------------------------------------------------------------
-    def _run_full_dataset(self):
+    def _auto_thresholds(self):
+        """Coarse-scan the dataset and Otsu-split background vs sample for
+        each metric, filling the two threshold fields (editable after)."""
         ph = self._posthoc()
         if ph is None or ph.sample is None:
-            messagebox.showinfo("Run",
-                "Load a run in the Post-hoc tab first."); return
-        if self._test_result is None:
-            messagebox.showinfo("Run",
-                "Tune the test pattern first (steps 1–4)."); return
+            messagebox.showinfo("Auto thresholds",
+                "Load a dataset in the Post-hoc tab first."); return
         if self._busy:
             return
-        self._busy = True
-        threading.Thread(target=self._run_full_worker,
-                          daemon=True).start()
-
-    def _run_full_worker(self):
         try:
-            ph = self._posthoc()
+            from gui_app.posthoc_panel import _open_lazy
+            shp = _open_lazy(SAMPLES[ph.sample]["path"],
+                              scan_shape=ph._scan_shape).shape
+            self._ensure_beam_mask(ph.sample, int(shp[2]))
+        except Exception:
+            pass
+        self._busy = True
+        self._full_status.configure(text="auto thresholds: scanning …")
+        threading.Thread(target=self._auto_thresholds_worker,
+                          args=(ph,), daemon=True).start()
+
+    def _auto_thresholds_worker(self, ph):
+        try:
             from gui_app.posthoc_panel import _open_lazy
             cfg = SAMPLES[ph.sample]
             cube = _open_lazy(cfg["path"], scan_shape=ph._scan_shape)
             Ny, Nx, H, W = cube.shape
             center = (H / 2.0, W / 2.0)
             inv_a = float(self._inv_ang.get())
-            r_min_px = float(self._r_min.get()) / max(inv_a, 1e-12)
-            r_max_px = float(self._r_max_q()) / max(inv_a, 1e-12)
-            stride = max(int(self._full_stride.get()), 1)
-            try:
-                snipw = int(float(self._snip_win.get()))
-            except Exception:
-                snipw = 14
+            r_min_px = int(round(float(self._r_min.get()) / max(inv_a, 1e-12)))
+            r_max_px = int(round(self._r_max_q() / max(inv_a, 1e-12)))
+            snipw = int(float(self._snip_win.get()))
             method = self._baseline_method.get()
-            bsig = self._blur_sigma_val()
-            pk = self._peak_k_val()
-            lo0 = max(0, int(round(r_min_px)))   # post-beam truncation
             beam = self._beam_radius_px()
-            ratio_map = np.full((Ny, Nx), np.nan, dtype=np.float32)
-            var_map = np.full((Ny, Nx), np.nan, dtype=np.float32)
-            scatter_map = np.full((Ny, Nx), np.nan, dtype=np.float32)
+            bsig = self._blur_sigma_val()
             _gf = None
             if bsig > 0:
                 from scipy.ndimage import gaussian_filter as _gf
-            t0 = time.time()
-            total = (Ny // stride) * (Nx // stride)
-            done = 0
+            stride = max(1, int(round(max(Ny, Nx) / 64)))   # coarse, fast
+            phs, vrs = [], []
             for rx in range(0, Ny, stride):
                 for ry in range(0, Nx, stride):
                     try:
-                        pat = np.asarray(cube[rx, ry],
-                                            dtype=np.float32)
+                        pat = np.asarray(cube[rx, ry], dtype=np.float32)
                     except Exception:
                         continue
                     if _gf is not None:
                         pat = _gf(pat, sigma=bsig)
-                    try:
-                        m_all, v_all, cnt = _radial_mean_var(
-                            pat, center, beam)
-                        # post-beam scattered intensity (vacuum/noise test)
-                        scatter_map[rx, ry] = float(
-                            (m_all[lo0:] * cnt[lo0:]).sum())
-                        res = _crystallinity_window(
-                            m_all, v_all, int(round(r_min_px)),
-                            int(round(r_max_px)), snipw, baseline=method,
-                            peak_k=pk)
-                        if res is not None:
-                            ratio_map[rx, ry] = res["ratio"]
-                            var_map[rx, ry] = res["var_index"]
-                    except Exception:
-                        pass
-                    done += 1
-                if (rx & 7) == 0:
-                    dt = time.time() - t0
-                    eta = (dt / max(done, 1)) * (total - done)
-                    self.after(0, lambda d=done, t=total, dt=dt,
-                                  eta=eta: self._full_status.configure(
-                        text=f"{d}/{t}  ({dt:.0f}s elapsed, "
-                              f"ETA {eta:.0f}s)"))
+                    m_all, v_all, _c = _radial_mean_var(pat, center, beam)
+                    res = _crystallinity_window(m_all, v_all, r_min_px,
+                                                 r_max_px, snipw,
+                                                 baseline=method)
+                    if res is not None:
+                        phs.append(res["ratio"]); vrs.append(res["var_index"])
+            thr_ph = self._otsu(np.asarray(phs))
+            thr_var = self._otsu(np.asarray(vrs))
 
-            def _fill_stride(arr):
-                # Stride > 1: nearest-neighbour fill of skipped positions.
-                cur = arr.copy()
-                mask = ~np.isnan(cur)
-                for _ in range(stride):
-                    next_ = cur.copy()
-                    for shift in (1, -1):
-                        for axis in (0, 1):
-                            rolled = np.roll(cur, shift, axis=axis)
-                            new = ~mask & ~np.isnan(rolled)
-                            next_[new] = rolled[new]
-                            mask = mask | new
-                    cur = next_
-                return cur
-            if stride > 1:
-                ratio_map = _fill_stride(ratio_map)
-                var_map = _fill_stride(var_map)
-                scatter_map = _fill_stride(scatter_map)
-            self._cryst_map = ratio_map
-            self._var_map = var_map
-            self._scatter_map = scatter_map
-            dt = time.time() - t0
-            self.after(0, lambda: self._full_status.configure(
-                text=f"done ({dt:.0f}s)  stride={stride}  "
-                      f"peak/halo med={np.nanmedian(ratio_map):.3f}  "
-                      f"azim-var med={np.nanmedian(var_map):.4f}"))
-            self.after(0, self._render_test_panels)
-            # If a trained run is linked, also aggregate per DINO cluster.
-            self.after(0, self._render_per_cluster)
+            def _done():
+                if np.isfinite(thr_ph):
+                    self._thr_ph.set(round(float(thr_ph), 5))
+                if np.isfinite(thr_var):
+                    self._thr_var.set(round(float(thr_var), 6))
+                self._full_status.configure(
+                    text=f"auto thresholds (Otsu, coarse): "
+                          f"peak/halo={thr_ph:.4g}, var={thr_var:.4g}.  "
+                          f"Edit if needed, then Report all.")
+            self.after(0, _done)
         except Exception as e:
             err = repr(e)
             self.after(0, lambda: messagebox.showerror(
-                "Run on full dataset", err))
+                "Auto thresholds", err))
         finally:
             self._busy = False
-
-    # ------------------------------------------------------------------
-    # ------------------------------------------------------------------
-    # Vacuum / noise mask (scattered-intensity percentile cutoff).
-    # ------------------------------------------------------------------
-    def _vac_cutoff(self, scatter_map=None):
-        """Absolute scattered-intensity cutoff for the current percentile,
-        or None if masking is off / unavailable."""
-        sm = (scatter_map if scatter_map is not None
-              else getattr(self, "_scatter_map", None))
-        try:
-            pct = float(self._vac_pct.get())
-        except Exception:
-            pct = 0.0
-        if sm is None or pct <= 0:
-            return None
-        finite = sm[np.isfinite(sm)]
-        if finite.size == 0:
-            return None
-        return float(np.percentile(finite, pct))
-
-    def _apply_vac(self, arr, scatter_map=None):
-        """Return a copy of `arr` with vacuum/noise positions (scattered
-        intensity below the percentile cutoff) set to NaN."""
-        sm = (scatter_map if scatter_map is not None
-              else getattr(self, "_scatter_map", None))
-        cut = self._vac_cutoff(sm)
-        if arr is None or sm is None or cut is None:
-            return arr
-        out = np.array(arr, dtype=np.float32, copy=True)
-        out[~(sm >= cut)] = np.nan
-        return out
-
-    def _render_per_cluster(self):
-        """Aggregate the crystallinity ratio per DINO cluster and show
-        a bar chart (mean ± IQR) + a table.  Needs the ratio map + the
-        posthoc inference (class assignments)."""
-        if self._cryst_map is None:
-            messagebox.showinfo("Per-cluster",
-                "Run the full dataset first."); return
-        ph = self._posthoc()
-        if ph is None or getattr(ph, "_inf", None) is None:
-            messagebox.showinfo("Per-cluster",
-                "Per-cluster needs a trained run (DINO class map). "
-                "Load one via the topbar 'run' badge."); return
-        Ny, Nx = ph._scan_shape
-        assigns = np.asarray(ph._inf["assigns"]).reshape(Ny, Nx)
-        K = int(ph._inf["soft_probs"].shape[1])
-        import matplotlib.pyplot as plt
-        from matplotlib.backends.backend_tkagg import (
-            FigureCanvasTkAgg, NavigationToolbar2Tk)
-        cmap = plt.get_cmap("tab10" if K <= 10 else "tab20")
-        modN = 10 if K <= 10 else 20
-
-        def _per_class(metric_map):
-            ks, meds, q1s, q3s, ns = [], [], [], [], []
-            if metric_map is None:
-                return ks, meds, q1s, q3s, ns
-            for c in range(K):
-                vals = metric_map[(assigns == c) & np.isfinite(metric_map)]
-                if vals.size == 0:
-                    continue
-                ks.append(c); ns.append(int(vals.size))
-                meds.append(float(np.median(vals)))
-                q1s.append(float(np.percentile(vals, 25)))
-                q3s.append(float(np.percentile(vals, 75)))
-            return ks, meds, q1s, q3s, ns
-
-        win = tk.Toplevel(self)
-        win.title("crystallinity per DINO cluster")
-        win.geometry("900x640")
-        fig = Figure(figsize=(8.8, 6.2), dpi=110, facecolor="white")
-        # Vacuum/noise positions are NaN'd out so they don't bias the
-        # per-class medians.
-        panels = [("peak/halo ratio", self._apply_vac(self._cryst_map)),
-                   ("azimuthal variance (spottiness)",
-                    self._apply_vac(getattr(self, "_var_map", None)))]
-        any_ok = False
-        for pi, (name, mp) in enumerate(panels):
-            ax = fig.add_subplot(2, 1, pi + 1)
-            ks, meds, q1s, q3s, ns = _per_class(mp)
-            if not ks:
-                ax.text(0.5, 0.5, f"({name}: no data)", ha="center",
-                         va="center", transform=ax.transAxes,
-                         color="#888")
-                ax.set_xticks([]); ax.set_yticks([])
-                continue
-            any_ok = True
-            order = np.argsort(-np.asarray(meds))   # most crystalline first
-            ks = [ks[i] for i in order]; meds = [meds[i] for i in order]
-            ns = [ns[i] for i in order]
-            q1s = [q1s[i] for i in order]; q3s = [q3s[i] for i in order]
-            x = np.arange(len(ks))
-            yerr = [np.array(meds) - np.array(q1s),
-                    np.array(q3s) - np.array(meds)]
-            cols = [cmap(c % modN) for c in ks]
-            ax.bar(x, meds, yerr=yerr, capsize=3, color=cols,
-                      edgecolor="#333", linewidth=0.6)
-            ax.set_xticks(x)
-            ax.set_xticklabels([f"p{c}\n{n}px" for c, n in zip(ks, ns)],
-                                  fontsize=8)
-            ax.set_ylabel(f"{name}\n(median ± IQR)", fontsize=9)
-            ax.grid(axis="y", alpha=0.3)
-            if pi == 0:
-                ax.set_title(
-                    f"per-cluster crystallinity  "
-                    f"(q = {self._r_min.get():.3g}–"
-                    f"{self._r_max_q():.3g} 1/Å)  ·  higher = more "
-                    f"crystalline / spotty", fontsize=10)
-        fig.tight_layout()
-        c = FigureCanvasTkAgg(fig, master=win)
-        c.get_tk_widget().pack(fill="both", expand=True)
-        tb = NavigationToolbar2Tk(c, win, pack_toolbar=False)
-        tb.update(); tb.pack(side="bottom", fill="x")
-        if not any_ok:
-            self._full_status.configure(
-                text="per-cluster: no overlap between maps and class map")
-        else:
-            self._full_status.configure(
-                text="per-cluster crystallinity (peak/halo + variance) "
-                      "computed")
-
-    def _save_map(self):
-        if self._cryst_map is None:
-            messagebox.showinfo("Save",
-                "No map yet — run the full dataset first."); return
-        ph = self._posthoc()
-        outdir = (ph.outdir if ph and ph.outdir
-                   else os.path.join("runs", "_crystallinity"))
-        out = os.path.join(outdir, "crystallinity")
-        os.makedirs(out, exist_ok=True)
-        from datetime import datetime
-        stamp = datetime.now().strftime("%H%M%S")
-        qtag = (f"q = {self._r_min.get():.3g}–"
-                 f"{self._r_max_q():.3g} 1/Å")
-        saved = []
-        for name, mp in (("peakhalo", self._apply_vac(self._cryst_map)),
-                          ("azimvar",
-                           self._apply_vac(getattr(self, "_var_map", None)))):
-            if mp is None:
-                continue
-            np.save(os.path.join(out, f"{name}_{stamp}.npy"), mp)
-            fig, ax = matplotlib.pyplot.subplots(figsize=(7, 6))
-            im = ax.imshow(mp, cmap="viridis",
-                              interpolation="nearest", aspect="equal")
-            title = ("peak/halo crystallinity map" if name == "peakhalo"
-                      else "azimuthal-variance (spottiness) map")
-            ax.set_title(f"{title}  ({qtag})", fontsize=11)
-            ax.set_xticks([]); ax.set_yticks([])
-            fig.colorbar(im, ax=ax, fraction=0.045, pad=0.02)
-            fig.savefig(os.path.join(out, f"{name}_{stamp}.png"),
-                          dpi=180, bbox_inches="tight", facecolor="white")
-            matplotlib.pyplot.close(fig)
-            saved.append(name)
-        self._full_status.configure(
-            text=f"saved {', '.join(saved)} (.npy + .png) → "
-                  f"{os.path.basename(out)}/")
 
     # ------------------------------------------------------------------
     def _report_all(self):
@@ -1487,11 +1252,14 @@ class CrystallinityPanel(ctk.CTkFrame):
                 snipw = 14
             method = self._baseline_method.get()
             bsig = self._blur_sigma_val()
-            pk = self._peak_k_val()
             try:
-                floor_pct = max(float(self._overlay_floor.get()), 0.0)
+                man_thr_ph = float(self._thr_ph.get())
             except Exception:
-                floor_pct = 0.0
+                man_thr_ph = 0.0
+            try:
+                man_thr_var = float(self._thr_var.get())
+            except Exception:
+                man_thr_var = 0.0
             _gf = None
             if bsig > 0:
                 from scipy.ndimage import gaussian_filter as _gf
@@ -1540,8 +1308,7 @@ class CrystallinityPanel(ctk.CTkFrame):
                         (m_all[lo0:] * cnt[lo0:]).sum())
                     for w, (a, b) in enumerate(windows):
                         res = _crystallinity_window(m_all, v_all, a, b,
-                                                     snipw, baseline=method,
-                                                     peak_k=pk)
+                                                     snipw, baseline=method)
                         if res is not None:
                             ratio_maps[w][rx, ry] = res["ratio"]
                             var_maps[w][rx, ry] = res["var_index"]
@@ -1570,17 +1337,27 @@ class CrystallinityPanel(ctk.CTkFrame):
                 var_maps = [_fill(a) for a in var_maps]
                 scatter_map = _fill(scatter_map)
 
-            # Vacuum/noise mask: NaN out low-scattered-intensity positions.
-            vac_cut = self._vac_cutoff(scatter_map)
-            if vac_cut is not None:
-                bad = ~(scatter_map >= vac_cut)
+            # Background/vacuum mask — PER METRIC.  A pixel's "strength" =
+            # its best value across all windows.  Pixels below the metric's
+            # threshold (manual, or Otsu auto) are background → NaN/black.
+            strength_ph = np.nanmax(np.stack(ratio_maps, 0), axis=0)
+            strength_var = np.nanmax(np.stack(var_maps, 0), axis=0)
+            thr_ph = (man_thr_ph if man_thr_ph > 0
+                       else self._otsu(strength_ph))
+            thr_var = (man_thr_var if man_thr_var > 0
+                        else self._otsu(strength_var))
+            if np.isfinite(thr_ph):
+                bad_ph = ~(strength_ph >= thr_ph)
                 for w in range(nW):
-                    ratio_maps[w][bad] = np.nan
-                    var_maps[w][bad] = np.nan
-            n_masked = int(np.isfinite(scatter_map).sum()
-                            - (np.isfinite(scatter_map)
-                               & (scatter_map >= vac_cut)).sum()) \
-                if vac_cut is not None else 0
+                    ratio_maps[w][bad_ph] = np.nan
+            if np.isfinite(thr_var):
+                bad_var = ~(strength_var >= thr_var)
+                for w in range(nW):
+                    var_maps[w][bad_var] = np.nan
+            n_bg_ph = (int(np.nansum(strength_ph < thr_ph))
+                        if np.isfinite(thr_ph) else 0)
+            n_bg_var = (int(np.nansum(strength_var < thr_var))
+                         if np.isfinite(thr_var) else 0)
 
             # ---- save everything to one folder ----
             outdir = (ph.outdir if ph and ph.outdir
@@ -1591,20 +1368,18 @@ class CrystallinityPanel(ctk.CTkFrame):
             os.makedirs(folder, exist_ok=True)
             np.save(os.path.join(folder, "_scattered_intensity.npy"),
                       scatter_map)
-            try:
-                vac_pct_val = float(self._vac_pct.get())
-            except Exception:
-                vac_pct_val = 0.0
             manifest = dict(sample=ph.sample, inv_ang_per_px=inv_a,
                              dr=dr, dr_bins=step, r_min=float(self._r_min.get()),
                              beam_mask_px=beam,
                              baseline=method, blur_sigma=bsig,
-                             peak_k=pk, overlay_floor_pct=floor_pct,
                              stride=stride, snip_window=snipw,
-                             vac_pctile=vac_pct_val,
-                             vac_cutoff=(vac_cut if vac_cut is not None
-                                          else None),
-                             n_masked=n_masked,
+                             thr_peakhalo=(float(thr_ph)
+                                            if np.isfinite(thr_ph) else None),
+                             thr_var=(float(thr_var)
+                                       if np.isfinite(thr_var) else None),
+                             thr_peakhalo_auto=(man_thr_ph <= 0),
+                             thr_var_auto=(man_thr_var <= 0),
+                             n_bg_peakhalo=n_bg_ph, n_bg_var=n_bg_var,
                              n_bins=n_bins, n_windows=nW, windows=[])
             for w, (a, b) in enumerate(windows):
                 qa, qb = a * inv_a, b * inv_a
@@ -1668,8 +1443,7 @@ class CrystallinityPanel(ctk.CTkFrame):
                 for w in range(nW)]
             for name, maps in (("peakhalo", ratio_maps),
                                 ("azimvar", var_maps)):
-                rgb, idx, valid = _overlay_argmax_rgb(maps, colors,
-                                                       floor_pct=floor_pct)
+                rgb, idx, valid = _overlay_argmax_rgb(maps, colors)
                 np.save(os.path.join(folder,
                           f"overlay_{name}_dominant_idx.npy"), idx)
                 for style, rgbimg in (("dominant", rgb),
@@ -1724,11 +1498,8 @@ class CrystallinityPanel(ctk.CTkFrame):
                               lw=1.3, label="dataset-mean I(q)")
                 ax.semilogy(qq, np.clip(halo, 1e-6, None), color="#888",
                               lw=1.2, ls="--", label=f"halo ({method})")
-                where = (mw > halo)
-                if pk and pk > 0:    # only count residual above k×noise
-                    where = where & ((mw - halo) > pk * noise)
                 ax.fill_between(qq, np.clip(halo, 1e-6, None),
-                                  np.clip(mw, 1e-6, None), where=where,
+                                  np.clip(mw, 1e-6, None), where=(mw > halo),
                                   color="#e0144c", alpha=0.25, label="peak")
                 ax.set_xlabel("q (1/Å)"); ax.set_ylabel("I(q) (log)")
                 ax.set_title(f"dr w{w}  q={qa:.3f}–{qb:.3f}   "
