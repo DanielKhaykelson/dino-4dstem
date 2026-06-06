@@ -139,7 +139,7 @@ def _radial_mean_var(pat: np.ndarray, center: tuple):
     cntc = np.maximum(cnt, 1.0)
     m = s1 / cntc
     v = np.maximum(s2 / cntc - m * m, 0.0)
-    return m, v
+    return m, v, cnt
 
 
 def _snip_baseline(y: np.ndarray, n_iter: int = 14) -> np.ndarray:
@@ -174,7 +174,7 @@ def compute_crystallinity_1d(pat: np.ndarray, r_lo_px: float, r_hi_px: float,
     """
     H, W = pat.shape
     cy, cx = center if center is not None else (H / 2.0, W / 2.0)
-    m_all, v_all = _radial_mean_var(pat, (cy, cx))
+    m_all, v_all, _cnt = _radial_mean_var(pat, (cy, cx))
     return _crystallinity_window(m_all, v_all, round(r_lo_px),
                                   round(r_hi_px), snip_window)
 
@@ -221,6 +221,7 @@ class CrystallinityPanel(ctk.CTkFrame):
         self._test_result = None
         self._cryst_map = None
         self._var_map = None
+        self._scatter_map = None
         self._busy = False
         self._build()
 
@@ -397,6 +398,18 @@ class CrystallinityPanel(ctk.CTkFrame):
         self._full_stride = ctk.IntVar(value=1)
         ctk.CTkEntry(full_row, textvariable=self._full_stride,
                        width=44).pack(side="left", padx=2)
+        # Vacuum/noise mask: positions whose post-beam scattered intensity
+        # falls in the bottom percentile are NaN'd out (no scattering =
+        # empty/vacuum, or pure noise).  0 = off.  Applied non-
+        # destructively so you can tune it without re-running.
+        vac_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        vac_row.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(vac_row, text="mask vacuum <pctile:", width=140,
+                       anchor="w").pack(side="left")
+        self._vac_pct = ctk.DoubleVar(value=0.0)
+        ev = ctk.CTkEntry(vac_row, textvariable=self._vac_pct, width=50)
+        ev.pack(side="left", padx=2)
+        ev.bind("<Return>", lambda _e: self._render_test_panels())
         ctk.CTkButton(sidebar, text="Run on full dataset ▶",
                        width=240,
                        fg_color=("#2D7A2D", "#1F7A1F"),
@@ -825,17 +838,22 @@ class CrystallinityPanel(ctk.CTkFrame):
         except Exception:
             pass
 
-        # ---- map (placeholder until Run) — honours the metric toggle ----
+        # ---- map (placeholder until Run) — honours the metric toggle
+        #      and the vacuum/noise mask ----
         ax = self._ax_map; ax.clear()
         metric = getattr(self, "_map_metric", None)
         is_var = bool(metric is not None and metric.get() == "variance")
         the_map = (getattr(self, "_var_map", None) if is_var
                     else self._cryst_map)
+        the_map = self._apply_vac(the_map)
         if the_map is not None:
+            cut = self._vac_cutoff()
             im = ax.imshow(the_map, cmap="viridis",
                               interpolation="nearest", aspect="equal")
-            ax.set_title("azim-variance map" if is_var
-                          else "peak/halo map", fontsize=10)
+            tag = (f"  (vac<{self._vac_pct.get():g}pct masked)"
+                    if cut is not None else "")
+            ax.set_title(("azim-variance map" if is_var
+                          else "peak/halo map") + tag, fontsize=10)
             ax.set_xticks([]); ax.set_yticks([])
             try:
                 self._fig.colorbar(im, ax=ax, fraction=0.045,
@@ -882,8 +900,10 @@ class CrystallinityPanel(ctk.CTkFrame):
                 snipw = int(float(self._snip_win.get()))
             except Exception:
                 snipw = 14
+            lo0 = max(0, int(round(r_min_px)))   # post-beam truncation
             ratio_map = np.full((Ny, Nx), np.nan, dtype=np.float32)
             var_map = np.full((Ny, Nx), np.nan, dtype=np.float32)
+            scatter_map = np.full((Ny, Nx), np.nan, dtype=np.float32)
             t0 = time.time()
             total = (Ny // stride) * (Nx // stride)
             done = 0
@@ -895,9 +915,13 @@ class CrystallinityPanel(ctk.CTkFrame):
                     except Exception:
                         continue
                     try:
-                        res = compute_crystallinity_1d(
-                            pat, r_min_px, r_max_px,
-                            center=center, snip_window=snipw)
+                        m_all, v_all, cnt = _radial_mean_var(pat, center)
+                        # post-beam scattered intensity (vacuum/noise test)
+                        scatter_map[rx, ry] = float(
+                            (m_all[lo0:] * cnt[lo0:]).sum())
+                        res = _crystallinity_window(
+                            m_all, v_all, int(round(r_min_px)),
+                            int(round(r_max_px)), snipw)
                         if res is not None:
                             ratio_map[rx, ry] = res["ratio"]
                             var_map[rx, ry] = res["var_index"]
@@ -929,8 +953,10 @@ class CrystallinityPanel(ctk.CTkFrame):
             if stride > 1:
                 ratio_map = _fill_stride(ratio_map)
                 var_map = _fill_stride(var_map)
+                scatter_map = _fill_stride(scatter_map)
             self._cryst_map = ratio_map
             self._var_map = var_map
+            self._scatter_map = scatter_map
             dt = time.time() - t0
             self.after(0, lambda: self._full_status.configure(
                 text=f"done ({dt:.0f}s)  stride={stride}  "
@@ -947,6 +973,37 @@ class CrystallinityPanel(ctk.CTkFrame):
             self._busy = False
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Vacuum / noise mask (scattered-intensity percentile cutoff).
+    # ------------------------------------------------------------------
+    def _vac_cutoff(self, scatter_map=None):
+        """Absolute scattered-intensity cutoff for the current percentile,
+        or None if masking is off / unavailable."""
+        sm = (scatter_map if scatter_map is not None
+              else getattr(self, "_scatter_map", None))
+        try:
+            pct = float(self._vac_pct.get())
+        except Exception:
+            pct = 0.0
+        if sm is None or pct <= 0:
+            return None
+        finite = sm[np.isfinite(sm)]
+        if finite.size == 0:
+            return None
+        return float(np.percentile(finite, pct))
+
+    def _apply_vac(self, arr, scatter_map=None):
+        """Return a copy of `arr` with vacuum/noise positions (scattered
+        intensity below the percentile cutoff) set to NaN."""
+        sm = (scatter_map if scatter_map is not None
+              else getattr(self, "_scatter_map", None))
+        cut = self._vac_cutoff(sm)
+        if arr is None or sm is None or cut is None:
+            return arr
+        out = np.array(arr, dtype=np.float32, copy=True)
+        out[~(sm >= cut)] = np.nan
+        return out
+
     def _render_per_cluster(self):
         """Aggregate the crystallinity ratio per DINO cluster and show
         a bar chart (mean ± IQR) + a table.  Needs the ratio map + the
@@ -986,9 +1043,11 @@ class CrystallinityPanel(ctk.CTkFrame):
         win.title("crystallinity per DINO cluster")
         win.geometry("900x640")
         fig = Figure(figsize=(8.8, 6.2), dpi=110, facecolor="white")
-        panels = [("peak/halo ratio", self._cryst_map),
+        # Vacuum/noise positions are NaN'd out so they don't bias the
+        # per-class medians.
+        panels = [("peak/halo ratio", self._apply_vac(self._cryst_map)),
                    ("azimuthal variance (spottiness)",
-                    getattr(self, "_var_map", None))]
+                    self._apply_vac(getattr(self, "_var_map", None)))]
         any_ok = False
         for pi, (name, mp) in enumerate(panels):
             ax = fig.add_subplot(2, 1, pi + 1)
@@ -1048,8 +1107,9 @@ class CrystallinityPanel(ctk.CTkFrame):
         qtag = (f"q = {self._r_min.get():.3g}–"
                  f"{self._r_max.get():.3g} 1/Å")
         saved = []
-        for name, mp in (("peakhalo", self._cryst_map),
-                          ("azimvar", getattr(self, "_var_map", None))):
+        for name, mp in (("peakhalo", self._apply_vac(self._cryst_map)),
+                          ("azimvar",
+                           self._apply_vac(getattr(self, "_var_map", None)))):
             if mp is None:
                 continue
             np.save(os.path.join(out, f"{name}_{stamp}.npy"), mp)
@@ -1125,6 +1185,7 @@ class CrystallinityPanel(ctk.CTkFrame):
                            for _ in range(nW)]
             var_maps = [np.full((Ny, Nx), np.nan, np.float32)
                          for _ in range(nW)]
+            scatter_map = np.full((Ny, Nx), np.nan, np.float32)
             t0 = time.time()
             total = (Ny // stride) * (Nx // stride)
             done = 0
@@ -1135,7 +1196,10 @@ class CrystallinityPanel(ctk.CTkFrame):
                     except Exception:
                         continue
                     # ONE radial pass per pattern; evaluate every window.
-                    m_all, v_all = _radial_mean_var(pat, center)
+                    m_all, v_all, cnt = _radial_mean_var(pat, center)
+                    # post-beam scattered intensity (window-independent)
+                    scatter_map[rx, ry] = float(
+                        (m_all[lo0:] * cnt[lo0:]).sum())
                     for w, (a, b) in enumerate(windows):
                         res = _crystallinity_window(m_all, v_all, a, b, snipw)
                         if res is not None:
@@ -1164,6 +1228,19 @@ class CrystallinityPanel(ctk.CTkFrame):
             if stride > 1:
                 ratio_maps = [_fill(a) for a in ratio_maps]
                 var_maps = [_fill(a) for a in var_maps]
+                scatter_map = _fill(scatter_map)
+
+            # Vacuum/noise mask: NaN out low-scattered-intensity positions.
+            vac_cut = self._vac_cutoff(scatter_map)
+            if vac_cut is not None:
+                bad = ~(scatter_map >= vac_cut)
+                for w in range(nW):
+                    ratio_maps[w][bad] = np.nan
+                    var_maps[w][bad] = np.nan
+            n_masked = int(np.isfinite(scatter_map).sum()
+                            - (np.isfinite(scatter_map)
+                               & (scatter_map >= vac_cut)).sum()) \
+                if vac_cut is not None else 0
 
             # ---- save everything to one folder ----
             outdir = (ph.outdir if ph and ph.outdir
@@ -1172,9 +1249,19 @@ class CrystallinityPanel(ctk.CTkFrame):
             folder = os.path.join(outdir, "crystallinity",
                                    f"report_all_{stamp}")
             os.makedirs(folder, exist_ok=True)
+            np.save(os.path.join(folder, "_scattered_intensity.npy"),
+                      scatter_map)
+            try:
+                vac_pct_val = float(self._vac_pct.get())
+            except Exception:
+                vac_pct_val = 0.0
             manifest = dict(sample=ph.sample, inv_ang_per_px=inv_a,
                              dr=dr, dr_bins=step, r_min=float(self._r_min.get()),
                              stride=stride, snip_window=snipw,
+                             vac_pctile=vac_pct_val,
+                             vac_cutoff=(vac_cut if vac_cut is not None
+                                          else None),
+                             n_masked=n_masked,
                              n_bins=n_bins, n_windows=nW, windows=[])
             for w, (a, b) in enumerate(windows):
                 qa, qb = a * inv_a, b * inv_a
