@@ -1,23 +1,20 @@
-"""crystallinity_panel.py -- per-position peak/background ratio map.
+"""crystallinity_panel.py -- per-position 1D crystallinity maps.
 
-For each scan position, computes the ratio of detected peak intensity
-to non-peak (background / ring) intensity inside a user-chosen radial
-window [r_min, r_max] (1/Å).  Output is a 2D virtual map (Ny × Nx)
-that behaves like a virtual HAADF but specifically measures
-*crystallinity in a chosen q-range*.
+Crystallinity is measured in 1D (no 2D peak finding, so weak peaks
+boosted by azimuthal integration aren't lost).  For each pattern, within
+a user-chosen radial window [r_min, r_max] (1/Å, truncated to start
+*after* the central beam/mask):
 
-Two-part interactive parameter-tuning UI (the user sees both for a
-single test pattern before committing):
-  - polar view + r-window highlight (which q-range is being sampled)
-  - cart pattern with the detected peaks overlaid (red rings inside
-    the window, grey outside)
+  * azimuthal MEAN  I(q) -> a SNIP baseline estimates the amorphous
+    halo; the area above it ÷ total is the **peak/halo ratio**
+    (degree-of-crystallinity, lin-log treated like the SAXS gate).
+  * azimuthal VARIANCE around each ring -> **spottiness** (normalized
+    by mean²): high for sharp Bragg spots, ~0 for smooth amorphous
+    rings.  Catches single-grain/spotty signal the mean dilutes.
 
-Plus a 1-D radial profile with the window shaded.
-
-Then **Run on full dataset** applies the same detection params +
-r-window to every scan position and renders the ratio map in the
-bottom-right.  Higher ratio = more Bragg-like signal vs diffuse ring
-background in that q-window = more crystalline.
+Two complementary scalars per position -> two virtual maps (Ny × Nx).
+**Run on full dataset** computes both; the map panel toggles between
+them.  **Per-cluster** aggregates both per DINO class (median ± IQR).
 """
 from __future__ import annotations
 import os, sys, time, threading
@@ -119,6 +116,88 @@ def compute_crystallinity_ratio(pat: np.ndarray,
 
 
 # ---------------------------------------------------------------------------
+# 1D ("SAXS-like") crystallinity — azimuthal mean + variance per radial bin,
+# SNIP halo baseline, continuous peak/halo ratio.  NO 2D peak finding, so
+# weak peaks (boosted by azimuthal integration) aren't lost.
+# ---------------------------------------------------------------------------
+def _radial_mean_var(pat: np.ndarray, center: tuple):
+    """Azimuthal mean m(r) and variance v(r) per integer radial bin.
+
+    v(r) is the variance of intensity AROUND the ring at radius r — high
+    for spotty (crystalline) rings, ~0 for smooth amorphous rings.
+    """
+    H, W = pat.shape
+    cy, cx = center
+    yy, xx = np.indices((H, W))
+    rad = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+    n_bins = int(min(H, W) // 2)
+    ind = np.clip(rad.astype(int), 0, n_bins - 1).ravel()
+    flat = pat.astype(np.float64).ravel()
+    cnt = np.bincount(ind, minlength=n_bins)[:n_bins].astype(np.float64)
+    s1 = np.bincount(ind, weights=flat, minlength=n_bins)[:n_bins]
+    s2 = np.bincount(ind, weights=flat * flat, minlength=n_bins)[:n_bins]
+    cntc = np.maximum(cnt, 1.0)
+    m = s1 / cntc
+    v = np.maximum(s2 / cntc - m * m, 0.0)
+    return m, v
+
+
+def _snip_baseline(y: np.ndarray, n_iter: int = 14) -> np.ndarray:
+    """SNIP (iterative peak-clipping) baseline on a 1D signal.
+
+    Operate on log-intensity (caller passes log I): each pass with growing
+    half-window m replaces y[i] with min(y[i], (y[i-m]+y[i+m])/2), so
+    features NARROWER than the window (Bragg peaks) get clipped while the
+    BROAD halo survives.  One intuitive knob: max window ≈ widest peak.
+    """
+    z = np.asarray(y, dtype=np.float64).copy()
+    n = z.size
+    for m in range(1, int(max(n_iter, 1)) + 1):
+        if 2 * m >= n:
+            break
+        cand = 0.5 * (z[:n - 2 * m] + z[2 * m:])
+        np.minimum(z[m:n - m], cand, out=z[m:n - m])
+    return z
+
+
+def compute_crystallinity_1d(pat: np.ndarray, r_lo_px: float, r_hi_px: float,
+                              *, center: tuple | None = None,
+                              snip_window: int = 14) -> dict | None:
+    """1D crystallinity from a single 2D pattern.
+
+    Returns a dict with:
+        ratio      : ∫max(I-halo,0) / ∫I over the q-window  (peak/halo)
+        var_index  : mean azimuthal variance / mean²  (spottiness)
+        m, v       : azimuthal mean / variance over the window
+        halo, peak : SNIP halo and the residual peak signal (linear)
+        lo, hi, r_px
+    """
+    H, W = pat.shape
+    cy, cx = center if center is not None else (H / 2.0, W / 2.0)
+    m_all, v_all = _radial_mean_var(pat, (cy, cx))
+    n = m_all.size
+    lo = int(max(0, min(n - 1, round(r_lo_px))))
+    hi = int(min(n, round(r_hi_px)))
+    if hi - lo < 8:
+        return None
+    m = m_all[lo:hi]
+    v = v_all[lo:hi]
+    # peak/halo via SNIP baseline in log space (handles the steep,
+    # power-law-ish amorphous halo); ratio in LINEAR intensity.
+    log_I = np.log(np.clip(m, 1e-6, None))
+    base_log = _snip_baseline(log_I, snip_window)
+    halo = np.exp(base_log)
+    peak = np.clip(m - halo, 0.0, None)
+    tot = float(m.sum()) + 1e-12
+    ratio = float(peak.sum() / tot)
+    # normalized azimuthal variance (dose-robust spottiness)
+    var_index = float(np.mean(v / np.maximum(m * m, 1e-12)))
+    return dict(ratio=ratio, var_index=var_index, m=m, v=v,
+                 halo=halo, peak=peak, lo=lo, hi=hi,
+                 r_px=np.arange(lo, hi, dtype=float))
+
+
+# ---------------------------------------------------------------------------
 class CrystallinityPanel(ctk.CTkFrame):
 
     def __init__(self, master, app=None):
@@ -131,6 +210,7 @@ class CrystallinityPanel(ctk.CTkFrame):
         self._test_polar = None
         self._test_result = None
         self._cryst_map = None
+        self._var_map = None
         self._busy = False
         self._build()
 
@@ -252,29 +332,38 @@ class CrystallinityPanel(ctk.CTkFrame):
             sl.pack(side="left", padx=4)
             self._r_sliders.append(sl)
 
-        # 4. DETECTION params
-        _section_header(sidebar, "4.  Peak detection")
-        self._det_thr = ctk.DoubleVar(value=0.02)
-        self._det_min = ctk.DoubleVar(value=1.0)
-        self._det_max = ctk.DoubleVar(value=6.0)
-        self._det_num = ctk.IntVar(value=6)
-        self._det_log = ctk.BooleanVar(value=True)
-        for label, var, w in (("threshold", self._det_thr, 60),
-                                  ("min sigma", self._det_min, 60),
-                                  ("max sigma", self._det_max, 60),
-                                  ("num sigma", self._det_num, 60)):
-            row = ctk.CTkFrame(sidebar, fg_color="transparent")
-            row.pack(fill="x", padx=10, pady=1)
-            ctk.CTkLabel(row, text=label, width=80,
-                          anchor="w").pack(side="left")
-            e = ctk.CTkEntry(row, textvariable=var, width=w)
-            e.pack(side="left", padx=2)
-            e.bind("<Return>", lambda _e: self._recompute_test())
-        ctk.CTkCheckBox(sidebar, text="log stretch (detection)",
-                          variable=self._det_log,
-                          command=self._recompute_test
-                          ).pack(anchor="w", padx=10, pady=2)
-        ctk.CTkButton(sidebar, text="Re-detect ▶",
+        # 4. HALO BASELINE (1D) — peak/halo + azimuthal variance, no 2D
+        # peak finding (weak peaks survive azimuthal integration).
+        _section_header(sidebar, "4.  Halo baseline (1D)")
+        _hint(sidebar,
+              "Crystallinity is computed in 1D from the azimuthal mean "
+              "I(q): a SNIP baseline estimates the amorphous halo, and the "
+              "area above it (÷ total) is the peak/halo ratio.  Azimuthal "
+              "variance gives spottiness.  No 2D peak finding — weak peaks "
+              "aren't lost.")
+        snip_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        snip_row.pack(fill="x", padx=10, pady=1)
+        ctk.CTkLabel(snip_row, text="SNIP window (bins):", width=140,
+                       anchor="w").pack(side="left")
+        self._snip_win = ctk.IntVar(value=14)
+        e = ctk.CTkEntry(snip_row, textvariable=self._snip_win, width=56)
+        e.pack(side="left", padx=2)
+        e.bind("<Return>", lambda _e: self._recompute_test())
+        sl = ctk.CTkSlider(sidebar, from_=2, to=60,
+                            variable=self._snip_win, width=240,
+                            command=lambda _v: self._recompute_test())
+        sl.pack(anchor="w", padx=10, pady=1)
+        metric_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        metric_row.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(metric_row, text="map metric:", width=78,
+                       anchor="w").pack(side="left")
+        self._map_metric = ctk.StringVar(value="ratio")
+        ctk.CTkSegmentedButton(
+            metric_row, values=["ratio", "variance"],
+            variable=self._map_metric,
+            command=lambda _v: self._render_test_panels()
+            ).pack(side="left", padx=2)
+        ctk.CTkButton(sidebar, text="Recompute ▶",
                        width=240,
                        command=self._recompute_test
                        ).pack(anchor="w", padx=10, pady=2)
@@ -299,7 +388,7 @@ class CrystallinityPanel(ctk.CTkFrame):
                        fg_color=("#2D7A2D", "#1F7A1F"),
                        command=self._run_full_dataset
                        ).pack(anchor="w", padx=10, pady=2)
-        ctk.CTkButton(sidebar, text="Per-cluster ratios  (bar chart)",
+        ctk.CTkButton(sidebar, text="Per-cluster crystallinity  (bars)",
                        width=240,
                        command=self._render_per_cluster
                        ).pack(anchor="w", padx=10, pady=2)
@@ -364,15 +453,6 @@ class CrystallinityPanel(ctk.CTkFrame):
                 (os.path.basename(sess.run_dir or "")
                   if sess and sess.run_dir else "no run loaded"))
         except Exception: pass
-
-    def _detect_kw(self):
-        return dict(
-            min_sigma=float(self._det_min.get()),
-            max_sigma=float(self._det_max.get()),
-            num_sigma=int(self._det_num.get()),
-            threshold=float(self._det_thr.get()),
-            log_stretch=bool(self._det_log.get()),
-        )
 
     # ------------------------------------------------------------------
     def _load_source(self):
@@ -481,22 +561,25 @@ class CrystallinityPanel(ctk.CTkFrame):
             self._test_status.configure(
                 text="r_min must be < r_max"); return
         try:
-            ratio, peaks_w, peak_sum, bg_sum, annulus = (
-                compute_crystallinity_ratio(
-                    self._test_pattern, r_min_px, r_max_px,
-                    self._detect_kw(), self._test_center))
+            snipw = int(float(self._snip_win.get()))
+        except Exception:
+            snipw = 14
+        try:
+            res = compute_crystallinity_1d(
+                self._test_pattern, r_min_px, r_max_px,
+                center=self._test_center, snip_window=snipw)
         except Exception as e:
             self._test_status.configure(text=f"err: {e!r}"); return
-        self._test_result = dict(
-            ratio=ratio, peaks_w=peaks_w,
-            peak_sum=peak_sum, bg_sum=bg_sum,
-            annulus=annulus,
-            r_min_px=r_min_px, r_max_px=r_max_px,
-            inv_a=inv_a)
+        if res is None:
+            self._test_status.configure(
+                text="window too narrow (need ≥ 8 radial bins)"); return
+        res["r_min_px"] = r_min_px
+        res["r_max_px"] = r_max_px
+        res["inv_a"] = inv_a
+        self._test_result = res
         self._test_status.configure(
-            text=f"ratio = {ratio:.4f}    peak={peak_sum:.3g}  "
-                  f"bg={bg_sum:.3g}    "
-                  f"{len(peaks_w)} peaks in window")
+            text=f"peak/halo = {res['ratio']:.4f}     "
+                  f"azim-var = {res['var_index']:.4f}")
         self._render_test_panels()
 
     def _render_test_panels(self):
@@ -504,41 +587,19 @@ class CrystallinityPanel(ctk.CTkFrame):
             return
         r = self._test_result
         cy, cx = self._test_center
-        # ---- cart pattern + annulus + peaks ----
+        # ---- cart pattern + annulus (no 2D peak finding) ----
         ax = self._ax_cart; ax.clear()
         img = np.log1p(np.clip(self._test_pattern, 0, None))
         ax.imshow(img, cmap="inferno", aspect="equal",
                     interpolation="nearest")
-        # annulus rings
+        # annulus rings mark the q-window used for the 1D analysis
         for rad, color in ((r["r_min_px"], "#33ddff"),
                               (r["r_max_px"], "#33ddff")):
             ax.add_patch(Circle((cx, cy), rad, color=color,
                                   fill=False, lw=1.5, linestyle="--"))
-        # peaks: in-window cyan filled, out-of-window grey ring only
-        try:
-            from gui_app.acom_core import detect_peaks_2d
-            all_peaks = detect_peaks_2d(self._test_pattern,
-                                              **self._detect_kw())
-        except Exception:
-            all_peaks = np.zeros((0, 3))
-        if all_peaks.size:
-            radii = np.sqrt(
-                (all_peaks[:, 0] - cy) ** 2
-                + (all_peaks[:, 1] - cx) ** 2)
-            in_win = (radii >= r["r_min_px"]) & (radii < r["r_max_px"])
-            if (~in_win).any():
-                p = all_peaks[~in_win]
-                ax.scatter(p[:, 1], p[:, 0], s=40,
-                            facecolors="none", edgecolors="#888",
-                            linewidths=0.7)
-            if in_win.any():
-                p = all_peaks[in_win]
-                ax.scatter(p[:, 1], p[:, 0], s=60,
-                            facecolors="none", edgecolors="cyan",
-                            linewidths=1.4)
         ax.set_xticks([]); ax.set_yticks([])
         ax.set_title(f"{self._test_origin}    "
-                       f"ratio = {r['ratio']:.4f}", fontsize=10)
+                       f"peak/halo = {r['ratio']:.4f}", fontsize=10)
         # Hover-q on the cart pattern (raw-detector resolution).
         try:
             from gui_app._ui import attach_hover_q
@@ -575,45 +636,42 @@ class CrystallinityPanel(ctk.CTkFrame):
             f"{self._r_min.get():.3g}–{self._r_max.get():.3g} 1/Å)",
             fontsize=10)
 
-        # ---- 1D radial profile + window shaded ----
+        # ---- 1D radial profile (lin-log, truncated): I(q) + SNIP halo +
+        #      shaded peak area, with azimuthal variance on a twin axis ----
         ax = self._ax_1d; ax.clear()
-        H, W = self._test_pattern.shape
-        yy, xx = np.indices((H, W))
-        rad = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
-        n_bins = int(min(H, W) // 2)
-        bins = np.linspace(0.0, n_bins, n_bins + 1)
-        ind = np.digitize(rad.ravel(), bins) - 1
-        flat = self._test_pattern.ravel().astype(np.float64)
-        sums = np.bincount(ind, weights=flat,
-                              minlength=n_bins + 2)[:n_bins + 1]
-        cnts = np.bincount(ind, minlength=n_bins + 2)[:n_bins + 1]
-        means = sums / np.maximum(cnts, 1)
-        rc = 0.5 * (bins[:-1] + bins[1:])
-        rc_inva = rc * inv_a
-        ax.semilogy(rc_inva, np.clip(means[:-1] -
-                                        np.median(means), 0, None) + 1e-3,
-                       color="#1f77b4", lw=1.3)
-        ax.axvspan(self._r_min.get(), self._r_max.get(),
-                     color="#33ddff", alpha=0.20)
-        # detected peaks shown as red dots at their q-values
-        if r["peaks_w"].size:
-            pq = np.sqrt(
-                (r["peaks_w"][:, 0] - cy) ** 2
-                + (r["peaks_w"][:, 1] - cx) ** 2) * inv_a
-            pa = np.zeros_like(pq) + (means.max() * 0.6)
-            ax.scatter(pq, pa, s=22, color="#e0144c",
-                          edgecolors="white", linewidths=0.6)
+        q = r["r_px"] * inv_a                       # 1/Å (truncated window)
+        m = np.clip(r["m"], 1e-3, None)
+        halo = np.clip(r["halo"], 1e-3, None)
+        ax.semilogy(q, m, color="#1f77b4", lw=1.4, label="I(q) azim-mean")
+        ax.semilogy(q, halo, color="#888", lw=1.2, ls="--",
+                       label="halo (SNIP)")
+        ax.fill_between(q, halo, m, where=(m > halo),
+                          color="#e0144c", alpha=0.25, label="peak")
         ax.set_xlabel("q  (1/Å)")
-        ax.set_yticks([])
-        ax.set_title("1D radial  (blue) + detected-peak q's (red)",
-                       fontsize=10)
+        ax.set_ylabel("I(q)   (log)")
+        ax.set_title(f"1D radial — peak/halo={r['ratio']:.3f}  "
+                       f"azim-var={r['var_index']:.3f}", fontsize=10)
+        ax.legend(fontsize=7, loc="upper right")
+        try:
+            ax2 = ax.twinx()
+            ax2.plot(q, r["v"] / np.maximum(r["m"] ** 2, 1e-12),
+                      color="#2ca02c", lw=1.0, alpha=0.85)
+            ax2.set_ylabel("azim var / mean²", color="#2ca02c", fontsize=8)
+            ax2.tick_params(axis="y", labelcolor="#2ca02c", labelsize=7)
+        except Exception:
+            pass
 
-        # ---- map (placeholder until Run) ----
+        # ---- map (placeholder until Run) — honours the metric toggle ----
         ax = self._ax_map; ax.clear()
-        if self._cryst_map is not None:
-            im = ax.imshow(self._cryst_map, cmap="viridis",
+        metric = getattr(self, "_map_metric", None)
+        is_var = bool(metric is not None and metric.get() == "variance")
+        the_map = (getattr(self, "_var_map", None) if is_var
+                    else self._cryst_map)
+        if the_map is not None:
+            im = ax.imshow(the_map, cmap="viridis",
                               interpolation="nearest", aspect="equal")
-            ax.set_title("crystallinity map", fontsize=10)
+            ax.set_title("azim-variance map" if is_var
+                          else "peak/halo map", fontsize=10)
             ax.set_xticks([]); ax.set_yticks([])
             try:
                 self._fig.colorbar(im, ax=ax, fraction=0.045,
@@ -656,8 +714,12 @@ class CrystallinityPanel(ctk.CTkFrame):
             r_min_px = float(self._r_min.get()) / max(inv_a, 1e-12)
             r_max_px = float(self._r_max.get()) / max(inv_a, 1e-12)
             stride = max(int(self._full_stride.get()), 1)
-            detect_kw = self._detect_kw()
-            cmap = np.full((Ny, Nx), np.nan, dtype=np.float32)
+            try:
+                snipw = int(float(self._snip_win.get()))
+            except Exception:
+                snipw = 14
+            ratio_map = np.full((Ny, Nx), np.nan, dtype=np.float32)
+            var_map = np.full((Ny, Nx), np.nan, dtype=np.float32)
             t0 = time.time()
             total = (Ny // stride) * (Nx // stride)
             done = 0
@@ -669,11 +731,12 @@ class CrystallinityPanel(ctk.CTkFrame):
                     except Exception:
                         continue
                     try:
-                        ratio, _, _, _, _ = (
-                            compute_crystallinity_ratio(
-                                pat, r_min_px, r_max_px,
-                                detect_kw, center))
-                        cmap[rx, ry] = ratio
+                        res = compute_crystallinity_1d(
+                            pat, r_min_px, r_max_px,
+                            center=center, snip_window=snipw)
+                        if res is not None:
+                            ratio_map[rx, ry] = res["ratio"]
+                            var_map[rx, ry] = res["var_index"]
                     except Exception:
                         pass
                     done += 1
@@ -684,13 +747,10 @@ class CrystallinityPanel(ctk.CTkFrame):
                                   eta=eta: self._full_status.configure(
                         text=f"{d}/{t}  ({dt:.0f}s elapsed, "
                               f"ETA {eta:.0f}s)"))
-            # Stride > 1: fill skipped positions with nearest sampled
-            # value (cheap visual interpolation).
-            if stride > 1:
-                from scipy.ndimage import maximum_filter
-                # propagate by nearest-neighbour fill via a small
-                # iterative dilation
-                cur = cmap.copy()
+
+            def _fill_stride(arr):
+                # Stride > 1: nearest-neighbour fill of skipped positions.
+                cur = arr.copy()
                 mask = ~np.isnan(cur)
                 for _ in range(stride):
                     next_ = cur.copy()
@@ -701,18 +761,19 @@ class CrystallinityPanel(ctk.CTkFrame):
                             next_[new] = rolled[new]
                             mask = mask | new
                     cur = next_
-                cmap = cur
-            self._cryst_map = cmap
+                return cur
+            if stride > 1:
+                ratio_map = _fill_stride(ratio_map)
+                var_map = _fill_stride(var_map)
+            self._cryst_map = ratio_map
+            self._var_map = var_map
             dt = time.time() - t0
             self.after(0, lambda: self._full_status.configure(
                 text=f"done ({dt:.0f}s)  stride={stride}  "
-                      f"min/median/max = "
-                      f"{np.nanmin(cmap):.3f} / "
-                      f"{np.nanmedian(cmap):.3f} / "
-                      f"{np.nanmax(cmap):.3f}"))
+                      f"peak/halo med={np.nanmedian(ratio_map):.3f}  "
+                      f"azim-var med={np.nanmedian(var_map):.4f}"))
             self.after(0, self._render_test_panels)
-            # If a trained run is linked, also aggregate the ratio
-            # per DINO cluster and show a bar chart.
+            # If a trained run is linked, also aggregate per DINO cluster.
             self.after(0, self._render_per_cluster)
         except Exception as e:
             err = repr(e)
@@ -737,58 +798,77 @@ class CrystallinityPanel(ctk.CTkFrame):
         Ny, Nx = ph._scan_shape
         assigns = np.asarray(ph._inf["assigns"]).reshape(Ny, Nx)
         K = int(ph._inf["soft_probs"].shape[1])
-        ratio = self._cryst_map
-        rows, means, meds, q1s, q3s, ns, ks = [], [], [], [], [], [], []
-        for c in range(K):
-            vals = ratio[(assigns == c) & np.isfinite(ratio)]
-            if vals.size == 0:
-                continue
-            ks.append(c); ns.append(int(vals.size))
-            means.append(float(np.mean(vals)))
-            meds.append(float(np.median(vals)))
-            q1s.append(float(np.percentile(vals, 25)))
-            q3s.append(float(np.percentile(vals, 75)))
-        if not ks:
-            messagebox.showinfo("Per-cluster",
-                "No overlap between ratio map and class map."); return
-        # Sort by median ratio (most crystalline first).
-        order = np.argsort(-np.asarray(meds))
-        ks = [ks[i] for i in order]; means = [means[i] for i in order]
-        meds = [meds[i] for i in order]; ns = [ns[i] for i in order]
-        q1s = [q1s[i] for i in order]; q3s = [q3s[i] for i in order]
-        # Bar chart in its own popup window.
         import matplotlib.pyplot as plt
         from matplotlib.backends.backend_tkagg import (
             FigureCanvasTkAgg, NavigationToolbar2Tk)
-        win = tk.Toplevel(self)
-        win.title("crystallinity ratio per DINO cluster")
-        win.geometry("780x520")
-        fig = Figure(figsize=(7.6, 5.0), dpi=110, facecolor="white")
-        ax = fig.add_subplot(111)
-        x = np.arange(len(ks))
-        yerr = [np.array(meds) - np.array(q1s),
-                np.array(q3s) - np.array(meds)]
         cmap = plt.get_cmap("tab10" if K <= 10 else "tab20")
-        cols = [cmap(c % (10 if K <= 10 else 20)) for c in ks]
-        ax.bar(x, meds, yerr=yerr, capsize=3, color=cols,
-                  edgecolor="#333", linewidth=0.6)
-        ax.set_xticks(x)
-        ax.set_xticklabels([f"p{c}\n{n}px" for c, n in zip(ks, ns)],
-                              fontsize=8)
-        ax.set_ylabel("peak/background ratio  (median ± IQR)")
-        ax.set_title(
-            f"crystallinity per cluster  "
-            f"(q = {self._r_min.get():.3g}–{self._r_max.get():.3g} 1/Å)  "
-            f"·  higher = more crystalline", fontsize=10)
-        ax.grid(axis="y", alpha=0.3)
+        modN = 10 if K <= 10 else 20
+
+        def _per_class(metric_map):
+            ks, meds, q1s, q3s, ns = [], [], [], [], []
+            if metric_map is None:
+                return ks, meds, q1s, q3s, ns
+            for c in range(K):
+                vals = metric_map[(assigns == c) & np.isfinite(metric_map)]
+                if vals.size == 0:
+                    continue
+                ks.append(c); ns.append(int(vals.size))
+                meds.append(float(np.median(vals)))
+                q1s.append(float(np.percentile(vals, 25)))
+                q3s.append(float(np.percentile(vals, 75)))
+            return ks, meds, q1s, q3s, ns
+
+        win = tk.Toplevel(self)
+        win.title("crystallinity per DINO cluster")
+        win.geometry("900x640")
+        fig = Figure(figsize=(8.8, 6.2), dpi=110, facecolor="white")
+        panels = [("peak/halo ratio", self._cryst_map),
+                   ("azimuthal variance (spottiness)",
+                    getattr(self, "_var_map", None))]
+        any_ok = False
+        for pi, (name, mp) in enumerate(panels):
+            ax = fig.add_subplot(2, 1, pi + 1)
+            ks, meds, q1s, q3s, ns = _per_class(mp)
+            if not ks:
+                ax.text(0.5, 0.5, f"({name}: no data)", ha="center",
+                         va="center", transform=ax.transAxes,
+                         color="#888")
+                ax.set_xticks([]); ax.set_yticks([])
+                continue
+            any_ok = True
+            order = np.argsort(-np.asarray(meds))   # most crystalline first
+            ks = [ks[i] for i in order]; meds = [meds[i] for i in order]
+            ns = [ns[i] for i in order]
+            q1s = [q1s[i] for i in order]; q3s = [q3s[i] for i in order]
+            x = np.arange(len(ks))
+            yerr = [np.array(meds) - np.array(q1s),
+                    np.array(q3s) - np.array(meds)]
+            cols = [cmap(c % modN) for c in ks]
+            ax.bar(x, meds, yerr=yerr, capsize=3, color=cols,
+                      edgecolor="#333", linewidth=0.6)
+            ax.set_xticks(x)
+            ax.set_xticklabels([f"p{c}\n{n}px" for c, n in zip(ks, ns)],
+                                  fontsize=8)
+            ax.set_ylabel(f"{name}\n(median ± IQR)", fontsize=9)
+            ax.grid(axis="y", alpha=0.3)
+            if pi == 0:
+                ax.set_title(
+                    f"per-cluster crystallinity  "
+                    f"(q = {self._r_min.get():.3g}–"
+                    f"{self._r_max.get():.3g} 1/Å)  ·  higher = more "
+                    f"crystalline / spotty", fontsize=10)
         fig.tight_layout()
         c = FigureCanvasTkAgg(fig, master=win)
         c.get_tk_widget().pack(fill="both", expand=True)
         tb = NavigationToolbar2Tk(c, win, pack_toolbar=False)
         tb.update(); tb.pack(side="bottom", fill="x")
-        self._full_status.configure(
-            text=f"per-cluster ratios computed for {len(ks)} classes "
-                  f"(median range {min(meds):.3f}–{max(meds):.3f})")
+        if not any_ok:
+            self._full_status.configure(
+                text="per-cluster: no overlap between maps and class map")
+        else:
+            self._full_status.configure(
+                text="per-cluster crystallinity (peak/halo + variance) "
+                      "computed")
 
     def _save_map(self):
         if self._cryst_map is None:
@@ -801,21 +881,26 @@ class CrystallinityPanel(ctk.CTkFrame):
         os.makedirs(out, exist_ok=True)
         from datetime import datetime
         stamp = datetime.now().strftime("%H%M%S")
-        np.save(os.path.join(out, f"map_{stamp}.npy"),
-                  self._cryst_map)
-        # PNG
-        fig, ax = matplotlib.pyplot.subplots(figsize=(7, 6))
-        im = ax.imshow(self._cryst_map, cmap="viridis",
-                          interpolation="nearest", aspect="equal")
-        ax.set_title(f"crystallinity ratio map  "
-                       f"(q = {self._r_min.get():.3g}–"
-                       f"{self._r_max.get():.3g} 1/Å)",
-                       fontsize=11)
-        ax.set_xticks([]); ax.set_yticks([])
-        fig.colorbar(im, ax=ax, fraction=0.045, pad=0.02)
-        png = os.path.join(out, f"map_{stamp}.png")
-        fig.savefig(png, dpi=180, bbox_inches="tight",
-                       facecolor="white")
-        matplotlib.pyplot.close(fig)
+        qtag = (f"q = {self._r_min.get():.3g}–"
+                 f"{self._r_max.get():.3g} 1/Å")
+        saved = []
+        for name, mp in (("peakhalo", self._cryst_map),
+                          ("azimvar", getattr(self, "_var_map", None))):
+            if mp is None:
+                continue
+            np.save(os.path.join(out, f"{name}_{stamp}.npy"), mp)
+            fig, ax = matplotlib.pyplot.subplots(figsize=(7, 6))
+            im = ax.imshow(mp, cmap="viridis",
+                              interpolation="nearest", aspect="equal")
+            title = ("peak/halo crystallinity map" if name == "peakhalo"
+                      else "azimuthal-variance (spottiness) map")
+            ax.set_title(f"{title}  ({qtag})", fontsize=11)
+            ax.set_xticks([]); ax.set_yticks([])
+            fig.colorbar(im, ax=ax, fraction=0.045, pad=0.02)
+            fig.savefig(os.path.join(out, f"{name}_{stamp}.png"),
+                          dpi=180, bbox_inches="tight", facecolor="white")
+            matplotlib.pyplot.close(fig)
+            saved.append(name)
         self._full_status.configure(
-            text=f"saved → {os.path.basename(out)}/map_{stamp}.npy + .png")
+            text=f"saved {', '.join(saved)} (.npy + .png) → "
+                  f"{os.path.basename(out)}/")
