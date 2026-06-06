@@ -218,6 +218,82 @@ def _crystallinity_window(m_all: np.ndarray, v_all: np.ndarray,
 
 
 # ---------------------------------------------------------------------------
+# Report-all overlays (combine the per-dr maps into one colored image) +
+# intrinsic quality scoring.
+# ---------------------------------------------------------------------------
+def _stack_zscore(maps):
+    """(nW, Ny, Nx) z-scored per window so windows are comparable for
+    argmax (one window's larger absolute scale shouldn't always win)."""
+    st = np.stack(maps, axis=0).astype(np.float32)
+    out = np.full_like(st, np.nan)
+    for w in range(st.shape[0]):
+        a = st[w]
+        if np.isfinite(a).sum() < 2:
+            continue
+        mu = np.nanmean(a); sd = np.nanstd(a)
+        out[w] = (a - mu) / (sd if sd > 1e-12 else 1.0)
+    return out
+
+
+def _overlay_argmax_rgb(maps, colors):
+    """Dominant-dr map: each pixel coloured by the window with the
+    strongest z-scored signal.  Returns (rgb, idx, valid)."""
+    z = _stack_zscore(maps)
+    valid = np.isfinite(z).any(axis=0)
+    zf = np.where(np.isfinite(z), z, -np.inf)
+    idx = np.argmax(zf, axis=0)
+    Ny, Nx = idx.shape
+    rgb = np.zeros((Ny, Nx, 3), np.float32)
+    for w, c in enumerate(colors):
+        rgb[(idx == w) & valid] = c[:3]
+    rgb[~valid] = 0.0
+    return rgb, idx, valid
+
+
+def _overlay_additive_rgb(maps, colors):
+    """Additive false-colour: each window a hue, summed weighted by its
+    robust-normalized value."""
+    Ny, Nx = maps[0].shape
+    rgb = np.zeros((Ny, Nx, 3), np.float32)
+    for mp, c in zip(maps, colors):
+        a = mp.astype(np.float32)
+        f = np.isfinite(a)
+        if f.sum() == 0:
+            continue
+        lo = np.nanpercentile(a, 2); hi = np.nanpercentile(a, 98)
+        if hi - lo < 1e-12:
+            hi = lo + 1.0
+        n = np.clip((a - lo) / (hi - lo), 0.0, 1.0)
+        n[~f] = 0.0
+        for k in range(3):
+            rgb[..., k] += n * c[k]
+    mx = float(rgb.max())
+    if mx > 0:
+        rgb /= mx
+    return rgb
+
+
+def _spatial_autocorr(mp):
+    """Lag-1 (right + down) spatial autocorrelation of a 2D map.  High =
+    spatially structured (a real map); ~0 = salt-and-pepper noise."""
+    a = np.asarray(mp, dtype=np.float64)
+    finite = np.isfinite(a)
+    if finite.sum() < 8:
+        return 0.0
+    mu = np.nanmean(a); sd = np.nanstd(a)
+    if sd < 1e-12:
+        return 0.0
+    z = (a - mu) / sd
+    vals = []
+    for sh, ax_ in ((1, 0), (1, 1)):
+        b = np.roll(z, sh, axis=ax_)
+        m = finite & np.roll(finite, sh, axis=ax_)
+        if m.sum() > 0:
+            vals.append(float(np.nanmean(z[m] * b[m])))
+    return float(np.mean(vals)) if vals else 0.0
+
+
+# ---------------------------------------------------------------------------
 class CrystallinityPanel(ctk.CTkFrame):
 
     def __init__(self, master, app=None):
@@ -1283,6 +1359,8 @@ class CrystallinityPanel(ctk.CTkFrame):
             var_maps = [np.full((Ny, Nx), np.nan, np.float32)
                          for _ in range(nW)]
             scatter_map = np.full((Ny, Nx), np.nan, np.float32)
+            sum_m = np.zeros(n_bins, np.float64)   # dataset-mean profile
+            n_acc = 0
             t0 = time.time()
             total = (Ny // stride) * (Nx // stride)
             done = 0
@@ -1295,6 +1373,8 @@ class CrystallinityPanel(ctk.CTkFrame):
                     # ONE radial pass per pattern; evaluate every window.
                     m_all, v_all, cnt = _radial_mean_var(
                         pat, center, beam)
+                    sum_m += m_all
+                    n_acc += 1
                     # post-beam scattered intensity (window-independent)
                     scatter_map[rx, ry] = float(
                         (m_all[lo0:] * cnt[lo0:]).sum())
@@ -1407,12 +1487,134 @@ class CrystallinityPanel(ctk.CTkFrame):
                 fig.tight_layout(rect=[0, 0, 1, 0.96])
                 fig.savefig(os.path.join(folder, f"_montage_{name}.png"),
                               dpi=150, bbox_inches="tight", facecolor="white")
+
+            # ---- overlays per analysis type: dominant-dr + additive ----
+            from matplotlib.patches import Patch
+            try:
+                from matplotlib import colormaps as _cmaps
+                _base = _cmaps["turbo"]
+            except Exception:
+                from matplotlib import cm as _cm
+                _base = _cm.get_cmap("turbo")
+            colors = [_base(i / max(nW - 1, 1)) for i in range(nW)]
+            legend_handles = [
+                Patch(facecolor=colors[w],
+                       label=f"{windows[w][0]*inv_a:.3f}–"
+                             f"{windows[w][1]*inv_a:.3f}")
+                for w in range(nW)]
+            for name, maps in (("peakhalo", ratio_maps),
+                                ("azimvar", var_maps)):
+                rgb, idx, valid = _overlay_argmax_rgb(maps, colors)
+                np.save(os.path.join(folder,
+                          f"overlay_{name}_dominant_idx.npy"), idx)
+                for style, rgbimg in (("dominant", rgb),
+                                       ("additive",
+                                        _overlay_additive_rgb(maps, colors))):
+                    fig = Figure(figsize=(7.6, 6.0), facecolor="white")
+                    ax = fig.add_subplot(111)
+                    ax.imshow(rgbimg, interpolation="nearest", aspect="equal")
+                    ax.set_title(f"{name}: {style} dr overlay  "
+                                  f"({ph.sample})", fontsize=11)
+                    ax.set_xticks([]); ax.set_yticks([])
+                    ax.legend(handles=legend_handles, title="q (1/Å)",
+                               fontsize=6, title_fontsize=7,
+                               loc="center left", bbox_to_anchor=(1.01, 0.5))
+                    fig.savefig(os.path.join(folder,
+                                  f"overlay_{name}_{style}.png"),
+                                  dpi=150, bbox_inches="tight",
+                                  facecolor="white")
+
+            # ---- per-dr 1D fit (subfolder) + intrinsic quality scores ----
+            import csv as _csv
+            fitdir = os.path.join(folder, "fits_1d")
+            os.makedirs(fitdir, exist_ok=True)
+            mean_prof = (sum_m / max(n_acc, 1)).astype(np.float64)
+            q_full = np.arange(n_bins) * inv_a
+            scores_rows = []
+            for w, (a, b) in enumerate(windows):
+                qa, qb = a * inv_a, b * inv_a
+                mw = mean_prof[a:b]
+                halo = np.exp(_snip_baseline(
+                    np.log(np.clip(mw, 1e-6, None)), snipw))
+                peak = np.clip(mw - halo, 0.0, None)
+                resid = mw - halo
+                noise = 1.4826 * np.median(
+                    np.abs(resid - np.median(resid))) + 1e-12
+                peak_snr = float(peak.max() / noise) if peak.size else 0.0
+                sp_ph = _spatial_autocorr(ratio_maps[w])
+                sp_var = _spatial_autocorr(var_maps[w])
+                # combined: needs a SPATIALLY-STRUCTURED map AND prominent
+                # peaks above noise.  Both in [0,1]-ish; product in [0,1].
+                quality = float(max(sp_ph, 0.0) * (peak_snr / (peak_snr + 1.0)))
+                scores_rows.append(dict(idx=w, q_lo=round(qa, 5),
+                                         q_hi=round(qb, 5),
+                                         peak_snr=round(peak_snr, 4),
+                                         sp_autocorr_peakhalo=round(sp_ph, 4),
+                                         sp_autocorr_var=round(sp_var, 4),
+                                         quality=round(quality, 4)))
+                fig = Figure(figsize=(7.0, 4.4), facecolor="white")
+                ax = fig.add_subplot(111)
+                qq = q_full[a:b]
+                ax.semilogy(qq, np.clip(mw, 1e-6, None), color="#1f77b4",
+                              lw=1.3, label="dataset-mean I(q)")
+                ax.semilogy(qq, np.clip(halo, 1e-6, None), color="#888",
+                              lw=1.2, ls="--", label="halo (SNIP)")
+                ax.fill_between(qq, np.clip(halo, 1e-6, None),
+                                  np.clip(mw, 1e-6, None), where=(mw > halo),
+                                  color="#e0144c", alpha=0.25, label="peak")
+                ax.set_xlabel("q (1/Å)"); ax.set_ylabel("I(q) (log)")
+                ax.set_title(f"dr w{w}  q={qa:.3f}–{qb:.3f}   "
+                              f"peak_snr={peak_snr:.2f}  quality={quality:.3f}",
+                              fontsize=10)
+                ax.legend(fontsize=7)
+                fig.tight_layout()
+                fig.savefig(os.path.join(
+                    fitdir, f"fit_w{w:02d}_q{qa:.3f}-{qb:.3f}.png"),
+                    dpi=140, bbox_inches="tight", facecolor="white")
+
+            with open(os.path.join(folder, "scores.csv"), "w",
+                       newline="") as cf:
+                wr = _csv.DictWriter(cf, fieldnames=list(
+                    scores_rows[0].keys()))
+                wr.writeheader(); wr.writerows(scores_rows)
+            # quality-vs-q summary plot
+            qmid = [0.5 * (r["q_lo"] + r["q_hi"]) for r in scores_rows]
+            max_snr = max((r["peak_snr"] for r in scores_rows), default=1.0)
+            fig = Figure(figsize=(7.0, 4.0), facecolor="white")
+            ax = fig.add_subplot(111)
+            ax.plot(qmid, [r["quality"] for r in scores_rows], "-o",
+                     color="#7A4DA0", label="quality (0–1)")
+            ax.plot(qmid, [r["peak_snr"] / (max_snr + 1e-9)
+                            for r in scores_rows], "--", alpha=0.6,
+                     color="#1f77b4", label="peak_snr (norm)")
+            ax.plot(qmid, [r["sp_autocorr_peakhalo"] for r in scores_rows],
+                     ":", alpha=0.6, color="#2ca02c", label="spatial autocorr")
+            ax.set_xlabel("q (1/Å)"); ax.set_ylabel("score")
+            ax.set_title("intrinsic quality vs q  (higher = clearer + more "
+                          "spatially structured)", fontsize=10)
+            ax.legend(fontsize=8); ax.grid(alpha=0.3)
+            fig.tight_layout()
+            fig.savefig(os.path.join(folder, "_quality_vs_q.png"),
+                          dpi=150, bbox_inches="tight", facecolor="white")
+            best = max(scores_rows, key=lambda r: r["quality"],
+                        default=None)
+            manifest["best_dr"] = (best["idx"] if best else None)
+            for w, row in enumerate(scores_rows):
+                manifest["windows"][w].update(
+                    peak_snr=row["peak_snr"],
+                    sp_autocorr_peakhalo=row["sp_autocorr_peakhalo"],
+                    sp_autocorr_var=row["sp_autocorr_var"],
+                    quality=row["quality"])
+
             with open(os.path.join(folder, "manifest.json"), "w") as f:
                 json.dump(manifest, f, indent=2)
 
             dt = time.time() - t0
+            best_q = (f"{best['q_lo']:.3f}–{best['q_hi']:.3f}"
+                       if best else "n/a")
             self.after(0, lambda: self._full_status.configure(
                 text=f"Report-all done ({dt:.0f}s): {nW} windows × 2 maps "
+                      f"+ overlays + fits_1d + scores.  best dr q≈{best_q} "
                       f"→ {os.path.basename(folder)}/"))
         except Exception as e:
             err = repr(e)
