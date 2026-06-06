@@ -208,7 +208,8 @@ def compute_crystallinity_1d(pat: np.ndarray, r_lo_px: float, r_hi_px: float,
                               *, center: tuple | None = None,
                               snip_window: int = 14,
                               beam_px: float = 0.0,
-                              baseline: str = "snip") -> dict | None:
+                              baseline: str = "snip",
+                              peak_k: float = 0.0) -> dict | None:
     """1D crystallinity from a single 2D pattern.
 
     Returns a dict with:
@@ -222,12 +223,13 @@ def compute_crystallinity_1d(pat: np.ndarray, r_lo_px: float, r_hi_px: float,
     cy, cx = center if center is not None else (H / 2.0, W / 2.0)
     m_all, v_all, _cnt = _radial_mean_var(pat, (cy, cx), beam_px)
     return _crystallinity_window(m_all, v_all, round(r_lo_px),
-                                  round(r_hi_px), snip_window, baseline)
+                                  round(r_hi_px), snip_window, baseline,
+                                  peak_k)
 
 
 def _crystallinity_window(m_all: np.ndarray, v_all: np.ndarray,
                            lo: int, hi: int, snip_window: int = 14,
-                           baseline: str = "snip"):
+                           baseline: str = "snip", peak_k: float = 0.0):
     """Evaluate peak/halo + azimuthal-variance crystallinity over the
     radial-bin window [lo, hi) from PRECOMPUTED azimuthal mean/variance
     profiles — so Report-all can sweep many windows with ONE radial pass
@@ -245,6 +247,13 @@ def _crystallinity_window(m_all: np.ndarray, v_all: np.ndarray,
     base_log = _baseline_log(log_I, baseline, snip_window)
     halo = np.exp(base_log)
     peak = np.clip(m - halo, 0.0, None)
+    # Significance threshold: keep only residual above k×(robust noise),
+    # so the SNIP/ALS noise floor doesn't read as crystallinity in
+    # amorphous regions (peak/halo → ~0 there).  k=0 → off.
+    if peak_k and peak_k > 0:
+        resid = m - halo
+        noise = 1.4826 * np.median(np.abs(resid - np.median(resid))) + 1e-12
+        peak = np.where(peak > peak_k * noise, peak, 0.0)
     tot = float(m.sum()) + 1e-12
     ratio = float(peak.sum() / tot)
     # normalized azimuthal variance (dose-robust spottiness)
@@ -272,18 +281,41 @@ def _stack_zscore(maps):
     return out
 
 
-def _overlay_argmax_rgb(maps, colors):
+def _overlay_argmax_rgb(maps, colors, floor_pct=0.0):
     """Dominant-dr map: each pixel coloured by the window with the
-    strongest z-scored signal.  Returns (rgb, idx, valid)."""
+    strongest z-scored signal, with brightness modulated by the actual
+    signal strength so weak/noise pixels fade to a dark background
+    (kills the 'confetti' in amorphous regions).  `floor_pct` hard-cuts
+    pixels below that percentile of strength to background.
+
+    Returns (rgb, idx, valid)."""
     z = _stack_zscore(maps)
     valid = np.isfinite(z).any(axis=0)
     zf = np.where(np.isfinite(z), z, -np.inf)
     idx = np.argmax(zf, axis=0)
     Ny, Nx = idx.shape
+    # strength = actual dominant metric value (not z-scored) → brightness
+    raw = np.stack(maps, axis=0).astype(np.float32)
+    rawf = np.where(np.isfinite(raw), raw, -np.inf)
+    strength = np.max(rawf, axis=0)
+    sv = np.where(valid, strength, np.nan)
+    finite = sv[np.isfinite(sv)]
+    if finite.size:
+        lo = (np.percentile(finite, floor_pct)
+              if floor_pct > 0 else float(np.nanmin(finite)))
+        hi = float(np.percentile(finite, 99))
+    else:
+        lo, hi = 0.0, 1.0
+    rng = max(hi - lo, 1e-9)
+    bright = np.clip((sv - lo) / rng, 0.0, 1.0)
+    bright = 0.25 + 0.75 * bright           # keep colors visible, not black
+    bg = (~valid) | (~np.isfinite(sv)) | (sv < lo)
     rgb = np.zeros((Ny, Nx, 3), np.float32)
     for w, c in enumerate(colors):
-        rgb[(idx == w) & valid] = c[:3]
-    rgb[~valid] = 0.0
+        sel = (idx == w) & ~bg
+        for k in range(3):
+            rgb[..., k][sel] = c[k] * bright[sel]
+    rgb[bg] = 0.12                          # dark-grey background
     return rgb, idx, valid
 
 
@@ -375,6 +407,12 @@ class CrystallinityPanel(ctk.CTkFrame):
     def _blur_sigma_val(self) -> float:
         try:
             return max(float(self._blur_sigma.get()), 0.0)
+        except Exception:
+            return 0.0
+
+    def _peak_k_val(self) -> float:
+        try:
+            return max(float(self._peak_k.get()), 0.0)
         except Exception:
             return 0.0
 
@@ -581,6 +619,17 @@ class CrystallinityPanel(ctk.CTkFrame):
             variable=self._baseline_method,
             command=lambda _v: self._recompute_test()
             ).pack(side="left", padx=2)
+        # Significance threshold: keep only residual > k×noise so the
+        # baseline noise-floor doesn't read as crystallinity (amorphous
+        # → ~0).  0 = off.
+        pk_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        pk_row.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(pk_row, text="peak thresh (kσ):", width=120,
+                       anchor="w").pack(side="left")
+        self._peak_k = ctk.DoubleVar(value=0.0)
+        epk = ctk.CTkEntry(pk_row, textvariable=self._peak_k, width=56)
+        epk.pack(side="left", padx=2)
+        epk.bind("<Return>", lambda _e: self._recompute_test())
         metric_row = ctk.CTkFrame(sidebar, fg_color="transparent")
         metric_row.pack(fill="x", padx=10, pady=2)
         ctk.CTkLabel(metric_row, text="map metric:", width=78,
@@ -645,6 +694,13 @@ class CrystallinityPanel(ctk.CTkFrame):
               "from r_min to the detector edge.  For EACH window: both maps "
               "(peak/halo + variance), per-dr 1D fits, dr overlays, and an "
               "intrinsic quality score — all saved to one folder.")
+        of_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        of_row.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(of_row, text="overlay floor %:", width=120,
+                       anchor="w").pack(side="left")
+        self._overlay_floor = ctk.DoubleVar(value=0.0)
+        ctk.CTkEntry(of_row, textvariable=self._overlay_floor,
+                       width=56).pack(side="left", padx=2)
         ctk.CTkButton(sidebar, text="Report all ▶",
                        width=240,
                        fg_color=("#7A4DA0", "#5A3A80"),
@@ -961,7 +1017,8 @@ class CrystallinityPanel(ctk.CTkFrame):
                 self._work_pattern, r_min_px, r_max_px,
                 center=self._test_center, snip_window=snipw,
                 beam_px=self._beam_radius_px(),
-                baseline=self._baseline_method.get())
+                baseline=self._baseline_method.get(),
+                peak_k=self._peak_k_val())
         except Exception as e:
             self._test_status.configure(text=f"err: {e!r}"); return
         if res is None:
@@ -1146,6 +1203,7 @@ class CrystallinityPanel(ctk.CTkFrame):
                 snipw = 14
             method = self._baseline_method.get()
             bsig = self._blur_sigma_val()
+            pk = self._peak_k_val()
             lo0 = max(0, int(round(r_min_px)))   # post-beam truncation
             beam = self._beam_radius_px()
             ratio_map = np.full((Ny, Nx), np.nan, dtype=np.float32)
@@ -1174,7 +1232,8 @@ class CrystallinityPanel(ctk.CTkFrame):
                             (m_all[lo0:] * cnt[lo0:]).sum())
                         res = _crystallinity_window(
                             m_all, v_all, int(round(r_min_px)),
-                            int(round(r_max_px)), snipw, baseline=method)
+                            int(round(r_max_px)), snipw, baseline=method,
+                            peak_k=pk)
                         if res is not None:
                             ratio_map[rx, ry] = res["ratio"]
                             var_map[rx, ry] = res["var_index"]
@@ -1428,6 +1487,11 @@ class CrystallinityPanel(ctk.CTkFrame):
                 snipw = 14
             method = self._baseline_method.get()
             bsig = self._blur_sigma_val()
+            pk = self._peak_k_val()
+            try:
+                floor_pct = max(float(self._overlay_floor.get()), 0.0)
+            except Exception:
+                floor_pct = 0.0
             _gf = None
             if bsig > 0:
                 from scipy.ndimage import gaussian_filter as _gf
@@ -1476,7 +1540,8 @@ class CrystallinityPanel(ctk.CTkFrame):
                         (m_all[lo0:] * cnt[lo0:]).sum())
                     for w, (a, b) in enumerate(windows):
                         res = _crystallinity_window(m_all, v_all, a, b,
-                                                     snipw, baseline=method)
+                                                     snipw, baseline=method,
+                                                     peak_k=pk)
                         if res is not None:
                             ratio_maps[w][rx, ry] = res["ratio"]
                             var_maps[w][rx, ry] = res["var_index"]
@@ -1534,6 +1599,7 @@ class CrystallinityPanel(ctk.CTkFrame):
                              dr=dr, dr_bins=step, r_min=float(self._r_min.get()),
                              beam_mask_px=beam,
                              baseline=method, blur_sigma=bsig,
+                             peak_k=pk, overlay_floor_pct=floor_pct,
                              stride=stride, snip_window=snipw,
                              vac_pctile=vac_pct_val,
                              vac_cutoff=(vac_cut if vac_cut is not None
@@ -1602,7 +1668,8 @@ class CrystallinityPanel(ctk.CTkFrame):
                 for w in range(nW)]
             for name, maps in (("peakhalo", ratio_maps),
                                 ("azimvar", var_maps)):
-                rgb, idx, valid = _overlay_argmax_rgb(maps, colors)
+                rgb, idx, valid = _overlay_argmax_rgb(maps, colors,
+                                                       floor_pct=floor_pct)
                 np.save(os.path.join(folder,
                           f"overlay_{name}_dominant_idx.npy"), idx)
                 for style, rgbimg in (("dominant", rgb),
@@ -1656,9 +1723,12 @@ class CrystallinityPanel(ctk.CTkFrame):
                 ax.semilogy(qq, np.clip(mw, 1e-6, None), color="#1f77b4",
                               lw=1.3, label="dataset-mean I(q)")
                 ax.semilogy(qq, np.clip(halo, 1e-6, None), color="#888",
-                              lw=1.2, ls="--", label="halo (SNIP)")
+                              lw=1.2, ls="--", label=f"halo ({method})")
+                where = (mw > halo)
+                if pk and pk > 0:    # only count residual above k×noise
+                    where = where & ((mw - halo) > pk * noise)
                 ax.fill_between(qq, np.clip(halo, 1e-6, None),
-                                  np.clip(mw, 1e-6, None), where=(mw > halo),
+                                  np.clip(mw, 1e-6, None), where=where,
                                   color="#e0144c", alpha=0.25, label="peak")
                 ax.set_xlabel("q (1/Å)"); ax.set_ylabel("I(q) (log)")
                 ax.set_title(f"dr w{w}  q={qa:.3f}–{qb:.3f}   "
