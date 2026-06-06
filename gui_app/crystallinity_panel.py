@@ -928,13 +928,18 @@ class CrystallinityPanel(ctk.CTkFrame):
         for sl in getattr(self, "_r_sliders", []):
             try: sl.configure(to=q_max)
             except Exception: pass
-        # If dr is tiny relative to the new range, open it up so the user
-        # sees a sensible default window.
-        try:
-            if float(self._dr_var.get()) < q_max * 0.2:
-                self._dr_var.set(round(q_max * 0.5, 4))
-        except Exception:
-            pass
+        # Suggest a sensible default window ONLY the first time we see a
+        # given sample — never clobber the user's r_min / dr when they
+        # just click to a different frame of the SAME dataset.
+        ph = self._posthoc()
+        sample = ph.sample if ph is not None else None
+        if getattr(self, "_rwin_inited_sample", None) != sample:
+            self._rwin_inited_sample = sample
+            try:
+                if float(self._dr_var.get()) < q_max * 0.2:
+                    self._dr_var.set(round(q_max * 0.5, 4))
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     def _recompute_test(self):
