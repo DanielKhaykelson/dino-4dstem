@@ -776,6 +776,55 @@ def acom_multiphase_full_dataset(crystals_by_name,
     )
 
 
+def match_orientations_progress(crystal, bv, *, min_peaks: int = 3,
+                                 num_matches: int = 1,
+                                 progress_cb=None, stop_event=None):
+    """Like ``crystal.match_orientations(bv)`` but loops per scan position
+    so a GUI ``progress_cb(done, total)`` can be called (py4DSTEM's own
+    call only offers a console tqdm).  Sets ``crystal.orientation_map``
+    just like the built-in.  Falls back to the built-in call if this
+    py4DSTEM version's per-position API differs."""
+    try:
+        from py4DSTEM.process.diffraction.utils import OrientationMap
+        Ny, Nx = int(bv.shape[0]), int(bv.shape[1])
+        try:
+            ellipse = bool(bv.calstate["ellipse"])
+            rotate = bool(bv.calstate["rotate"])
+        except Exception:
+            ellipse, rotate = False, False
+        omap = OrientationMap(num_x=Ny, num_y=Nx,
+                               num_matches=int(num_matches))
+        total = Ny * Nx
+        done = 0
+        for rx in range(Ny):
+            for ry in range(Nx):
+                done += 1
+                if stop_event is not None and stop_event.is_set():
+                    raise RuntimeError("stopped by user")
+                try:
+                    vectors = bv.get_vectors(
+                        scan_x=rx, scan_y=ry, center=True,
+                        ellipse=ellipse, pixel=True, rotate=rotate)
+                    orient = crystal.match_single_pattern(
+                        bragg_peaks=vectors,
+                        num_matches_return=int(num_matches),
+                        min_number_peaks=int(min_peaks),
+                        plot_corr=False, verbose=False)
+                    omap.set_orientation(orient, rx, ry)
+                except Exception:
+                    pass    # degenerate/failed position → leave zeros
+                if progress_cb is not None and (done % 64 == 0):
+                    try: progress_cb(done, total)
+                    except Exception: pass
+        crystal.orientation_map = omap
+        return omap
+    except Exception as e:
+        print(f"[acom_core] per-position match unavailable ({e!r}); "
+               f"using built-in match_orientations.", flush=True)
+        return crystal.match_orientations(
+            bv, progress_bar=True, min_number_peaks=int(min_peaks))
+
+
 def _match_safe(crystal, bv, N, min_peaks: int = 3, progress_bar: bool = False):
     """Run match_orientations, returning (corr[N], rmat[N,3,3]).
 

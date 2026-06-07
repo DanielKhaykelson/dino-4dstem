@@ -2073,17 +2073,20 @@ class ACOMTabPanel(ctk.CTkFrame):
                     bv = build_bragg_vectors(
                         peaks_all, centers=centers_all,
                         inv_ang_per_pixel=inv_a, Rshape=(Ny, Nx))
-                    self._set_status(
-                        "matching orientations…  (live tqdm progress + "
-                        "ETA in the console)")
-                    # progress_bar=True → py4DSTEM prints a tqdm bar
-                    # (N/M PointList + ETA) to the console.  match_
-                    # orientations is one blocking call, so this is the
-                    # only progress signal during the match.
-                    cr.match_orientations(
-                        bv, progress_bar=True,
-                        min_number_peaks=self._min_peaks_val())
-                    omap = cr.orientation_map
+                    # Per-position match with a GUI progress + ETA in the
+                    # status line (no terminal needed).  Honours Stop.
+                    from gui_app.acom_core import match_orientations_progress
+                    tm0 = time.time()
+
+                    def _mprog(d, t):
+                        dt = time.time() - tm0
+                        eta = dt * (t - d) / max(d, 1)
+                        self.after(0, lambda: self._set_status(
+                            f"matching {d}/{t}  ({dt:.0f}s, ETA "
+                            f"{eta:.0f}s)"))
+                    omap = match_orientations_progress(
+                        cr, bv, min_peaks=self._min_peaks_val(),
+                        progress_cb=_mprog, stop_event=self._stop_event)
                     scan_shape = (Ny, Nx)
                     dt = time.time() - t0
                     self.after(0, lambda:
