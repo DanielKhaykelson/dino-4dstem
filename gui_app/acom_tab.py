@@ -475,6 +475,13 @@ class ACOMTabPanel(ctk.CTkFrame):
                        fg_color=("#A23BB0", "#7A2680"),
                        command=lambda: self._run_batch("mp_full")
                        ).pack(side="left", padx=2)
+        # Single-phase full saves stand-alone publication PNGs (out-of-
+        # plane orientation, correlation, zone-axis) and opens each in its
+        # own window.  In-plane orientation only when this is ticked.
+        self._show_inplane = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(sidebar, text="also show in-plane orientation",
+                          variable=self._show_inplane
+                          ).pack(anchor="w", padx=10, pady=(0, 2))
         # Stop / kill the in-progress batch run.  Sets the
         # threading.Event the worker polls between major steps.
         ctk.CTkButton(sidebar, text="■  STOP batch run",
@@ -2105,9 +2112,10 @@ class ACOMTabPanel(ctk.CTkFrame):
                         progress_cb=_mprog, stop_event=self._stop_event)
                     scan_shape = (Ny, Nx)
                     dt = time.time() - t0
-                    self.after(0, lambda:
-                        self._render_classical_orientation_strain(
-                            cr, omap, bv, scan_shape, stride, dt))
+                    pname = next(iter(crystals.keys()))
+                    self.after(0, lambda p=pname:
+                        self._render_singlephase_full(
+                            cr, omap, bv, scan_shape, stride, dt, p))
                 else:
                     # Multi-phase full: detect (cached) → match each
                     # phase → combine into phase / zone-axis / corr,
@@ -2794,6 +2802,232 @@ class ACOMTabPanel(ctk.CTkFrame):
         self._fig.tight_layout(rect=[0, 0, 1, 0.96])
         # Stash on the panel so the user can save later.
         self._last_full_cp = cp
+        self._canvas.draw_idle()
+
+    def _acom_maps_dir(self):
+        ph = self._posthoc()
+        run = getattr(ph, "outdir", None) if ph else None
+        sample = self._active_sample()
+        base = (os.path.join(run, "acom", "maps") if run
+                  else os.path.join(
+                      os.path.dirname(SAMPLES[sample]["path"]),
+                      "_acom_maps"))
+        os.makedirs(base, exist_ok=True)
+        return base
+
+    def _render_singlephase_full(self, crystal, omap, bv, scan_shape,
+                                  stride, elapsed_s, phase_name):
+        """Single-phase full ACOM, paper-ready:
+          * stand-alone PNGs (out-of-plane orientation [+legend],
+            correlation, zone-axis; in-plane only if the checkbox is on),
+            each opened in its own window;
+          * populate the overlay data so 'Overlay' works for single-phase.
+        """
+        import matplotlib.pyplot as plt
+        from matplotlib.figure import Figure
+        from matplotlib.colors import to_rgb
+        from gui_app.acom_core import zone_axis_from_matrix
+        Ny, Nx = scan_shape
+        base = self._acom_maps_dir()
+
+        # --- corr + best rotation matrix per pixel ---
+        cv = np.asarray(getattr(omap, "corr", None))
+        win_corr = ((cv[..., 0] if cv.ndim == 3 else cv).astype(np.float32)
+                     if cv is not None and cv.size
+                     else np.full((Ny, Nx), np.nan, np.float32))
+        mv = np.asarray(getattr(omap, "matrix", None))
+        win_rmat = np.full((Ny, Nx, 3, 3), np.nan, np.float32)
+        if mv is not None and mv.size:
+            win_rmat = (mv[..., 0, :, :] if mv.ndim == 5 else mv
+                         ).astype(np.float32)
+
+        # matched mask = corr above a robust floor (Otsu-ish: median of
+        # finite corr); positions below are "not indexed".
+        finite = win_corr[np.isfinite(win_corr)]
+        thr = float(np.nanmedian(finite)) if finite.size else 0.0
+        matched = np.isfinite(win_corr) & (win_corr > max(thr, 1e-6))
+
+        # --- overlay data (single phase) so _do_overlay works ---
+        pcol = to_rgb(self._phase_palette(1)[0])
+        phase_rgb = np.full((Ny, Nx, 3), 0.12, np.float32)
+        phase_rgb[matched] = pcol
+        za_rgb = np.zeros((Ny, Nx, 3), np.float32)
+        za_color, za_count = {}, {}
+        cmap20 = plt.get_cmap("tab20")
+        for rx in range(Ny):
+            for ry in range(Nx):
+                if not matched[rx, ry]:
+                    continue
+                R = win_rmat[rx, ry]
+                if not np.isfinite(R).all():
+                    continue
+                za, _ = zone_axis_from_matrix(R)
+                if za not in za_color:
+                    za_color[za] = cmap20(len(za_color) % 20)[:3]
+                    za_count[za] = 0
+                za_count[za] += 1
+                za_rgb[rx, ry] = za_color[za]
+        phase_id = np.where(matched, 0, -1).astype(int)
+        self._mpfull = dict(
+            scan_shape=(Ny, Nx), phase_rgb=phase_rgb, za_rgb=za_rgb,
+            win_corr=win_corr, phase_id=phase_id, names=[phase_name],
+            za_color={(0, k): v for k, v in za_color.items()},
+            za_count={(0, k): v for k, v in za_count.items()},
+            palette=self._phase_palette(1))
+
+        # --- IPF orientation RGB (in-plane / out-of-plane) + legend ---
+        rgb_ip = rgb_op = None
+        try:
+            res = crystal.plot_orientation_maps(
+                orientation_map=omap, orientation_ind=0,
+                returnfig=True, progress_bar=False)
+            fig_pd = None
+            if isinstance(res, (tuple, list)):
+                for el in res:
+                    if hasattr(el, "savefig"):
+                        fig_pd = el
+                    elif (isinstance(el, np.ndarray)
+                            and getattr(el, "ndim", 0) == 4):
+                        rgb_ip = np.clip(el[:, :, :, 0], 0, 1)
+                        rgb_op = np.clip(el[:, :, :, 1], 0, 1)
+            if fig_pd is not None:
+                try:    # crop just the IPF colour-legend axis → standalone
+                    fig_pd.canvas.draw()
+                    leg_ax = fig_pd.axes[-1]
+                    ext = (leg_ax.get_tightbbox(fig_pd.canvas.get_renderer())
+                            .transformed(fig_pd.dpi_scale_trans.inverted()))
+                    fig_pd.savefig(
+                        os.path.join(base, "orientation_legend.png"),
+                        dpi=300, bbox_inches=ext.expanded(1.25, 1.25),
+                        facecolor="white")
+                except Exception as e:
+                    print(f"[acom] legend save failed: {e!r}", flush=True)
+                plt.close(fig_pd)
+        except Exception as e:
+            print(f"[acom] plot_orientation_maps failed: {e!r}", flush=True)
+
+        # --- stand-alone publication images + popups ---
+        def _save_rgb(rgb, fname, title, sb_color="white"):
+            fig = Figure(figsize=(5.6, 5.6), dpi=300, facecolor="white")
+            ax = fig.add_subplot(111)
+            ax.imshow(rgb, interpolation="nearest", aspect="equal")
+            ax.set_title(title, fontsize=13)
+            ax.set_xticks([]); ax.set_yticks([])
+            self._add_scalebar(ax, Ny)
+            fig.savefig(os.path.join(base, fname), dpi=300,
+                          bbox_inches="tight", facecolor="white")
+            return rgb, title
+
+        def _save_scalar(data, fname, title, cmap="viridis"):
+            fig = Figure(figsize=(6.0, 5.6), dpi=300, facecolor="white")
+            ax = fig.add_subplot(111)
+            im = ax.imshow(data, cmap=cmap, interpolation="nearest",
+                            aspect="equal")
+            ax.set_title(title, fontsize=13)
+            ax.set_xticks([]); ax.set_yticks([])
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+            fig.savefig(os.path.join(base, fname), dpi=300,
+                          bbox_inches="tight", facecolor="white")
+            return data, title, cmap
+
+        popups = []   # (kind, payload)
+        if rgb_op is not None:
+            popups.append(("rgb", _save_rgb(
+                rgb_op, "orientation_out_of_plane.png",
+                "Out-of-plane orientation")))
+        if rgb_ip is not None and bool(self._show_inplane.get()):
+            popups.append(("rgb", _save_rgb(
+                rgb_ip, "orientation_in_plane.png",
+                "In-plane orientation")))
+        popups.append(("scalar", _save_scalar(
+            win_corr, "correlation.png", "Correlation")))
+        popups.append(("rgb", _save_rgb(
+            za_rgb, "zone_axis.png", "Zone-axis map")))
+
+        # --- strain tensor (stand-alone, if py4DSTEM SVD succeeds) ---
+        def _save_diverging(data, mask, fname, title, label, pct=False):
+            d = np.full_like(data, np.nan, dtype=float)
+            d[mask] = data[mask] - np.nanmedian(data[mask])
+            if pct:
+                d = d * 100.0
+            fin = d[np.isfinite(d)]
+            vmax = max(float(np.percentile(np.abs(fin), 98))
+                        if fin.size else 1.0, 1e-3)
+            fig = Figure(figsize=(6.0, 5.6), dpi=300, facecolor="white")
+            ax = fig.add_subplot(111)
+            im = ax.imshow(d, cmap="RdBu_r", vmin=-vmax, vmax=vmax,
+                            interpolation="nearest", aspect="equal")
+            ax.set_title(title, fontsize=13)
+            ax.set_xticks([]); ax.set_yticks([])
+            cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+            cb.set_label(label, fontsize=9)
+            fig.savefig(os.path.join(base, fname), dpi=300,
+                          bbox_inches="tight", facecolor="white")
+            return d, title, -vmax, vmax
+        try:
+            strain = np.asarray(crystal.calculate_strain(
+                bv, omap, min_num_peaks=3, rotation_range=np.pi / 2),
+                dtype=float)
+            if strain.shape[0] >= 5:
+                exx, eyy, exy = strain[0], strain[1], strain[2]
+                rot = np.degrees(strain[3]); cmask = strain[4]
+                smask = np.isfinite(rot) & (cmask >= 0.3)
+                if not smask.any():
+                    smask = np.isfinite(rot)
+                for data, fn, ti, lb, pc in (
+                        (exx, "strain_exx.png", "ε_xx", "strain (%)", True),
+                        (eyy, "strain_eyy.png", "ε_yy", "strain (%)", True),
+                        (exy, "strain_exy.png", "ε_xy", "shear (%)", True),
+                        ((rot + 180) % 360 - 180, "rotation_theta.png",
+                         "rotation θ", "Δθ (deg)", False)):
+                    dd, tt, lo, hi = _save_diverging(
+                        data, smask, fn, ti, lb, pct=pc)
+                    popups.append(("div", (dd, tt, lo, hi)))
+        except Exception as e:
+            print(f"[acom] strain unavailable ({e!r}).", flush=True)
+
+        # open each stand-alone image in its own window (enlargeable)
+        for kind, payload in popups:
+            fig = Figure(figsize=(7.5, 7.0), dpi=120, facecolor="white")
+            ax = fig.add_subplot(111)
+            if kind == "rgb":
+                rgb, title = payload
+                ax.imshow(rgb, interpolation="nearest", aspect="equal")
+            elif kind == "div":
+                data, title, lo, hi = payload
+                im = ax.imshow(data, cmap="RdBu_r", vmin=lo, vmax=hi,
+                                interpolation="nearest", aspect="equal")
+                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+            else:
+                data, title, cmap = payload
+                im = ax.imshow(data, cmap=cmap, interpolation="nearest",
+                                aspect="equal")
+                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+            ax.set_title(title, fontsize=12)
+            ax.set_xticks([]); ax.set_yticks([])
+            self._add_scalebar(ax, Ny)
+            fig.tight_layout()
+            self._popup_figure(fig, title)
+
+        # --- main canvas: clean out-of-plane + correlation summary ---
+        self._fig.clf()
+        ax1 = self._fig.add_subplot(1, 2, 1)
+        if rgb_op is not None:
+            ax1.imshow(rgb_op, interpolation="nearest", aspect="equal")
+        ax1.set_title("Out-of-plane orientation", fontsize=11)
+        ax1.set_xticks([]); ax1.set_yticks([])
+        ax2 = self._fig.add_subplot(1, 2, 2)
+        im = ax2.imshow(win_corr, cmap="viridis", interpolation="nearest",
+                          aspect="equal")
+        ax2.set_title("Correlation", fontsize=11)
+        ax2.set_xticks([]); ax2.set_yticks([])
+        self._fig.colorbar(im, ax=ax2, fraction=0.046, pad=0.02)
+        self._fig.suptitle(
+            f"ACOM single-phase full — {phase_name}  "
+            f"(stride={stride}, {elapsed_s:.0f}s).  Stand-alone PNGs → "
+            f"{os.path.basename(base)}/  ·  'Overlay' now enabled.",
+            fontsize=10)
+        self._fig.tight_layout(rect=[0, 0, 1, 0.94])
         self._canvas.draw_idle()
 
     def _render_classical_orientation_strain(self, crystal, omap, bv,
