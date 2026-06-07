@@ -2073,9 +2073,15 @@ class ACOMTabPanel(ctk.CTkFrame):
                     bv = build_bragg_vectors(
                         peaks_all, centers=centers_all,
                         inv_ang_per_pixel=inv_a, Rshape=(Ny, Nx))
-                    self._set_status("matching orientations…")
+                    self._set_status(
+                        "matching orientations…  (live tqdm progress + "
+                        "ETA in the console)")
+                    # progress_bar=True → py4DSTEM prints a tqdm bar
+                    # (N/M PointList + ETA) to the console.  match_
+                    # orientations is one blocking call, so this is the
+                    # only progress signal during the match.
                     cr.match_orientations(
-                        bv, progress_bar=False,
+                        bv, progress_bar=True,
                         min_number_peaks=self._min_peaks_val())
                     omap = cr.orientation_map
                     scan_shape = (Ny, Nx)
@@ -2383,7 +2389,8 @@ class ACOMTabPanel(ctk.CTkFrame):
             if progress_cb is not None:
                 progress_cb(0, 1, f"match[{nm}]")
             cvec, mvec = _match_safe(crystals[nm], bv, N,
-                                      min_peaks=int(min_peaks))
+                                      min_peaks=int(min_peaks),
+                                      progress_bar=True)
             corr_per[pi] = cvec
             rmat_per[pi] = mvec
         # Combine.

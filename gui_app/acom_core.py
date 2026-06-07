@@ -776,7 +776,7 @@ def acom_multiphase_full_dataset(crystals_by_name,
     )
 
 
-def _match_safe(crystal, bv, N, min_peaks: int = 3):
+def _match_safe(crystal, bv, N, min_peaks: int = 3, progress_bar: bool = False):
     """Run match_orientations, returning (corr[N], rmat[N,3,3]).
 
     `min_peaks` (= match_single_pattern's min_number_peaks) skips the
@@ -793,7 +793,7 @@ def _match_safe(crystal, bv, N, min_peaks: int = 3):
     corr = np.full(N, -1.0, dtype=np.float32)
     rmat = np.full((N, 3, 3), np.nan, dtype=np.float32)
     try:
-        omap = crystal.match_orientations(bv, progress_bar=False,
+        omap = crystal.match_orientations(bv, progress_bar=bool(progress_bar),
                                             min_number_peaks=int(min_peaks))
         cv = np.asarray(getattr(omap, "corr", None))
         mv = np.asarray(getattr(omap, "matrix", None))
