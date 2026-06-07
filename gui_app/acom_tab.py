@@ -2805,6 +2805,65 @@ class ACOMTabPanel(ctk.CTkFrame):
         self._last_full_cp = cp
         self._canvas.draw_idle()
 
+    @staticmethod
+    def _misori_deg(R1, R2):
+        """Misorientation angle (deg) between two rotation matrices
+        (no crystal-symmetry reduction — fine for grain segmentation)."""
+        c = (float(np.trace(R1 @ R2.T)) - 1.0) * 0.5
+        return float(np.degrees(np.arccos(max(-1.0, min(1.0, c)))))
+
+    def _segment_grains(self, matched, win_rmat, misori_deg=10.0,
+                          min_grain=4):
+        """Flood-fill the indexed region into grains: adjacent indexed
+        pixels join the same grain if their misorientation is below
+        `misori_deg`.  Returns (labels[-1=bg], n_grains)."""
+        from collections import deque
+        Ny, Nx = matched.shape
+        labels = np.full((Ny, Nx), -1, dtype=int)
+        neigh = ((1, 0), (-1, 0), (0, 1), (0, -1))
+        g = 0
+        for sy in range(Ny):
+            for sx in range(Nx):
+                if (not matched[sy, sx] or labels[sy, sx] >= 0
+                        or not np.isfinite(win_rmat[sy, sx]).all()):
+                    continue
+                q = deque([(sy, sx)]); labels[sy, sx] = g
+                while q:
+                    y, x = q.popleft()
+                    Ry = win_rmat[y, x]
+                    for dy, dx in neigh:
+                        ny, nx2 = y + dy, x + dx
+                        if (0 <= ny < Ny and 0 <= nx2 < Nx
+                                and matched[ny, nx2] and labels[ny, nx2] < 0
+                                and np.isfinite(win_rmat[ny, nx2]).all()
+                                and self._misori_deg(Ry, win_rmat[ny, nx2])
+                                    < misori_deg):
+                            labels[ny, nx2] = g; q.append((ny, nx2))
+                g += 1
+        if g == 0:
+            return labels, 0
+        # drop tiny grains, then relabel compactly
+        sizes = np.bincount(labels[labels >= 0].ravel(), minlength=g)
+        small = np.where(sizes < int(min_grain))[0]
+        if small.size:
+            labels[np.isin(labels, small)] = -1
+        uniq = [u for u in np.unique(labels) if u >= 0]
+        out = np.full_like(labels, -1)
+        for i, u in enumerate(uniq):
+            out[labels == u] = i
+        return out, len(uniq)
+
+    def _grain_rgb(self, labels, n):
+        """Colour each grain a distinct (reproducible) colour; bg black."""
+        Ny, Nx = labels.shape
+        rgb = np.zeros((Ny, Nx, 3), np.float32)
+        if n > 0:
+            rng = np.random.default_rng(0)
+            cols = rng.random((n, 3)) * 0.65 + 0.30   # avoid too-dark
+            for i in range(n):
+                rgb[labels == i] = cols[i]
+        return rgb
+
     def _acom_maps_dir(self):
         ph = self._posthoc()
         run = getattr(ph, "outdir", None) if ph else None
@@ -2869,10 +2928,13 @@ class ACOMTabPanel(ctk.CTkFrame):
                 za_count[za] += 1
                 za_rgb[rx, ry] = za_color[za]
         phase_id = np.where(matched, 0, -1).astype(int)
-        # Binary "ACOM indexed / found peaks" footprint (no orientation
-        # value) — for side-by-side / overlay with the DINO class map.
-        mask_rgb = np.zeros((Ny, Nx, 3), np.float32)
-        mask_rgb[matched] = (1.0, 1.0, 1.0)        # white = indexed
+        # GRAIN map: segment the indexed region into grains by
+        # orientation (adjacent pixels < misori join), colour each grain a
+        # distinct colour.  Shows grain SHAPES + positions, NOT the
+        # orientation value — for side-by-side / overlay with DINO.
+        grain_labels, n_grains = self._segment_grains(
+            matched, win_rmat, misori_deg=10.0, min_grain=4)
+        mask_rgb = self._grain_rgb(grain_labels, n_grains)
         self._mpfull = dict(
             scan_shape=(Ny, Nx), phase_rgb=phase_rgb, za_rgb=za_rgb,
             win_corr=win_corr, phase_id=phase_id, names=[phase_name],
@@ -2949,11 +3011,11 @@ class ACOMTabPanel(ctk.CTkFrame):
             win_corr, "correlation.png", "Correlation")))
         popups.append(("rgb", _save_rgb(
             za_rgb, "zone_axis.png", "Zone-axis map")))
-        # binary indexed-footprint (white = ACOM found peaks & indexed)
-        nidx = int(matched.sum())
+        # grain map — grain shapes/positions coloured by grain id
         popups.append(("rgb", _save_rgb(
-            mask_rgb, "acom_indexed_mask.png",
-            f"ACOM indexed mask  ({nidx} px)")))
+            mask_rgb, "acom_grain_map.png",
+            f"ACOM grain map  ({n_grains} grains, "
+            f"{int(matched.sum())} px indexed)")))
 
         # --- strain tensor (stand-alone, if py4DSTEM SVD succeeds) ---
         def _save_diverging(data, mask, fname, title, label, pct=False):
