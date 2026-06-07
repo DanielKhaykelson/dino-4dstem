@@ -227,6 +227,16 @@ def prepare_crystal(crystal,
             crystal.orientation_plan(zone_axis_range=rng, **kw)
         else:
             crystal.orientation_plan(corners_zone_axes=rng, **kw)
+    # If the plan was built on the GPU, finish all device work in THIS
+    # thread before returning — the plan is built in one worker thread but
+    # matched in another, and cupy streams are per-thread (an unsynced
+    # H2D copy could otherwise race / stall the match).
+    if use_cuda:
+        try:
+            import cupy
+            cupy.cuda.Device().synchronize()
+        except Exception:
+            pass
     return crystal
 
 

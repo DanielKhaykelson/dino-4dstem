@@ -1130,10 +1130,26 @@ class ACOMTabPanel(ctk.CTkFrame):
                             f"{n}: {e}"))
             self.after(0, self._refresh_phase_listbox)
             dt = time.time() - t0
-            self.after(0, lambda:
+            # Report the orientation-LIBRARY size — the #1 driver of match
+            # time.  A huge plan ('full'/fine Δ) makes the full-dataset
+            # match look "stuck" (every pixel correlates this many zones).
+            sizes = []
+            for nm, cr in self._phase_crystals.items():
+                nz = int(getattr(cr, "orientation_num_zones", 0) or 0)
+                ni = int(getattr(cr, "orientation_in_plane_steps", 0) or 0)
+                sizes.append((nm, nz, ni, nz * ni))
+            big = max((s[3] for s in sizes), default=0)
+            sz_txt = ("  ".join(f"{nm}:{nz}×{ni}" for nm, nz, ni, _ in sizes)
+                       if sizes else "")
+            warn = ("  ⚠ very large — matching will be slow; use auto/"
+                     "corners or larger Δ angles" if big > 4000 else "")
+            print(f"[ACOM] orientation library: {sz_txt}  "
+                   f"(zones × in-plane).  largest = {big} templates/pixel.",
+                   flush=True)
+            self.after(0, lambda b=big, t=sz_txt, w=warn:
                 self._cif_status.configure(
                     text=f"{len(self._phase_crystals)} crystal(s) ready "
-                          f"({dt:.0f}s).  Refresh 1D radial."))
+                          f"({dt:.0f}s).  plan: {t} (zones×in-plane){w}"))
             self.after(0, self._redraw_1d_with_rings)
             # Crystal-build doesn't fire a session change but the
             # 'crystal' StatusDot reads from session_change.  Push a
