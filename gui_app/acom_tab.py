@@ -2059,6 +2059,8 @@ class ACOMTabPanel(ctk.CTkFrame):
             )
             thr = float(self._mp_threshold.get())
             mar = float(self._mp_margin.get())
+            # Persist the ACOM params for this run (reproducibility).
+            self._save_acom_config(mode, detect_kw, thr, mar)
             crystals = dict(self._phase_crystals)
             t0 = time.time()
             # Inference-derived arrays are only needed for class/grain
@@ -2804,6 +2806,36 @@ class ACOMTabPanel(ctk.CTkFrame):
         # Stash on the panel so the user can save later.
         self._last_full_cp = cp
         self._canvas.draw_idle()
+
+    def _save_acom_config(self, mode, detect_kw, thr, mar):
+        """Persist the ACOM parameters used for this run to
+        <run>/acom/acom_config.json so a run is reproducible."""
+        try:
+            import json
+            from datetime import datetime
+            base = os.path.dirname(self._acom_maps_dir())   # <run>/acom
+            os.makedirs(base, exist_ok=True)
+            pk = self._plan_kwargs()
+            cfg = dict(
+                saved_at=datetime.now().isoformat(timespec="seconds"),
+                mode=mode, sample=self._active_sample(),
+                k_max=float(self._kmax.get()),
+                plan_mode=pk["plan_mode"],
+                angle_step_zone_axis=pk["angle_step_zone_axis"],
+                angle_step_in_plane=pk["angle_step_in_plane"],
+                fiber_axis=pk["fiber_axis"], use_cuda=pk["use_cuda"],
+                inv_ang_per_px=float(self._eff_inv_ang()),
+                detect_kw=detect_kw,
+                corr_threshold=float(thr), margin=float(mar),
+                min_peaks=self._min_peaks_val(),
+                full_stride=int(self._full_stride.get()),
+            )
+            with open(os.path.join(base, "acom_config.json"), "w") as f:
+                json.dump(cfg, f, indent=2)
+            print(f"[ACOM] config saved -> {base}\\acom_config.json",
+                  flush=True)
+        except Exception as e:
+            print(f"[ACOM] config save failed: {e!r}", flush=True)
 
     @staticmethod
     def _misori_deg(R1, R2):
