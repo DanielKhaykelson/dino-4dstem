@@ -102,7 +102,7 @@ class _ClusterMapViewer:
         pal = ListedColormap([cmap(i % cmap.N) for i in range(max(K, 1))])
         self.ax.clear()
         im = self.ax.imshow(grid, cmap=pal, vmin=-0.5, vmax=K - 0.5,
-                             interpolation="nearest")
+                             interpolation="nearest", aspect="equal")
         self.ax.set_title(
             f"{self.sample}   {m}   K={K}\n"
             f"left=pattern   right=cluster-grain   shift+right=stack",
@@ -309,10 +309,10 @@ class _ClusterMapViewer:
             ax_m = fig.add_subplot(n, 2, 2 * r + 1)
             ax_p = fig.add_subplot(n, 2, 2 * r + 2)
             ax_m.imshow(grid, cmap=pal, vmin=-0.5, vmax=K - 0.5,
-                        interpolation="nearest")
+                        interpolation="nearest", aspect="equal")
             ax_m.imshow(np.where(rec["mask"], 1.0, np.nan),
                         cmap=ListedColormap(["black"]), alpha=0.9,
-                        interpolation="nearest")
+                        interpolation="nearest", aspect="equal")
             ax_m.set_title(f"c{rec['cls']} @ (y={rec['y']}, x={rec['x']})  "
                            f"{rec['n']}px", fontsize=9)
             ax_m.set_xticks([]); ax_m.set_yticks([])

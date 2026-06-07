@@ -1021,7 +1021,7 @@ class NMFPanel(ctk.CTkFrame):
                 else lbl.reshape(1, -1)
             im = ax.imshow(grid, cmap=palette,
                              vmin=-0.5, vmax=n_classes - 0.5,
-                             interpolation="nearest")
+                             interpolation="nearest", aspect="equal")
             ax.set_title(f"{method}   K={n_classes}", fontsize=10)
             ax.set_axis_off()
             # Integer colorbar like the DINO panel.
@@ -1477,7 +1477,7 @@ class NMFPanel(ctk.CTkFrame):
                 else lbl.reshape(1, -1)
             ax.imshow(grid, cmap=palette,
                        vmin=-0.5, vmax=n_classes - 0.5,
-                       interpolation="nearest")
+                       interpolation="nearest", aspect="equal")
             ax.set_title(f"{method}   K={n_classes}", fontsize=10)
             ax.set_axis_off()
             try:
