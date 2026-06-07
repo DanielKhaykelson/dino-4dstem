@@ -517,7 +517,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                        anchor="w").pack(side="left")
         self._overlay_base = ctk.StringVar(value="phase")
         ctk.CTkOptionMenu(ov_base, variable=self._overlay_base,
-            values=["phase", "zone-axis", "correlation"],
+            values=["phase", "zone-axis", "correlation", "mask"],
             width=130).pack(side="left", padx=2)
         ctk.CTkButton(sidebar, text="Overlay ▶",
                        width=240,
@@ -2681,7 +2681,8 @@ class ACOMTabPanel(ctk.CTkFrame):
             messagebox.showinfo("Overlay not available", reason); return
         base = self._overlay_base.get()
         bg = {"phase": self._mpfull["phase_rgb"],
-                "zone-axis": self._mpfull["za_rgb"]}.get(base, None)
+                "zone-axis": self._mpfull["za_rgb"],
+                "mask": self._mpfull.get("mask_rgb")}.get(base, None)
         Ny, Nx = self._mpfull["scan_shape"]
         import matplotlib.pyplot as plt
         K = int(labels.max()) + 1
@@ -2868,9 +2869,14 @@ class ACOMTabPanel(ctk.CTkFrame):
                 za_count[za] += 1
                 za_rgb[rx, ry] = za_color[za]
         phase_id = np.where(matched, 0, -1).astype(int)
+        # Binary "ACOM indexed / found peaks" footprint (no orientation
+        # value) — for side-by-side / overlay with the DINO class map.
+        mask_rgb = np.zeros((Ny, Nx, 3), np.float32)
+        mask_rgb[matched] = (1.0, 1.0, 1.0)        # white = indexed
         self._mpfull = dict(
             scan_shape=(Ny, Nx), phase_rgb=phase_rgb, za_rgb=za_rgb,
             win_corr=win_corr, phase_id=phase_id, names=[phase_name],
+            mask_rgb=mask_rgb, matched=matched,
             za_color={(0, k): v for k, v in za_color.items()},
             za_count={(0, k): v for k, v in za_count.items()},
             palette=self._phase_palette(1))
@@ -2943,6 +2949,11 @@ class ACOMTabPanel(ctk.CTkFrame):
             win_corr, "correlation.png", "Correlation")))
         popups.append(("rgb", _save_rgb(
             za_rgb, "zone_axis.png", "Zone-axis map")))
+        # binary indexed-footprint (white = ACOM found peaks & indexed)
+        nidx = int(matched.sum())
+        popups.append(("rgb", _save_rgb(
+            mask_rgb, "acom_indexed_mask.png",
+            f"ACOM indexed mask  ({nidx} px)")))
 
         # --- strain tensor (stand-alone, if py4DSTEM SVD succeeds) ---
         def _save_diverging(data, mask, fname, title, label, pct=False):
