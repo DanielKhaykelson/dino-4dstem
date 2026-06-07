@@ -286,65 +286,45 @@ def _stack_zscore(maps):
     return out
 
 
-def _overlay_argmax_rgb(maps, colors, floor_pct=0.0):
-    """Dominant-dr map: each pixel coloured by the window with the
-    strongest z-scored signal, with brightness modulated by the actual
-    signal strength so weak/noise pixels fade to a dark background
-    (kills the 'confetti' in amorphous regions).  `floor_pct` hard-cuts
-    pixels below that percentile of strength to background.
+def _despeckle_mask(mask, min_blob=4):
+    """Drop connected components smaller than `min_blob` pixels — removes
+    the single-pixel 'confetti' so only coherent regions remain."""
+    if min_blob <= 1:
+        return mask
+    try:
+        from scipy.ndimage import label
+    except Exception:
+        return mask
+    lab, n = label(mask)
+    if n == 0:
+        return mask
+    sizes = np.bincount(lab.ravel())
+    keep = mask.copy()
+    for comp in range(1, n + 1):
+        if sizes[comp] < min_blob:
+            keep[lab == comp] = False
+    return keep
 
-    Returns (rgb, idx, valid)."""
+
+def _dominant_dr_rgba(maps, colors, min_blob=4):
+    """Dominant-dr map as an RGBA image with a TRANSPARENT background.
+
+    Pixels that are background/vacuum (NaN in every window after the
+    threshold) → fully transparent.  The rest are coloured by the window
+    with the strongest z-scored signal, at full opacity.  Tiny isolated
+    blobs (< min_blob px) are dropped.  Returns (rgba, idx, kept)."""
     z = _stack_zscore(maps)
-    valid = np.isfinite(z).any(axis=0)
+    valid = np.isfinite(z).any(axis=0)         # has a finite (kept) window
+    kept = _despeckle_mask(valid, min_blob)
     zf = np.where(np.isfinite(z), z, -np.inf)
     idx = np.argmax(zf, axis=0)
     Ny, Nx = idx.shape
-    # strength = actual dominant metric value (not z-scored) → brightness
-    raw = np.stack(maps, axis=0).astype(np.float32)
-    rawf = np.where(np.isfinite(raw), raw, -np.inf)
-    strength = np.max(rawf, axis=0)
-    sv = np.where(valid, strength, np.nan)
-    finite = sv[np.isfinite(sv)]
-    if finite.size:
-        lo = (np.percentile(finite, floor_pct)
-              if floor_pct > 0 else float(np.nanmin(finite)))
-        hi = float(np.percentile(finite, 99))
-    else:
-        lo, hi = 0.0, 1.0
-    rng = max(hi - lo, 1e-9)
-    bright = np.clip((sv - lo) / rng, 0.0, 1.0)
-    bright = 0.25 + 0.75 * bright           # keep colors visible, not black
-    bg = (~valid) | (~np.isfinite(sv)) | (sv < lo)
-    rgb = np.zeros((Ny, Nx, 3), np.float32)
+    rgba = np.zeros((Ny, Nx, 4), np.float32)   # alpha 0 = transparent
     for w, c in enumerate(colors):
-        sel = (idx == w) & ~bg
-        for k in range(3):
-            rgb[..., k][sel] = c[k] * bright[sel]
-    rgb[bg] = 0.12                          # dark-grey background
-    return rgb, idx, valid
-
-
-def _overlay_additive_rgb(maps, colors):
-    """Additive false-colour: each window a hue, summed weighted by its
-    robust-normalized value."""
-    Ny, Nx = maps[0].shape
-    rgb = np.zeros((Ny, Nx, 3), np.float32)
-    for mp, c in zip(maps, colors):
-        a = mp.astype(np.float32)
-        f = np.isfinite(a)
-        if f.sum() == 0:
-            continue
-        lo = np.nanpercentile(a, 2); hi = np.nanpercentile(a, 98)
-        if hi - lo < 1e-12:
-            hi = lo + 1.0
-        n = np.clip((a - lo) / (hi - lo), 0.0, 1.0)
-        n[~f] = 0.0
-        for k in range(3):
-            rgb[..., k] += n * c[k]
-    mx = float(rgb.max())
-    if mx > 0:
-        rgb /= mx
-    return rgb
+        sel = (idx == w) & kept
+        rgba[sel, 0] = c[0]; rgba[sel, 1] = c[1]; rgba[sel, 2] = c[2]
+        rgba[sel, 3] = 1.0
+    return rgba, idx, kept
 
 
 def _spatial_autocorr(mp):
@@ -1290,6 +1270,12 @@ class CrystallinityPanel(ctk.CTkFrame):
             var_maps = [np.full((Ny, Nx), np.nan, np.float32)
                          for _ in range(nW)]
             scatter_map = np.full((Ny, Nx), np.nan, np.float32)
+            haadf_map = np.full((Ny, Nx), np.nan, np.float32)
+            # outer-annulus mask → virtual HAADF (structural reference)
+            _R = min(H, W) / 2.0
+            _yy, _xx = np.indices((H, W))
+            _rr = np.sqrt((_yy - center[0]) ** 2 + (_xx - center[1]) ** 2)
+            ha_mask = (_rr >= 0.40 * _R) & (_rr <= 0.98 * _R)
             sum_m = np.zeros(n_bins, np.float64)   # dataset-mean profile
             n_acc = 0
             t0 = time.time()
@@ -1303,6 +1289,7 @@ class CrystallinityPanel(ctk.CTkFrame):
                         continue
                     if _gf is not None:
                         pat = _gf(pat, sigma=bsig)
+                    haadf_map[rx, ry] = float(pat[ha_mask].sum())
                     # ONE radial pass per pattern; evaluate every window.
                     m_all, v_all, cnt = _radial_mean_var(
                         pat, center, beam)
@@ -1341,6 +1328,10 @@ class CrystallinityPanel(ctk.CTkFrame):
                 ratio_maps = [_fill(a) for a in ratio_maps]
                 var_maps = [_fill(a) for a in var_maps]
                 scatter_map = _fill(scatter_map)
+                haadf_map = _fill(haadf_map)
+            # Make the HAADF available to the picker panel too.
+            self._haadf_img = haadf_map
+            self._vimg_sample = ph.sample
 
             # Background/vacuum mask — PER METRIC.  A pixel's "strength" =
             # its best value across all windows.  Pixels below the metric's
@@ -1432,7 +1423,11 @@ class CrystallinityPanel(ctk.CTkFrame):
                 fig.savefig(os.path.join(folder, f"_montage_{name}.png"),
                               dpi=150, bbox_inches="tight", facecolor="white")
 
-            # ---- overlays per analysis type: dominant-dr + additive ----
+            # ---- dominant-dr overlays (transparent background) ----
+            # Each strong pixel is coloured by which dr-window dominates;
+            # background/vacuum (NaN) is transparent.  Three views per
+            # metric: standalone, overlaid on HAADF, and side-by-side
+            # with the DINO class (K) map when a trained run is loaded.
             from matplotlib.patches import Patch
             try:
                 from matplotlib import colormaps as _cmaps
@@ -1446,25 +1441,82 @@ class CrystallinityPanel(ctk.CTkFrame):
                        label=f"{windows[w][0]*inv_a:.3f}–"
                              f"{windows[w][1]*inv_a:.3f}")
                 for w in range(nW)]
+            # DINO class (K) map, if a trained run is linked.
+            kmap = None
+            try:
+                inf = getattr(ph, "_inf", None)
+                if inf is not None and "assigns" in inf:
+                    kmap = np.asarray(inf["assigns"]).reshape(Ny, Nx)
+            except Exception:
+                kmap = None
+            ha_disp = None
+            if np.isfinite(haadf_map).any():
+                hf = haadf_map[np.isfinite(haadf_map)]
+                ha_disp = (haadf_map,
+                            float(np.percentile(hf, 2)),
+                            float(np.percentile(hf, 98)))
+
+            def _legend(ax):
+                ax.legend(handles=legend_handles, title="q (1/Å)",
+                           fontsize=6, title_fontsize=7, loc="center left",
+                           bbox_to_anchor=(1.01, 0.5))
+
             for name, maps in (("peakhalo", ratio_maps),
                                 ("azimvar", var_maps)):
-                rgb, idx, valid = _overlay_argmax_rgb(maps, colors)
+                rgba, idx, kept = _dominant_dr_rgba(maps, colors)
                 np.save(os.path.join(folder,
                           f"overlay_{name}_dominant_idx.npy"), idx)
-                for style, rgbimg in (("dominant", rgb),
-                                       ("additive",
-                                        _overlay_additive_rgb(maps, colors))):
+                # (1) standalone — transparent bg (saved with transparency)
+                fig = Figure(figsize=(7.6, 6.0), facecolor="white")
+                ax = fig.add_subplot(111)
+                ax.imshow(rgba, interpolation="nearest", aspect="equal")
+                ax.set_title(f"{name}: dominant dr  ({ph.sample})",
+                              fontsize=11)
+                ax.set_xticks([]); ax.set_yticks([]); _legend(ax)
+                fig.savefig(os.path.join(folder,
+                              f"overlay_{name}_dominant.png"),
+                              dpi=150, bbox_inches="tight",
+                              facecolor="white", transparent=True)
+                # (2) overlaid on HAADF
+                if ha_disp is not None:
                     fig = Figure(figsize=(7.6, 6.0), facecolor="white")
                     ax = fig.add_subplot(111)
-                    ax.imshow(rgbimg, interpolation="nearest", aspect="equal")
-                    ax.set_title(f"{name}: {style} dr overlay  "
+                    ax.imshow(ha_disp[0], cmap="gray", vmin=ha_disp[1],
+                               vmax=max(ha_disp[2], ha_disp[1] + 1e-6),
+                               interpolation="nearest", aspect="equal")
+                    ax.imshow(rgba, interpolation="nearest", aspect="equal")
+                    ax.set_title(f"{name}: dominant dr on HAADF  "
                                   f"({ph.sample})", fontsize=11)
-                    ax.set_xticks([]); ax.set_yticks([])
-                    ax.legend(handles=legend_handles, title="q (1/Å)",
-                               fontsize=6, title_fontsize=7,
-                               loc="center left", bbox_to_anchor=(1.01, 0.5))
+                    ax.set_xticks([]); ax.set_yticks([]); _legend(ax)
                     fig.savefig(os.path.join(folder,
-                                  f"overlay_{name}_{style}.png"),
+                                  f"overlay_{name}_on_haadf.png"),
+                                  dpi=150, bbox_inches="tight",
+                                  facecolor="white")
+                # (3) side-by-side with the DINO class (K) map
+                if kmap is not None:
+                    K = int(np.nanmax(kmap)) + 1
+                    try:
+                        from matplotlib import colormaps as _cm2
+                        kcmap = _cm2["tab20" if K > 10 else "tab10"]
+                    except Exception:
+                        from matplotlib import cm as _cm3
+                        kcmap = _cm3.get_cmap("tab20" if K > 10 else "tab10")
+                    kpal = ListedColormap([kcmap(i % kcmap.N)
+                                            for i in range(max(K, 1))])
+                    fig = Figure(figsize=(11.5, 5.6), facecolor="white")
+                    axa = fig.add_subplot(1, 2, 1)
+                    axa.imshow(rgba, interpolation="nearest", aspect="equal")
+                    axa.set_title(f"{name}: dominant dr", fontsize=10)
+                    axa.set_xticks([]); axa.set_yticks([])
+                    axb = fig.add_subplot(1, 2, 2)
+                    axb.imshow(kmap, cmap=kpal, vmin=-0.5, vmax=K - 0.5,
+                                interpolation="nearest", aspect="equal")
+                    axb.set_title(f"DINO class map (K={K})", fontsize=10)
+                    axb.set_xticks([]); axb.set_yticks([])
+                    fig.suptitle(f"{name} vs DINO — {ph.sample}", fontsize=12)
+                    fig.tight_layout(rect=[0, 0, 1, 0.95])
+                    fig.savefig(os.path.join(folder,
+                                  f"overlay_{name}_vs_dino.png"),
                                   dpi=150, bbox_inches="tight",
                                   facecolor="white")
 
