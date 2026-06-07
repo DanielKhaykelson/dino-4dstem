@@ -1581,32 +1581,13 @@ class ACOMTabPanel(ctk.CTkFrame):
                     s_exp = float(120.0 / np.median(ei)) if ei.size else 50.0
                 except Exception:
                     s_exp = 50.0
-                res = cp.quantify_single_pattern(
-                    bv, xy_position=(0, 0), k_max=kmax,
-                    corr_kernel_size=0.04,
-                    sigma_excitation_error=0.02,
-                    power_intensity=0.25,
-                    power_intensity_experiment=0.25,
-                    max_number_patterns=1,
-                    allow_strain=False,
-                    plot_result=True, returnfig=True,
-                    verbose=False,
-                    plot_unmatched_peaks=True,
-                    scale_markers_experiment=s_exp,
-                    scale_markers_calculated=s_exp,
-                    figsize=(8.5, 6.5))
-                # Return is
-                # (phase_weights, residual, reliability, int_total,
-                #  fig, ax)
-                pw, pr, prel, _it, fig_pt, _ax_pt = res
-                names = list(self._phase_crystals.keys())
-                per_phase = np.zeros(len(names))
-                for fi, (pi, _) in enumerate(cp.crystal_identity):
-                    per_phase[pi] += float(pw[fi])
-                self.after(0,
-                    lambda: self._draw_nnls_result(
-                        names, per_phase, float(pr),
-                        float(prel), fig_pt))
+                # quantify_single_pattern(plot_result=True) builds a
+                # matplotlib (Tk) figure.  Creating Tk objects in THIS
+                # worker thread causes a fatal Tcl_AsyncDelete crash, so
+                # the quantify+plot runs on the MAIN thread.  (The heavy
+                # detect+match above already ran in the worker.)
+                self.after(0, lambda: self._nnls_quantify_main(
+                    cp, bv, float(kmax), float(s_exp)))
             except Exception as e:
                 import traceback
                 tb = traceback.format_exc()
@@ -1618,6 +1599,42 @@ class ACOMTabPanel(ctk.CTkFrame):
                 self.after(0, lambda: self._match_status.configure(
                     text=f"NNLS fit failed: {err[:120]}"))
         threading.Thread(target=_w, daemon=True).start()
+
+    def _nnls_quantify_main(self, cp, bv, kmax, s_exp):
+        """Main-thread quantify + py4DSTEM plot (Tk figure creation must
+        not happen in a worker thread → Tcl_AsyncDelete crash)."""
+        try:
+            res = cp.quantify_single_pattern(
+                bv, xy_position=(0, 0), k_max=kmax,
+                corr_kernel_size=0.04,
+                sigma_excitation_error=0.02,
+                power_intensity=0.25,
+                power_intensity_experiment=0.25,
+                max_number_patterns=1,
+                allow_strain=False,
+                plot_result=True, returnfig=True,
+                verbose=False,
+                plot_unmatched_peaks=True,
+                scale_markers_experiment=s_exp,
+                scale_markers_calculated=s_exp,
+                figsize=(8.5, 6.5))
+            # (phase_weights, residual, reliability, int_total, fig, ax)
+            pw, pr, prel, _it, fig_pt, _ax_pt = res
+            names = list(self._phase_crystals.keys())
+            per_phase = np.zeros(len(names))
+            for fi, (pi, _) in enumerate(cp.crystal_identity):
+                per_phase[pi] += float(pw[fi])
+            self._draw_nnls_result(names, per_phase, float(pr),
+                                    float(prel), fig_pt)
+        except Exception as e:
+            import traceback
+            print(f"[NNLS fit] FAILED:\n{traceback.format_exc()}",
+                  flush=True)
+            err = repr(e)
+            messagebox.showerror(
+                "NNLS fit", f"{err}\n\n(full traceback in console)")
+            self._match_status.configure(
+                text=f"NNLS fit failed: {err[:120]}")
 
     def _draw_nnls_result(self, phase_names, per_phase_weights,
                               residual, reliability, fig_pt):
