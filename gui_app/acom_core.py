@@ -162,17 +162,26 @@ def prepare_crystal(crystal,
     )
     kw = {k: v for k, v in common.items() if k in available}
 
-    if plan_mode == "fiber":
+    mode = str(plan_mode).lower()
+    if mode == "fiber":
+        # Fiber texture about `fiber_axis`, in-plane angles `fiber_angles`.
         if "fiber_axis" in available:
             kw["fiber_axis"] = list(map(float, fiber_axis))
             kw["fiber_angles"] = list(map(float, fiber_angles))
-        if "zone_axis_range" in available:
-            # In 0.14 zone_axis_range is an ndarray; the string "fiber"
-            # was a 0.13 convention.  Skip it when fiber_axis is set.
-            if "fiber_axis" not in available:
-                kw["zone_axis_range"] = "fiber"
+        if "zone_axis_range" in available and "fiber_axis" not in available:
+            kw["zone_axis_range"] = "fiber"   # 0.13 convention
         crystal.orientation_plan(**kw)
-    else:
+    elif mode in ("full", "auto", "half"):
+        # Whole-sphere ("full"), symmetry-reduced fundamental zone
+        # ("auto"), or hemisphere ("half").  py4DSTEM accepts these as
+        # string zone_axis_range values.
+        if "zone_axis_range" in available:
+            crystal.orientation_plan(zone_axis_range=mode, **kw)
+        else:
+            raise ValueError(
+                f"this py4DSTEM build's orientation_plan has no "
+                f"zone_axis_range arg — cannot use plan_mode='{mode}'.")
+    else:  # corners — explicit zone-axis triangle
         rng = (np.asarray(corners_zone_axes, dtype=np.float64)
                   if corners_zone_axes is not None
                   else np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]],

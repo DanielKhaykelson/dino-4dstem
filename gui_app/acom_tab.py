@@ -287,8 +287,44 @@ class ACOMTabPanel(ctk.CTkFrame):
                        width=44, anchor="w").pack(side="left", padx=(8, 2))
         self._plan_mode = ctk.StringVar(value="corners")
         ctk.CTkOptionMenu(kmax_row, variable=self._plan_mode,
-                            values=["corners", "fiber"], width=82
-                            ).pack(side="left", padx=2)
+                            values=["corners", "fiber", "full", "auto"],
+                            width=90).pack(side="left", padx=2)
+        # Orientation-plan angular resolution (deg), like the notebook's
+        # orientation_plan(angle_step_zone_axis=…, angle_step_in_plane=…).
+        # Finer = more templates = slower but more precise / complete.
+        ang_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        ang_row.pack(fill="x", padx=10, pady=1)
+        ctk.CTkLabel(ang_row, text="Δ zone-axis°:",
+                       width=92, anchor="w").pack(side="left")
+        self._ang_za = ctk.DoubleVar(value=2.0)
+        ctk.CTkEntry(ang_row, textvariable=self._ang_za,
+                       width=46).pack(side="left", padx=2)
+        ctk.CTkLabel(ang_row, text="Δ in-plane°:",
+                       width=78, anchor="w").pack(side="left", padx=(8, 2))
+        self._ang_ip = ctk.DoubleVar(value=2.0)
+        ctk.CTkEntry(ang_row, textvariable=self._ang_ip,
+                       width=46).pack(side="left", padx=2)
+        # Fiber axis (only used when plan = fiber).
+        fib_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        fib_row.pack(fill="x", padx=10, pady=1)
+        ctk.CTkLabel(fib_row, text="fiber axis (h k l):",
+                       width=110, anchor="w").pack(side="left")
+        self._fiber_axis = ctk.StringVar(value="0 0 1")
+        ctk.CTkEntry(fib_row, textvariable=self._fiber_axis,
+                       width=70).pack(side="left", padx=2)
+        from gui_app.tooltip import add_help_button
+        add_help_button(fib_row,
+            "Orientation-search coverage (matches the py4DSTEM notebook's "
+            "orientation_plan):\n"
+            "• corners — zone-axis triangle (correct fundamental zone for "
+            "CUBIC only; fast).\n"
+            "• fiber — fiber texture about the given axis (in-plane 0–360°).\n"
+            "• full — the whole orientation sphere (any symmetry; slowest, "
+            "most complete).\n"
+            "• auto — symmetry-reduced fundamental zone for this crystal.\n\n"
+            "Δ angles set the template spacing (deg): smaller = more "
+            "orientations tested = finer/slower."
+            ).pack(side="left", padx=4)
         inv_row = ctk.CTkFrame(sidebar, fg_color="transparent")
         inv_row.pack(fill="x", padx=10, pady=1)
         ctk.CTkLabel(inv_row, text="1/Å per px:",
@@ -994,6 +1030,29 @@ class ACOMTabPanel(ctk.CTkFrame):
         except Exception:
             pass
 
+    def _plan_kwargs(self) -> dict:
+        """Gather orientation-plan controls (mode, angle steps, fiber
+        axis) for prepare_crystal — mirrors the notebook's
+        orientation_plan args."""
+        try:
+            za = float(self._ang_za.get())
+        except Exception:
+            za = 2.0
+        try:
+            ip = float(self._ang_ip.get())
+        except Exception:
+            ip = 2.0
+        try:
+            fib = [float(t) for t in str(self._fiber_axis.get()).split()]
+            if len(fib) != 3:
+                fib = [0.0, 0.0, 1.0]
+        except Exception:
+            fib = [0.0, 0.0, 1.0]
+        return dict(plan_mode=self._plan_mode.get(),
+                     angle_step_zone_axis=za,
+                     angle_step_in_plane=ip,
+                     fiber_axis=fib)
+
     def _build_all_phases(self):
         if not self._phases:
             messagebox.showinfo("CIF",
@@ -1006,12 +1065,17 @@ class ACOMTabPanel(ctk.CTkFrame):
             messagebox.showerror("CIF build",
                 "k_max (1/Å) must be > 0.  Set it to ~1.0–2.0 in "
                 "step 3 before building."); return
+        plan_kw = self._plan_kwargs()
         def _w():
             from gui_app.acom_core import load_crystal, prepare_crystal
-            plan = self._plan_mode.get()
+            plan = plan_kw["plan_mode"]
             t0 = time.time()
             for i, (name, cif) in enumerate(self._phases):
-                key = (cif, kmax, plan)
+                # cache key includes ALL plan params so changing the
+                # angular resolution / mode triggers a rebuild.
+                key = (cif, kmax, plan, plan_kw["angle_step_zone_axis"],
+                       plan_kw["angle_step_in_plane"],
+                       tuple(plan_kw["fiber_axis"]))
                 if (self._phase_keys.get(name) == key
                         and name in self._phase_crystals):
                     continue
@@ -1021,7 +1085,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                             text=f"building [{i+1}/{len(self._phases)}] "
                                   f"{n}…"))
                     cr = load_crystal(cif)
-                    prepare_crystal(cr, k_max=kmax, plan_mode=plan)
+                    prepare_crystal(cr, k_max=kmax, **plan_kw)
                     self._phase_crystals[name] = cr
                     self._phase_keys[name] = key
                 except Exception as e:
