@@ -312,6 +312,10 @@ class ACOMTabPanel(ctk.CTkFrame):
         self._fiber_axis = ctk.StringVar(value="0 0 1")
         ctk.CTkEntry(fib_row, textvariable=self._fiber_axis,
                        width=70).pack(side="left", padx=2)
+        # GPU (CUDA) — only effective if cupy is installed.
+        self._use_gpu = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(fib_row, text="GPU", variable=self._use_gpu,
+                          width=50).pack(side="left", padx=(8, 2))
         from gui_app.tooltip import add_help_button
         add_help_button(fib_row,
             "Orientation-search coverage (matches the py4DSTEM notebook's "
@@ -1051,7 +1055,8 @@ class ACOMTabPanel(ctk.CTkFrame):
         return dict(plan_mode=self._plan_mode.get(),
                      angle_step_zone_axis=za,
                      angle_step_in_plane=ip,
-                     fiber_axis=fib)
+                     fiber_axis=fib,
+                     use_cuda=bool(self._use_gpu.get()))
 
     def _build_all_phases(self):
         if not self._phases:
@@ -1075,7 +1080,8 @@ class ACOMTabPanel(ctk.CTkFrame):
                 # angular resolution / mode triggers a rebuild.
                 key = (cif, kmax, plan, plan_kw["angle_step_zone_axis"],
                        plan_kw["angle_step_in_plane"],
-                       tuple(plan_kw["fiber_axis"]))
+                       tuple(plan_kw["fiber_axis"]),
+                       plan_kw["use_cuda"])
                 if (self._phase_keys.get(name) == key
                         and name in self._phase_crystals):
                     continue

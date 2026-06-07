@@ -103,7 +103,8 @@ def prepare_crystal(crystal,
                      corners_zone_axes: Optional[np.ndarray] = None,
                      angle_step_zone_axis: float = 2.0,
                      angle_step_in_plane: float = 2.0,
-                     corr_kernel_size: float = 0.05):
+                     corr_kernel_size: float = 0.05,
+                     use_cuda: bool = False):
     """Compute structure factors + orientation plan in one shot.
 
     Defaults match what `blob_acom_panel.py` uses in the GUI — fiber
@@ -161,6 +162,18 @@ def prepare_crystal(crystal,
         progress_bar=False,
     )
     kw = {k: v for k, v in common.items() if k in available}
+
+    # GPU: orientation_plan(CUDA=True) builds GPU sieves and makes
+    # match_single_pattern use cupy FFTs.  Requires cupy installed.
+    if use_cuda and "CUDA" in available:
+        try:
+            import cupy  # noqa: F401
+            kw["CUDA"] = True
+        except Exception:
+            raise RuntimeError(
+                "GPU (CUDA) requested but cupy is not installed.  Install "
+                "cupy matching your CUDA toolkit (e.g. `pip install "
+                "cupy-cuda12x`), or disable the GPU toggle.") from None
 
     mode = str(plan_mode).lower()
     if mode == "fiber":
