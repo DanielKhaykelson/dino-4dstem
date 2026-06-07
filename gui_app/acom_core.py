@@ -94,6 +94,27 @@ def load_crystal(cif_path: str):
                 f"  ASE fallback: {e_ase}") from None
 
 
+_CUDA_DLL_DONE = False
+
+
+def _ensure_cuda_dll_path():
+    """Let cupy find the CUDA 11.8 runtime DLLs that torch already bundles
+    (nvrtc64_112_0.dll, cufft64_10.dll, cudart64_110.dll, …), so
+    cupy-cuda11x works WITHOUT a separate CUDA-toolkit install.  Windows
+    only; idempotent; best-effort."""
+    global _CUDA_DLL_DONE
+    if _CUDA_DLL_DONE or os.name != "nt":
+        return
+    try:
+        import torch
+        tlib = os.path.join(os.path.dirname(torch.__file__), "lib")
+        if os.path.isdir(tlib) and hasattr(os, "add_dll_directory"):
+            os.add_dll_directory(tlib)
+    except Exception:
+        pass
+    _CUDA_DLL_DONE = True
+
+
 def prepare_crystal(crystal,
                      k_max: float = 2.0,
                      accel_voltage: float = 300e3,
@@ -166,14 +187,17 @@ def prepare_crystal(crystal,
     # GPU: orientation_plan(CUDA=True) builds GPU sieves and makes
     # match_single_pattern use cupy FFTs.  Requires cupy installed.
     if use_cuda and "CUDA" in available:
+        _ensure_cuda_dll_path()
         try:
             import cupy  # noqa: F401
-            kw["CUDA"] = True
-        except Exception:
+            cupy.arange(1).sum()       # force-load nvrtc/runtime now so
+            kw["CUDA"] = True          # failures surface here, not mid-run
+        except Exception as e:
             raise RuntimeError(
-                "GPU (CUDA) requested but cupy is not installed.  Install "
-                "cupy matching your CUDA toolkit (e.g. `pip install "
-                "cupy-cuda12x`), or disable the GPU toggle.") from None
+                "GPU (CUDA) requested but cupy could not run on the GPU.\n"
+                f"  {e!r}\n"
+                "Install cupy-cuda11x (matches this env's torch CUDA 11.8) "
+                "or disable the GPU toggle.") from None
 
     mode = str(plan_mode).lower()
     if mode == "fiber":

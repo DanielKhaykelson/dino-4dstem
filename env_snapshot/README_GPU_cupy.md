@@ -3,6 +3,16 @@
 Snapshot taken **2026-06-07** of conda env **`py4DSTEM_SAM`**, BEFORE installing cupy.
 Use this to verify a clean install and to roll back if anything breaks.
 
+> **STATUS (2026-06-07): cupy-cuda11x 13.6.0 + fastrlock 0.8.3 are now INSTALLED.**
+> The dry-run confirmed it added ONLY those two packages (numpy/torch/scipy
+> untouched). cupy-cuda11x does **not** ship the CUDA runtime DLLs, but this env's
+> **torch (cu118) already bundles them** (`torch/lib/nvrtc64_112_0.dll`,
+> `cufft64_10.dll`, …), so `gui_app/acom_core._ensure_cuda_dll_path()` adds
+> `torch/lib` to the DLL search path automatically when the GPU toggle is used —
+> no CUDA toolkit needed.  Verified working: cupy reduction kernels + cuFFT run on
+> the RTX 4080.
+> **To roll back:** `python -m pip uninstall -y cupy-cuda11x fastrlock`.
+
 ## Current environment (known-good baseline)
 
 | item | value |
