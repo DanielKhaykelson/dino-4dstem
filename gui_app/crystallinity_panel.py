@@ -38,7 +38,7 @@ from matplotlib.backends.backend_tkagg import (FigureCanvasTkAgg,
                                                   NavigationToolbar2Tk)
 from matplotlib.colors import ListedColormap
 
-from data import SAMPLES, LoadPRZ
+from data import SAMPLES, LoadPRZ, rescale_like_vmax
 
 
 def _section_header(parent, text):
@@ -422,16 +422,28 @@ class CrystallinityPanel(ctk.CTkFrame):
         k = int(np.nanargmax(sigma_b))
         return float(centers[k])
 
-    def _blur_pat(self, pat):
-        """Optional Gaussian denoise of a 2D pattern (σ in detector px)."""
-        sig = self._blur_sigma_val()
-        if sig <= 0:
-            return pat
+    def _vmax_val(self) -> float:
         try:
-            from scipy.ndimage import gaussian_filter
-            return gaussian_filter(pat.astype(np.float32), sigma=sig)
+            return max(float(self._vmax.get()), 0.0)
         except Exception:
-            return pat
+            return 0.0
+
+    def _prep_pat(self, pat):
+        """Per-pattern prep used everywhere: optional vmax normalisation
+        (x-min)/(vmax-min) clipped to [0,1] like the rest of the pipeline,
+        then optional Gaussian denoise (σ px).  vmax=0 → raw counts."""
+        out = pat.astype(np.float32)
+        vm = self._vmax_val()
+        if vm > 0:
+            out = rescale_like_vmax(out, vmax=vm)
+        sig = self._blur_sigma_val()
+        if sig > 0:
+            try:
+                from scipy.ndimage import gaussian_filter
+                out = gaussian_filter(out, sigma=sig)
+            except Exception:
+                pass
+        return out
 
     def _ensure_beam_mask(self, sample: str, H: int):
         """Resolve the direct-beam mask radius (detector px) for `sample`.
@@ -542,6 +554,18 @@ class CrystallinityPanel(ctk.CTkFrame):
         self._inv_ang = ctk.DoubleVar(value=round(rp * 0.1, 6))
         ctk.CTkEntry(cal_row, textvariable=self._inv_ang,
                        width=80).pack(side="left", padx=2)
+        # vmax normalisation (like the rest of the pipeline): each frame is
+        # rescaled (x-min)/(vmax-min), clipped to [0,1].  Defaults to the
+        # run/dataset's vmax on load.  0 = raw counts (no rescale).
+        vmax_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        vmax_row.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(vmax_row, text="vmax (0=raw):",
+                       width=110, anchor="w").pack(side="left")
+        self._vmax = ctk.DoubleVar(value=0.0)
+        self._vmax_inited_sample = None
+        evm = ctk.CTkEntry(vmax_row, textvariable=self._vmax, width=70)
+        evm.pack(side="left", padx=2)
+        evm.bind("<Return>", lambda _e: self._recompute_test())
         # Direct-beam mask (detector px).  Defaults to the dataset's
         # center_mask_radius on load (else a dialog asks).  Bins inside
         # this radius are zeroed everywhere so the beam can't dominate
@@ -920,6 +944,15 @@ class CrystallinityPanel(ctk.CTkFrame):
                     self._dr_var.set(round(q_max * 0.5, 4))
             except Exception:
                 pass
+        # Default vmax from the run/dataset (once per sample) — applied
+        # like the rest of the pipeline; user can change or set 0 = raw.
+        if getattr(self, "_vmax_inited_sample", None) != sample:
+            self._vmax_inited_sample = sample
+            try:
+                cfg = SAMPLES.get(sample, {}) if sample else {}
+                self._vmax.set(float(cfg.get("vmax", 0.0) or 0.0))
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     def _recompute_test(self):
@@ -927,7 +960,7 @@ class CrystallinityPanel(ctk.CTkFrame):
             return
         # Build the working pattern (optional Gaussian denoise) + its polar
         # view; everything below analyses/displays THIS.
-        self._work_pattern = self._blur_pat(self._test_pattern)
+        self._work_pattern = self._prep_pat(self._test_pattern)
         self._test_polar = cart_to_polar(self._work_pattern, n_theta=192,
                                            center=self._test_center)
         inv_a = self._inv_ang_per_px()
@@ -1152,6 +1185,7 @@ class CrystallinityPanel(ctk.CTkFrame):
             method = self._baseline_method.get()
             beam = self._beam_radius_px()
             bsig = self._blur_sigma_val()
+            vm = self._vmax_val()
             _gf = None
             if bsig > 0:
                 from scipy.ndimage import gaussian_filter as _gf
@@ -1163,6 +1197,8 @@ class CrystallinityPanel(ctk.CTkFrame):
                         pat = np.asarray(cube[rx, ry], dtype=np.float32)
                     except Exception:
                         continue
+                    if vm > 0:
+                        pat = rescale_like_vmax(pat, vmax=vm)
                     if _gf is not None:
                         pat = _gf(pat, sigma=bsig)
                     m_all, v_all, _c = _radial_mean_var(pat, center, beam)
@@ -1237,6 +1273,7 @@ class CrystallinityPanel(ctk.CTkFrame):
                 snipw = 14
             method = self._baseline_method.get()
             bsig = self._blur_sigma_val()
+            vm = self._vmax_val()
             try:
                 man_thr_ph = float(self._thr_ph.get())
             except Exception:
@@ -1287,9 +1324,12 @@ class CrystallinityPanel(ctk.CTkFrame):
                         pat = np.asarray(cube[rx, ry], dtype=np.float32)
                     except Exception:
                         continue
+                    # HAADF reference from RAW counts (structural).
+                    haadf_map[rx, ry] = float(pat[ha_mask].sum())
+                    if vm > 0:
+                        pat = rescale_like_vmax(pat, vmax=vm)
                     if _gf is not None:
                         pat = _gf(pat, sigma=bsig)
-                    haadf_map[rx, ry] = float(pat[ha_mask].sum())
                     # ONE radial pass per pattern; evaluate every window.
                     m_all, v_all, cnt = _radial_mean_var(
                         pat, center, beam)
@@ -1367,7 +1407,7 @@ class CrystallinityPanel(ctk.CTkFrame):
             manifest = dict(sample=ph.sample, inv_ang_per_px=inv_a,
                              dr=dr, dr_bins=step, r_min=float(self._r_min.get()),
                              beam_mask_px=beam,
-                             baseline=method, blur_sigma=bsig,
+                             baseline=method, blur_sigma=bsig, vmax=vm,
                              stride=stride, snip_window=snipw,
                              thr_peakhalo=(float(thr_ph)
                                             if np.isfinite(thr_ph) else None),
