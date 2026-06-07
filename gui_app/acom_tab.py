@@ -287,7 +287,8 @@ class ACOMTabPanel(ctk.CTkFrame):
                        width=44, anchor="w").pack(side="left", padx=(8, 2))
         self._plan_mode = ctk.StringVar(value="corners")
         ctk.CTkOptionMenu(kmax_row, variable=self._plan_mode,
-                            values=["corners", "fiber", "full", "auto"],
+                            values=["corners", "fiber", "full", "half",
+                                     "auto"],
                             width=90).pack(side="left", padx=2)
         # Orientation-plan angular resolution (deg), like the notebook's
         # orientation_plan(angle_step_zone_axis=…, angle_step_in_plane=…).
@@ -318,14 +319,16 @@ class ACOMTabPanel(ctk.CTkFrame):
                           width=50).pack(side="left", padx=(8, 2))
         from gui_app.tooltip import add_help_button
         add_help_button(fib_row,
-            "Orientation-search coverage (matches the py4DSTEM notebook's "
-            "orientation_plan):\n"
-            "• corners — zone-axis triangle (correct fundamental zone for "
-            "CUBIC only; fast).\n"
-            "• fiber — fiber texture about the given axis (in-plane 0–360°).\n"
-            "• full — the whole orientation sphere (any symmetry; slowest, "
-            "most complete).\n"
-            "• auto — symmetry-reduced fundamental zone for this crystal.\n\n"
+            "Orientation-search coverage = py4DSTEM orientation_plan's "
+            "zone_axis_range (note py4DSTEM's quirky naming):\n"
+            "• corners — explicit zone-axis triangle (cubic fundamental "
+            "zone; fast).\n"
+            "• fiber — spherical cap about the fiber axis (in-plane "
+            "0–360°).\n"
+            "• full — HEMISPHERE range.\n"
+            "• half — QUARTER-sphere range.\n"
+            "• auto — pymatgen point-group symmetry picks the range for "
+            "this crystal (recommended for non-cubic).\n\n"
             "Δ angles set the template spacing (deg): smaller = more "
             "orientations tested = finer/slower."
             ).pack(side="left", padx=4)
