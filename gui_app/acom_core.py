@@ -556,6 +556,7 @@ def acom_full_dataset(crystal,
                           detect_kw: Optional[dict] = None,
                           center: Optional[Tuple[float, float]] = None,
                           subsample_stride: int = 1,
+                          min_peaks: int = 3,
                           progress_cb=None,
                           ):
     """Per-scan-position ACOM over the entire cube.
@@ -617,7 +618,7 @@ def acom_full_dataset(crystal,
     if progress_cb is not None:
         try: progress_cb(total_pix, total_pix, "match")
         except Exception: pass
-    omap = crystal.match_orientations(bv)
+    omap = crystal.match_orientations(bv, min_number_peaks=int(min_peaks))
     return omap, bv, (Ny, Nx)
 
 
@@ -629,6 +630,7 @@ def acom_multiphase_full_dataset(crystals_by_name,
                                        detect_kw: Optional[dict] = None,
                                        center: Optional[Tuple[float, float]] = None,
                                        subsample_stride: int = 1,
+                                       min_peaks: int = 3,
                                        progress_cb=None,
                                        threshold: float = 0.0,
                                        margin: float = 0.0,
@@ -709,7 +711,7 @@ def acom_multiphase_full_dataset(crystals_by_name,
             try: progress_cb(pi, len(names), f"match[{name}]")
             except Exception: pass
         cr = crystals_by_name[name]
-        omap = cr.match_orientations(bv)
+        omap = cr.match_orientations(bv, min_number_peaks=int(min_peaks))
         cv = None
         for attr in ("corr", "correlation"):
             v = getattr(omap, attr, None)
@@ -774,8 +776,12 @@ def acom_multiphase_full_dataset(crystals_by_name,
     )
 
 
-def _match_safe(crystal, bv, N):
+def _match_safe(crystal, bv, N, min_peaks: int = 3):
     """Run match_orientations, returning (corr[N], rmat[N,3,3]).
+
+    `min_peaks` (= match_single_pattern's min_number_peaks) skips the
+    expensive FFT correlation for patterns with fewer peaks — the main
+    full-dataset speedup (background/vacuum pixels cost ~nothing).
 
     py4DSTEM's vectorised match crashes ('argmin of empty sequence')
     when a pattern has too few peaks to match.  We try the fast
@@ -787,7 +793,8 @@ def _match_safe(crystal, bv, N):
     corr = np.full(N, -1.0, dtype=np.float32)
     rmat = np.full((N, 3, 3), np.nan, dtype=np.float32)
     try:
-        omap = crystal.match_orientations(bv, progress_bar=False)
+        omap = crystal.match_orientations(bv, progress_bar=False,
+                                            min_number_peaks=int(min_peaks))
         cv = np.asarray(getattr(omap, "corr", None))
         mv = np.asarray(getattr(omap, "matrix", None))
         if cv is not None and cv.size:
@@ -804,9 +811,10 @@ def _match_safe(crystal, bv, N):
     for k in range(N):
         try:
             pl = bv.cal[k, 0]
-            if len(pl.data) < 3:        # too few peaks to match
+            if len(pl.data) < int(min_peaks):   # too few peaks to match
                 continue
-            orient = crystal.match_single_pattern(pl, verbose=False)
+            orient = crystal.match_single_pattern(
+                pl, min_number_peaks=int(min_peaks), verbose=False)
             c = np.asarray(getattr(orient, "corr", [np.nan])).ravel()
             m = np.asarray(getattr(orient, "matrix", None))
             corr[k] = float(c[0]) if c.size else -1.0
@@ -826,6 +834,7 @@ def acom_multiphase_batch(crystals_by_name,
                               detect_kw: Optional[dict] = None,
                               threshold: float = 0.0,
                               margin: float = 0.0,
+                              min_peaks: int = 3,
                               progress_cb=None,
                               ):
     """Multi-phase ACOM on a list of independent patterns (class avgs,
@@ -861,7 +870,7 @@ def acom_multiphase_batch(crystals_by_name,
                                 dtype=np.float32)
     for pi, name in enumerate(names):
         cr = crystals_by_name[name]
-        cvec, mvec = _match_safe(cr, bv, N)
+        cvec, mvec = _match_safe(cr, bv, N, min_peaks=int(min_peaks))
         corr_per_phase[pi] = cvec
         rmat_per_phase[pi] = mvec
 
@@ -898,6 +907,7 @@ def acom_batch(crystal,
                   inv_ang_per_pixel: float = 0.00185,
                   probe_kernel: Optional[np.ndarray] = None,
                   detect_kw: Optional[dict] = None,
+                  min_peaks: int = 3,
                   progress_cb=None,
                   ):
     """Batch ACOM over N independent patterns (e.g. K class avgs or N
@@ -929,7 +939,7 @@ def acom_batch(crystal,
         except Exception: pass
     # Crash-safe match (per-pattern fallback for degenerate patterns).
     N = len(patterns)
-    corr_vec, rmat_vec = _match_safe(crystal, bv, N)
+    corr_vec, rmat_vec = _match_safe(crystal, bv, N, min_peaks=int(min_peaks))
     omap = None  # vectorised omap not retained in the safe path
 
     results = []

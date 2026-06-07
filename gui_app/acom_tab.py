@@ -283,13 +283,15 @@ class ACOMTabPanel(ctk.CTkFrame):
         self._kmax = ctk.DoubleVar(value=2.0)
         ctk.CTkEntry(kmax_row, textvariable=self._kmax,
                        width=70).pack(side="left", padx=2)
-        ctk.CTkLabel(kmax_row, text="plan:",
-                       width=44, anchor="w").pack(side="left", padx=(8, 2))
         self._plan_mode = ctk.StringVar(value="corners")
-        ctk.CTkOptionMenu(kmax_row, variable=self._plan_mode,
-                            values=["corners", "fiber", "full", "half",
-                                     "auto"],
-                            width=90).pack(side="left", padx=2)
+        # Plan coverage as a clickable segmented button (full / fiber / …).
+        plan_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        plan_row.pack(fill="x", padx=10, pady=1)
+        ctk.CTkLabel(plan_row, text="plan:",
+                       width=44, anchor="w").pack(side="left")
+        ctk.CTkSegmentedButton(
+            plan_row, values=["corners", "fiber", "full", "half", "auto"],
+            variable=self._plan_mode).pack(side="left", padx=2)
         # Orientation-plan angular resolution (deg), like the notebook's
         # orientation_plan(angle_step_zone_axis=…, angle_step_in_plane=…).
         # Finer = more templates = slower but more precise / complete.
@@ -444,6 +446,24 @@ class ACOMTabPanel(ctk.CTkFrame):
         self._full_stride = ctk.IntVar(value=4)
         ctk.CTkEntry(full_row, textvariable=self._full_stride,
                        width=40).pack(side="left", padx=2)
+        # Skip matching on positions with < this many detected peaks
+        # (vacuum/amorphous) — py4DSTEM early-exits BEFORE the expensive
+        # FFT, so this is the main full-dataset speedup.
+        mp_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        mp_row.pack(fill="x", padx=10, pady=1)
+        ctk.CTkLabel(mp_row, text="skip if < N peaks:",
+                       width=130, anchor="w").pack(side="left")
+        self._min_peaks = ctk.IntVar(value=4)
+        ctk.CTkEntry(mp_row, textvariable=self._min_peaks,
+                       width=40).pack(side="left", padx=2)
+        from gui_app.tooltip import add_help_button
+        add_help_button(mp_row,
+            "Positions with fewer than N detected Bragg peaks are skipped "
+            "during matching (no orientation, corr≈0).  Background/vacuum/"
+            "amorphous pixels cost ~nothing → big full-dataset speedup.  "
+            "Raise N to skip noisy non-crystalline pixels; lower it to "
+            "match weaker grains.  py4DSTEM's default is 3."
+            ).pack(side="left", padx=4)
         full_btn = ctk.CTkFrame(sidebar, fg_color="transparent")
         full_btn.pack(fill="x", padx=10, pady=2)
         ctk.CTkButton(full_btn, text="Single-phase full ▶",
@@ -591,6 +611,12 @@ class ACOMTabPanel(ctk.CTkFrame):
             return float(self.app.recip_res.get()) if self.app else 0.0
         except Exception:
             return 0.0
+
+    def _min_peaks_val(self) -> int:
+        try:
+            return max(int(self._min_peaks.get()), 1)
+        except Exception:
+            return 3
 
     def _eff_inv_ang(self):
         """Effective 1/Å per DISPLAY pixel of the current test pattern,
@@ -1511,7 +1537,8 @@ class ACOMTabPanel(ctk.CTkFrame):
         crystals = list(self._phase_crystals.values())
         for cr in crystals:
             try:
-                cr.match_orientations(bv, progress_bar=False)
+                cr.match_orientations(bv, progress_bar=False,
+                    min_number_peaks=self._min_peaks_val())
             except Exception as e:
                 # Degenerate pattern → match_orientations argmin
                 # crash.  Fall back to per-pattern; leaves an empty
@@ -2030,7 +2057,9 @@ class ACOMTabPanel(ctk.CTkFrame):
                         peaks_all, centers=centers_all,
                         inv_ang_per_pixel=inv_a, Rshape=(Ny, Nx))
                     self._set_status("matching orientations…")
-                    cr.match_orientations(bv, progress_bar=False)
+                    cr.match_orientations(
+                        bv, progress_bar=False,
+                        min_number_peaks=self._min_peaks_val())
                     omap = cr.orientation_map
                     scan_shape = (Ny, Nx)
                     dt = time.time() - t0
@@ -2046,7 +2075,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                         f"(stride={stride})…")
                     res = self._run_mp_full_cached(
                         cube, stride, detect_kw, inv_a, thr, mar,
-                        crystals, _prog)
+                        crystals, _prog, min_peaks=self._min_peaks_val())
                     dt = time.time() - t0
                     self.after(0, lambda: self._render_mp_full_three(
                         res, stride, dt))
@@ -2116,7 +2145,8 @@ class ACOMTabPanel(ctk.CTkFrame):
                 cr = crystals[phase_name]
                 results, omap, bv = acom_batch(
                     cr, patterns, inv_ang_per_pixel=inv_a,
-                    detect_kw=detect_kw, progress_cb=_bprog)
+                    detect_kw=detect_kw, min_peaks=self._min_peaks_val(),
+                    progress_cb=_bprog)
                 zas = []
                 for r in results:
                     za, mis = zone_axis_from_matrix(r["rotation_matrix"])
@@ -2128,7 +2158,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                 mp = acom_multiphase_batch(
                     crystals, patterns, inv_ang_per_pixel=inv_a,
                     detect_kw=detect_kw, threshold=thr, margin=mar,
-                    progress_cb=_bprog)
+                    min_peaks=self._min_peaks_val(), progress_cb=_bprog)
                 # Phase-colored grain/class MAP (the spatial view the
                 # user asked for): same shape as the class map but
                 # painted by phase.
@@ -2291,7 +2321,8 @@ class ACOMTabPanel(ctk.CTkFrame):
                     f"stopped by user (before match[{n}])")
             if progress_cb is not None:
                 progress_cb(0, 1, f"match_orientations[{n}]")
-            cr.match_orientations(bv, progress_bar=False)
+            cr.match_orientations(bv, progress_bar=False,
+                min_number_peaks=self._min_peaks_val())
         if self._stop_event.is_set():
             raise RuntimeError("stopped by user (before NNLS)")
         cp = CrystalPhase(crystals, crystal_names=names)
@@ -2313,7 +2344,8 @@ class ACOMTabPanel(ctk.CTkFrame):
     # combine → 3 separate images + overlay.
     # ==================================================================
     def _run_mp_full_cached(self, cube, stride, detect_kw, inv_a,
-                                 thr, mar, crystals, progress_cb):
+                                 thr, mar, crystals, progress_cb,
+                                 min_peaks: int = 3):
         from gui_app.acom_core import (build_bragg_vectors,
                                             _match_safe,
                                             zone_axis_from_matrix)
@@ -2333,7 +2365,8 @@ class ACOMTabPanel(ctk.CTkFrame):
                 raise RuntimeError("stopped by user")
             if progress_cb is not None:
                 progress_cb(0, 1, f"match[{nm}]")
-            cvec, mvec = _match_safe(crystals[nm], bv, N)
+            cvec, mvec = _match_safe(crystals[nm], bv, N,
+                                      min_peaks=int(min_peaks))
             corr_per[pi] = cvec
             rmat_per[pi] = mvec
         # Combine.
