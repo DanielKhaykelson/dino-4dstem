@@ -1,0 +1,148 @@
+\documentclass[11pt]{article}
+\usepackage[margin=2cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{booktabs}
+\usepackage[dvipsnames,table]{xcolor}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{parskip}
+\usepackage{mdframed}
+\usepackage{hyperref}
+
+\definecolor{deep}{HTML}{065A82}
+\definecolor{teal}{HTML}{1C7293}
+\definecolor{navy}{HTML}{21295C}
+\definecolor{ice}{HTML}{EAF1FB}
+\definecolor{ink}{HTML}{1A2230}
+
+\hypersetup{colorlinks=true, linkcolor=deep, urlcolor=deep}
+\titleformat{\section}{\large\bfseries\color{deep}}{\thesection.}{0.5em}{}
+\titleformat{\subsection}{\normalsize\bfseries\color{teal}}{}{0em}{}
+\setlist[itemize]{leftmargin=1.4em, itemsep=2pt, topsep=2pt}
+
+\graphicspath{{D:/DINOSR/Claude/PaperRun_claude/dino_sr_contrastive/docs/explainer/figs/}}
+
+\newmdenv[backgroundcolor=ice, linecolor=deep, linewidth=0.8pt,
+          roundcorner=4pt, skipabove=6pt, skipbelow=6pt,
+          innertopmargin=6pt, innerbottommargin=6pt]{callout}
+
+\begin{document}
+\pagestyle{empty}
+
+\begin{center}
+{\LARGE\bfseries\color{navy} What is the model actually looking at?}\\[3pt]
+{\large\color{teal} Making the self-supervised 4D-STEM ``grain map'' explainable
+in physical terms}\\[2pt]
+{\small\color{ink} A non-technical guide to the interpretability tests
+$\cdot$ IMC \& NaPHI $\cdot$ Daniel Khaykelson}
+\end{center}
+\vspace{2pt}
+\hrule height 1pt
+\vspace{8pt}
+
+\section{The setup, and the problem}
+Our model (a self-supervised network called DINO) looks at the electron
+diffraction pattern recorded at every probe position in a 4D-STEM scan and
+sorts each position into one of $\sim$14 groups---producing a ``grain map''
+\emph{with no labels and no chemistry input}. It works, but it is a black box:
+we do not know \emph{which physical property} defines the groups
+(crystallinity? thickness? crystal orientation? something new?). The four
+tests below answer that, each from a different angle, so that together they
+triangulate a trustworthy physical explanation.
+
+\section{The four tests (plain idea + what it measures)}
+
+\subsection{1. Probing --- what the model pays attention to}
+\textbf{Plain idea:} if we can ``read off'' a known property (say
+crystallinity) from the model's internal notes for each point, then the model
+is keeping track of it.\\
+\textbf{What we measure:} we fit a simple linear predictor from the model's
+128-number fingerprint to each measured property; the score $R^2$ (0--1) says
+how strongly that property is encoded.
+
+\subsection{2. Ablation --- what the model depends on}
+\textbf{Plain idea:} like covering part of a photo to see whether you can still
+recognise it.\\
+\textbf{What we measure:} we blank out one ingredient of the diffraction
+pattern (overall brightness, fine angular detail, or inner vs.\ outer rings),
+re-run the model, and compare the new map to the original (agreement = ARI).
+If the map survives the edit, that ingredient was not needed; if it falls
+apart, the model depended on it.
+
+\subsection{3. Classical check --- is the map actually new?}
+\textbf{Plain idea:} does the AI just redraw what a standard, decades-old
+analysis already shows, or something genuinely new?\\
+\textbf{What we measure:} we cluster classical 4D-STEM features (a virtual
+dark-field image, the azimuthally-averaged profile, and PCA/NMF
+decompositions of the patterns) into the same number of groups, and measure
+how much they agree with the AI map (ARI/AMI).
+
+\subsection{4. Orientation check --- is it just sorting by crystal direction?}
+\textbf{Plain idea:} a tilted crystal diffracts differently; maybe the model
+is only sorting by grain \emph{orientation}.\\
+\textbf{What we measure:} where a crystal structure (CIF) is available, we
+index the orientation at each point (ACOM) and measure agreement with the AI
+map. We also use Grad-CAM to see \emph{which part} of the pattern the model
+looks at.
+
+\begin{callout}
+\textbf{How to read the two numbers.}
+\;$R^2$ --- how predictable a property is from the model
+(\,0 = ignored\, $\rightarrow$\, 1 = fully encoded\,).\quad
+\textbf{ARI / AMI} --- how much two maps agree, corrected for chance
+(\,0 = no better than random\, $\rightarrow$\, 1 = identical maps\,).
+\end{callout}
+
+\section{What we found}
+\begin{itemize}
+\item The groups are driven by the \textbf{overall scattered (diffracted)
+intensity} together with the \textbf{inner, low-angle (low-$q$) 2-D
+diffraction structure} --- the arrangement of the inner rings/spots
+($q \lesssim 2.1$\,nm$^{-1}$, i.e.\ $d \gtrsim 4.7$\,\AA).
+\item It is \textbf{not} based on crystal orientation: agreement with the
+indexed zone axis is essentially zero (AMI $\le 0.06$), because the model is
+trained to be rotation-invariant by design.
+\item A 1-D radial profile alone is \textbf{not enough} --- averaging away the
+angles collapses the map; the full 2-D pattern is needed.
+\item \textbf{Uniqueness is material-dependent.} For IMC, no classical method
+reproduces the map (best agreement ARI $\approx 0.15$): the AI map is
+\emph{distinctive}. For NaPHI, classical methods get about halfway
+(ARI $\approx 0.5$): there the AI stays closer to a classical decomposition.
+\item Logarithmic intensity stretching (an image-prep choice) keeps the same
+physical basis but \emph{sharpens} it --- more, cleaner groups.
+\end{itemize}
+
+\section{What it means (and one caveat)}
+The model groups regions by \emph{how much, and what, they diffract at low
+angles} --- crystallinity, molecular packing, and sample thickness. That is a
+physically sensible axis, not an arbitrary black box. For IMC it is genuinely
+distinctive (a standard virtual-detector or PCA map does not reproduce it);
+for NaPHI it stays closer to classical analysis.
+
+\textbf{Caveat:} ``scattered intensity'' blends crystallinity with sample
+thickness --- both raise the total diffracted signal. An independent
+thickness map (e.g.\ a $t/\lambda$ estimate) would be needed to separate the
+two. Orientation/phase analysis is folded in automatically wherever a CIF is
+available; the conclusions above hold with or without it.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\linewidth]{cross_sample.png}
+\caption*{\small Cross-sample summary. \textbf{(a)} which properties are
+encoded (probe $R^2$); \textbf{(b)} causal ablations (low bar = the model
+depends on that signal); \textbf{(c)} how well classical methods reproduce the
+AI map (all $\le 0.18$ for IMC). Bars: SI4, SI3 (linear), SI3 (log-stretch).}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.9\linewidth]{imc_dino_vs_classical.png}
+\caption*{\small IMC: the AI map (far left) vs.\ classical clusterings.
+Colours are arbitrary --- what matters is the spatial shape. Classical
+methods catch the coarse regions but miss the fine grain structure the AI
+resolves.}
+\end{figure}
+
+\end{document}
