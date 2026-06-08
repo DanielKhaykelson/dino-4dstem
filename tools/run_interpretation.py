@@ -17,6 +17,35 @@ from data import SAMPLES
 from gui_app import interpret_core as ic
 
 
+def _make_inference(run, sc, polar, out_path):
+    """Generate eval/inference.npz when a finished run lacks it (no auto-eval).
+    Mirrors the Post-hoc tab's infer_scan call."""
+    import torch
+    from data import LoadPRZ
+    from dino_sr_contrastive_model import load_contrastive_checkpoint
+    from contrastive_eval import infer_scan
+    mask_r, mask_cols, ccrop, com = polar
+    ckpt = os.path.join(run, "best.pth")
+    if not os.path.exists(ckpt):
+        raise RuntimeError(f"no best.pth in {run}")
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model, _, _, _ = load_contrastive_checkpoint(ckpt, device=dev)
+    model.eval()
+    ds = LoadPRZ(sc["path"], resize=192, vmax=sc.get("vmax", 5.0))
+    print(f"[interp] no inference.npz — running infer_scan ({len(ds)} patterns) …",
+          flush=True)
+    inf = infer_scan(model, ds, dev, dense_remap=True, polar_size=192,
+                     polar_mask_cols=mask_cols, center_crop_size=ccrop,
+                     com_centering=com, center_mask_radius=mask_r,
+                     eval_temp=0.06, batch_size=128)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    np.savez(out_path, soft_probs=inf["soft_probs"], assigns=inf["assigns"],
+             embeds=inf["embeds"])
+    print(f"[interp] wrote {out_path}", flush=True)
+    return dict(embeds=inf["embeds"], assigns=inf["assigns"],
+                soft_probs=inf["soft_probs"])
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("run")
@@ -29,9 +58,13 @@ def main():
     tk = json.load(open(os.path.join(RUN, "_train_kwargs.json")))
     sc = tk["_sample_config"]; key = tk["sample"]
     SAMPLES[key] = sc
-    inf = np.load(os.path.join(RUN, "eval", "inference.npz"), allow_pickle=True)
     polar = (int(tk["center_mask_radius"]), int(tk["polar_mask_cols"]),
              int(tk["center_crop_size"]), bool(tk["com_centering"]))
+    inf_path = os.path.join(RUN, "eval", "inference.npz")
+    if not os.path.exists(inf_path):
+        inf = _make_inference(RUN, sc, polar, inf_path)
+    else:
+        inf = np.load(inf_path, allow_pickle=True)
     ctx = ic.Ctx(RUN, key, sc["path"], sc.get("vmax", 5.0),
                  tuple(sc["scan_shape"]), inf["embeds"], inf["assigns"], polar)
     acom = ic.find_acom_arrays(RUN)
