@@ -1,0 +1,23 @@
+{
+  "continuous": [
+    {
+      "factor": "scattered intensity",
+      "eta2": 0.9004,
+      "MI": 0.8744,
+      "probe_R2": 0.9391
+    },
+    {
+      "factor": "crystallinity (peak/halo)",
+      "eta2": 0.8552,
+      "MI": 0.8048,
+      "probe_R2": 0.8558
+    },
+    {
+      "factor": "spottiness (azim-var)",
+      "eta2": 0.9261,
+      "MI": 0.7567,
+      "probe_R2": 0.9173
+    }
+  ],
+  "categorical": {}
+}

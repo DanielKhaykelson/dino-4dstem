@@ -1,0 +1,32 @@
+{
+  "baseline": {
+    "ARI_vs_orig": 1.0,
+    "NMI_vs_orig": 1.0,
+    "K_active": 13
+  },
+  "radial_only": {
+    "ARI_vs_orig": 0.0821,
+    "NMI_vs_orig": 0.2137,
+    "K_active": 4
+  },
+  "blur(s=2)": {
+    "ARI_vs_orig": 0.2733,
+    "NMI_vs_orig": 0.3793,
+    "K_active": 7
+  },
+  "perframe_norm": {
+    "ARI_vs_orig": 1.0,
+    "NMI_vs_orig": 1.0,
+    "K_active": 13
+  },
+  "qmask_low": {
+    "ARI_vs_orig": 0.2281,
+    "NMI_vs_orig": 0.3515,
+    "K_active": 11
+  },
+  "qmask_high": {
+    "ARI_vs_orig": 0.5311,
+    "NMI_vs_orig": 0.5699,
+    "K_active": 13
+  }
+}

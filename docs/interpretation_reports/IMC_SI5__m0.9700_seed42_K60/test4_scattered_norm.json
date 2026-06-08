@@ -1,0 +1,7 @@
+{
+  "scattered_norm": {
+    "ARI_vs_orig": 0.0142,
+    "NMI_vs_orig": 0.0618,
+    "K_active": 8
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "continuous": [
+    {
+      "factor": "scattered intensity",
+      "eta2": 0.2311,
+      "MI": 0.2925,
+      "probe_R2": 0.6986
+    },
+    {
+      "factor": "crystallinity (peak/halo)",
+      "eta2": 0.5729,
+      "MI": 0.4631,
+      "probe_R2": 0.8016
+    },
+    {
+      "factor": "spottiness (azim-var)",
+      "eta2": 0.2894,
+      "MI": 0.4704,
+      "probe_R2": 0.6146
+    },
+    {
+      "factor": "ACOM correlation",
+      "eta2": 0.1191,
+      "MI": 0.0755,
+      "probe_R2": 0.1331
+    }
+  ],
+  "categorical": {
+    "zone_axis": {
+      "AMI": 0.0606,
+      "ARI": 0.0113,
+      "n_indexed": 1589,
+      "n_zone_axes": 137
+    }
+  }
+}

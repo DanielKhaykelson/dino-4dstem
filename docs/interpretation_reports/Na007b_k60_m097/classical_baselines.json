@@ -1,0 +1,27 @@
+{
+  "methods": {
+    "virtual DF (total scattered I)": {
+      "ARI": 0.4495,
+      "AMI": 0.372
+    },
+    "azimuthal profile (radial) \u2192 PCA": {
+      "ARI": 0.5069,
+      "AMI": 0.4282
+    },
+    "pattern PCA (linear decomp.)": {
+      "ARI": 0.5161,
+      "AMI": 0.4151
+    },
+    "pattern NMF (non-neg decomp.)": {
+      "ARI": 0.5094,
+      "AMI": 0.4278
+    },
+    "combination (DF + radial + pattern)": {
+      "ARI": 0.4905,
+      "AMI": 0.4136
+    }
+  },
+  "best": "pattern PCA (linear decomp.)",
+  "best_ARI": 0.5161,
+  "K": 14
+}
