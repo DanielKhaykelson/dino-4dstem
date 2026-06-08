@@ -29,6 +29,8 @@ from matplotlib.colors import ListedColormap
 from sklearn.linear_model import Ridge, LogisticRegression
 from sklearn.model_selection import KFold, cross_val_score
 from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA, NMF
+from sklearn.cluster import KMeans
 from sklearn.metrics import (adjusted_rand_score, normalized_mutual_info_score,
                              adjusted_mutual_info_score, mutual_info_score)
 
@@ -205,13 +207,16 @@ def _zone_axis_labels(acom):
 # one cube pass: physical factors + class means
 # --------------------------------------------------------------------------
 def compute_factors_and_means(ctx, beam_px=None, qlo_frac=0.10, qhi_frac=0.90,
-                              progress=None):
+                              collect_classical=False, ds=40, progress=None):
     """Single pass over the cube → per-position factors + per-class means.
 
     Returns dict(scattered, peakhalo, azimvar, means, profiles, counts,
-    beam_px, nb).
+    beam_px, nb).  With ``collect_classical`` also returns per-position
+    ``radial`` (azimuthal profile) and ``patt_ds`` (downsampled log pattern)
+    for the classical-baseline comparison.
     """
     from gui_app.posthoc_panel import _open_lazy
+    import cv2
     Ny, Nx = ctx.scan_shape
     cube = _open_lazy(ctx.cube_path, scan_shape=(Ny, Nx))
     # probe one frame for geometry
@@ -236,6 +241,9 @@ def compute_factors_and_means(ctx, beam_px=None, qlo_frac=0.10, qhi_frac=0.90,
     sums = np.zeros((K, H, W), np.float64)
     cnts = np.zeros(K, np.int64)
     assn = ctx.assigns.reshape(Ny, Nx)
+    radial = np.zeros((N, nb), np.float32) if collect_classical else None
+    patt_ds = (np.zeros((N, ds * ds), np.float32)
+               if collect_classical else None)
 
     for rx in range(Ny):
         row = np.asarray(cube[rx], np.float32)      # (Nx,H,W)
@@ -252,6 +260,11 @@ def compute_factors_and_means(ctx, beam_px=None, qlo_frac=0.10, qhi_frac=0.90,
                                     / (seg.sum() + eps))
                 vv = v[lo:hi]
                 azimvar[i] = float(np.mean(vv / (seg * seg + eps)))
+            if collect_classical:
+                radial[i] = m[:nb]
+                patt_ds[i] = cv2.resize(np.log1p(np.clip(pat, 0, None)),
+                                        (ds, ds),
+                                        interpolation=cv2.INTER_AREA).ravel()
             c = int(assn[rx, ry])
             sums[c] += pat; cnts[c] += 1
         if progress:
@@ -264,7 +277,8 @@ def compute_factors_and_means(ctx, beam_px=None, qlo_frac=0.10, qhi_frac=0.90,
                       / np.maximum(npix, 1) for c in range(K)])
     return dict(scattered=scattered, peakhalo=peakhalo, azimvar=azimvar,
                 means=means, profiles=profs, counts=cnts,
-                beam_px=float(beam_px), nb=nb, rb=rb)
+                beam_px=float(beam_px), nb=nb, rb=rb,
+                radial=radial, patt_ds=patt_ds, ds=ds)
 
 
 # --------------------------------------------------------------------------
@@ -401,6 +415,124 @@ def figures_class_means(ctx, factors):
 
 
 # --------------------------------------------------------------------------
+# Classical-baseline comparison — could a non-DINO method reproduce the map?
+# --------------------------------------------------------------------------
+def _km_ari(feat, ref, K, npca=0):
+    """Standardize → (optional PCA) → KMeans(K) → ARI/AMI vs ref labels."""
+    X = np.asarray(feat, np.float64)
+    if X.ndim == 1:
+        X = X[:, None]
+    X = np.nan_to_num(X)
+    X = StandardScaler().fit_transform(X)
+    if npca and X.shape[1] > npca:
+        X = PCA(n_components=npca, random_state=0).fit_transform(X)
+    lab = KMeans(n_clusters=K, n_init=10, random_state=0).fit_predict(X)
+    return (round(float(adjusted_rand_score(ref, lab)), 4),
+            round(float(adjusted_mutual_info_score(ref, lab)), 4), lab)
+
+
+def classical_baselines(ctx, factors, progress=None):
+    """Cluster a series of *classical* 4D-STEM feature sets into K (= DINO K)
+    and measure how well each reproduces the DINO partition (ARI / AMI).
+
+    Answers: could a classical pipeline (virtual DF, azimuthal integration,
+    PCA / NMF decomposition, or a combination) have produced the same grain
+    structure, or is the DINO partition distinctive?
+    """
+    if factors.get("radial") is None or factors.get("patt_ds") is None:
+        raise RuntimeError("classical baselines need collect_classical=True")
+    ref = ctx.assigns
+    K = ctx.K
+    rad = factors["radial"]; patt = factors["patt_ds"]
+    scattered = factors["scattered"]
+
+    methods = {}
+    steps = [
+        ("virtual DF (total scattered I)", lambda: _km_ari(scattered, ref, K)),
+        ("azimuthal profile (radial) → PCA",
+         lambda: _km_ari(rad, ref, K, npca=20)),
+        ("pattern PCA (linear decomp.)",
+         lambda: _km_ari(patt, ref, K, npca=30)),
+    ]
+    # NMF on the (non-negative) downsampled log-patterns — the classical
+    # decomposition the user already runs in the NMF tab.
+    def _nmf():
+        Xn = np.clip(np.nan_to_num(patt), 0, None)
+        W = NMF(n_components=min(2 * K, 30), init="nndsvda", max_iter=300,
+                random_state=0).fit_transform(Xn)
+        return _km_ari(W, ref, K)
+    steps.append(("pattern NMF (non-neg decomp.)", _nmf))
+
+    maps = {}
+    for i, (name, fn) in enumerate(steps):
+        ari, ami, lab = fn()
+        methods[name] = dict(ARI=ari, AMI=ami)
+        maps[name] = lab.reshape(ctx.scan_shape)
+        if progress:
+            progress(i + 1, len(steps) + 1, f"classical: {name}")
+
+    # combination of complementary classical features
+    combo = np.concatenate([
+        StandardScaler().fit_transform(np.nan_to_num(scattered)[:, None]),
+        PCA(20, random_state=0).fit_transform(
+            StandardScaler().fit_transform(np.nan_to_num(rad))),
+        PCA(30, random_state=0).fit_transform(
+            StandardScaler().fit_transform(np.nan_to_num(patt))),
+    ], axis=1)
+    ari, ami, lab = _km_ari(combo, ref, K)
+    methods["combination (DF + radial + pattern)"] = dict(ARI=ari, AMI=ami)
+    maps["combination (DF + radial + pattern)"] = lab.reshape(ctx.scan_shape)
+    if progress:
+        progress(len(steps) + 1, len(steps) + 1, "classical: combination")
+
+    best = max(methods.items(), key=lambda kv: kv[1]["ARI"])
+    out = dict(methods=methods, best=best[0], best_ARI=best[1]["ARI"],
+               K=K)
+    json.dump(out, open(os.path.join(ctx.out, "classical_baselines.json"),
+                        "w"), indent=2)
+    _fig_classical(ctx, methods, maps)
+    return out
+
+
+def _fig_classical(ctx, methods, maps):
+    # bar chart
+    fig = Figure(figsize=(8, 4.2))
+    ax = fig.add_subplot(111)
+    nm = list(methods.keys())
+    ari = [methods[n]["ARI"] for n in nm]
+    ami = [methods[n]["AMI"] for n in nm]
+    x = np.arange(len(nm))
+    ax.bar(x - 0.2, ari, 0.4, label="ARI vs DINO")
+    ax.bar(x + 0.2, ami, 0.4, label="AMI vs DINO")
+    ax.axhline(0.8, ls="--", color="grey", lw=1)
+    ax.set_xticks(x); ax.set_xticklabels(nm, rotation=20, ha="right",
+                                         fontsize=7)
+    ax.set_ylabel("agreement with DINO (0–1)"); ax.set_ylim(0, 1)
+    ax.set_title(f"{ctx.sample}: can a classical method reproduce the DINO "
+                 f"map? (1 = identical)")
+    ax.legend(fontsize=8); ax.grid(axis="y", alpha=0.3)
+    _save(fig, os.path.join(ctx.out, "classical_baselines.png"))
+
+    # DINO vs each classical map
+    items = list(maps.items())
+    n = len(items) + 1
+    fig = Figure(figsize=(2.8 * n, 3.2))
+    cmap = ListedColormap(_get_cmap("tab20")(np.linspace(0, 1, max(ctx.K, 2))))
+    ax = fig.add_subplot(1, n, 1)
+    ax.imshow(ctx.assigns.reshape(ctx.scan_shape), cmap=cmap,
+              interpolation="nearest", aspect="equal")
+    ax.set_title("DINO", fontsize=9); ax.set_xticks([]); ax.set_yticks([])
+    for j, (name, m) in enumerate(items):
+        ax = fig.add_subplot(1, n, j + 2)
+        ax.imshow(m, cmap=cmap, interpolation="nearest", aspect="equal")
+        ax.set_title(f"{name}\nARI={methods[name]['ARI']}", fontsize=7)
+        ax.set_xticks([]); ax.set_yticks([])
+    fig.suptitle("DINO vs classical clusterings (labels are arbitrary; "
+                 "shape match is what matters)", fontsize=10)
+    _save(fig, os.path.join(ctx.out, "classical_vs_dino_maps.png"))
+
+
+# --------------------------------------------------------------------------
 # Tests 2 & 4 — causal ablations
 # --------------------------------------------------------------------------
 def _radial_only(x):
@@ -534,7 +666,8 @@ def run_gradcam(ctx):
 # --------------------------------------------------------------------------
 # auto report
 # --------------------------------------------------------------------------
-def write_report(ctx, probe=None, ablations=None, acom=None, did_gradcam=False):
+def write_report(ctx, probe=None, ablations=None, acom=None, classical=None,
+                 did_gradcam=False):
     L = []
     L.append(f"# Interpretation report — {ctx.sample}")
     L.append("")
@@ -578,6 +711,40 @@ def write_report(ctx, probe=None, ablations=None, acom=None, did_gradcam=False):
                  "model depends on it.")
         L.append("")
 
+    uniq = None
+    if classical:
+        L.append("## Could a classical method reproduce the DINO map?")
+        L.append("")
+        L.append("| classical feature | ARI vs DINO | AMI vs DINO |")
+        L.append("|---|---|---|")
+        for k, v in sorted(classical["methods"].items(),
+                           key=lambda kv: -kv[1]["ARI"]):
+            L.append(f"| {k} | {v['ARI']} | {v['AMI']} |")
+        L.append("")
+        b = classical["best_ARI"]
+        single = max((v["ARI"] for k, v in classical["methods"].items()
+                      if "combination" not in k), default=0.0)
+        combo = classical["methods"].get(
+            "combination (DF + radial + pattern)", {}).get("ARI", 0.0)
+        if b >= 0.8:
+            uniq = (f"a classical pipeline (**{classical['best']}**) already "
+                    f"reproduces the DINO partition (ARI={b}); DINO is **not** "
+                    "adding distinctive structure here")
+        elif combo >= 0.6 and combo > single + 0.1:
+            uniq = (f"no single classical feature matches DINO (best "
+                    f"ARI={round(single, 3)}), but a **combination** of "
+                    f"classical features approaches it (ARI={combo}) — DINO "
+                    "behaves like a non-linear blend of classical descriptors")
+        elif b >= 0.5:
+            uniq = (f"classical methods only **partially** reproduce the map "
+                    f"(best ARI={b}); DINO refines structure beyond them")
+        else:
+            uniq = (f"**no classical baseline reproduces the DINO partition** "
+                    f"(best ARI={b}) — the clustering is distinctive, not a "
+                    "re-labelling of a virtual-DF / radial / PCA / NMF map")
+        L.append(f"**Uniqueness:** {uniq}.")
+        L.append("")
+
     # nuanced verdict
     L.append("## Reading")
     L.append("")
@@ -604,6 +771,8 @@ def write_report(ctx, probe=None, ablations=None, acom=None, did_gradcam=False):
         if za and za.get("AMI", 1) < 0.15:
             bits.append("it is **not** based on crystallographic orientation "
                         f"(zone-axis AMI={za['AMI']})")
+    if uniq:
+        bits.append(uniq)
     if not bits:
         bits.append("results written — inspect the figures for the dominant "
                     "axis")

@@ -31,6 +31,8 @@ _FIG_SPECS = [
     ("Ablation class maps",            "_interpretability/test2_4_ablation_maps.png"),
     ("Per-class mean patterns",        "_interpretability/class_mean_patterns.png"),
     ("Per-class radial profiles",      "_interpretability/class_radial_profiles.png"),
+    ("Classical-baseline agreement",   "_interpretability/classical_baselines.png"),
+    ("DINO vs classical maps",         "_interpretability/classical_vs_dino_maps.png"),
     ("Grad-CAM / IG (per prototype)",  "eval/paper_attribution/fig_paper_attribution.png"),
 ]
 
@@ -78,11 +80,13 @@ class InterpretPanel(ctk.CTkFrame):
                      font=ctk.CTkFont(weight="bold")).pack(anchor="w")
         self._opt_probe = ctk.BooleanVar(value=True)
         self._opt_means = ctk.BooleanVar(value=True)
+        self._opt_classical = ctk.BooleanVar(value=True)
         self._opt_abl = ctk.BooleanVar(value=True)
         self._opt_gcam = ctk.BooleanVar(value=False)
         for txt, var, hint in [
             ("Probing + signatures (fast)", self._opt_probe, ""),
             ("Class averages (1 cube pass)", self._opt_means, ""),
+            ("Classical-baseline comparison", self._opt_classical, ""),
             ("Causal ablations (GPU, ~minutes)", self._opt_abl, ""),
             ("Grad-CAM / IG (GPU)", self._opt_gcam, ""),
         ]:
@@ -201,18 +205,25 @@ class InterpretPanel(ctk.CTkFrame):
             def prog(d, t, s):
                 self._set_prog(f"{s}: {d}/{t}")
 
-            probe = abl = None
+            probe = abl = classical = None
             did_gcam = False
 
-            if self._opt_probe.get() or self._opt_means.get():
+            want_classical = self._opt_classical.get()
+            if (self._opt_probe.get() or self._opt_means.get()
+                    or want_classical):
                 self._set_prog("computing factors + class means (cube pass) …")
-                self._factors = ic.compute_factors_and_means(ctx, progress=prog)
+                self._factors = ic.compute_factors_and_means(
+                    ctx, collect_classical=want_classical, progress=prog)
             if self._opt_probe.get():
                 self._set_prog("probing (ridge R² / η² / MI) …")
                 probe = ic.probe_and_signatures(ctx, self._factors, acom=acom)
             if self._opt_means.get():
                 self._set_prog("rendering class-mean figures …")
                 ic.figures_class_means(ctx, self._factors)
+            if want_classical:
+                self._set_prog("classical-baseline comparison …")
+                classical = ic.classical_baselines(ctx, self._factors,
+                                                   progress=prog)
             if self._opt_abl.get():
                 self._set_prog("loading model for ablations …")
                 model, dev = self._load_model(ph)
@@ -226,7 +237,8 @@ class InterpretPanel(ctk.CTkFrame):
                     self._set_prog(f"Grad-CAM failed: {e}")
 
             rep = ic.write_report(ctx, probe=probe, ablations=abl,
-                                  acom=acom, did_gradcam=did_gcam)
+                                  acom=acom, classical=classical,
+                                  did_gradcam=did_gcam)
             self.after(0, lambda: self._finish(run, rep))
         except Exception as e:
             tb = traceback.format_exc()
