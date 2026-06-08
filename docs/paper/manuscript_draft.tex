@@ -1,0 +1,265 @@
+\documentclass[journal=ancac3,manuscript=article,layout=twocolumn]{achemso}
+\usepackage{graphicx}\usepackage{amsmath}\usepackage{amssymb}\usepackage{booktabs}\usepackage{caption}
+\graphicspath{%
+ {D:/DINOSR/Claude/PaperRun_claude/dino_sr_contrastive/docs/explainer/figs/}%
+ {D:/DINOSR/Claude/PaperRun_claude/dino_sr_contrastive/docs/interpretation_reports/IMC_SI5__m0.9700_seed42_K60/}%
+ {D:/DINOSR/Claude/PaperRun_claude/dino_sr_contrastive/docs/interpretation_reports/EuInAs_B100__m0.9700_seed42_K60/}%
+}
+\author{Daniel Khaykelson}
+\email{author@institution.edu}
+\affiliation{Department of Materials Science and Engineering, [Institution]}
+\title{Label-Free, Bias-Free Classification of Difficult 4D-STEM Diffraction
+with a Diffraction-Tailored Self-Supervised Model}
+\keywords{4D-STEM, nanobeam electron diffraction, self-supervised learning,
+unsupervised clustering, low-dose, interpretability, indomethacin}
+\begin{document}
+
+\begin{abstract}
+Four-dimensional scanning transmission electron microscopy (4D-STEM) of
+beam-sensitive, low-dose, poorly-ordered materials produces diffraction data
+that are hard to segment into meaningful regions without labels, a forward
+model, or subjective choices such as the number of clusters or components. We
+introduce a self-supervised classifier purpose-built for nanobeam electron
+diffraction (NBED): a truncated convolutional DINO encoder trained with
+azimuthal ($\theta$-roll) augmentation for in-plane-rotation invariance, a
+radial-gated supervised-contrastive objective, and a one-dimensional radial
+clustering loss, with emergent cluster count and optional pairwise
+semi-supervision. The model needs no labels, no preset $K$, and no
+per-feature thresholds. On a sodium-phyllosilicate (NaPHI) flake it reproduces
+our previously published, expert-derived domain segmentation label-free and
+without the slow SAM + orientation-mapping pipeline (Dice $0.81$, IoU $0.68$;
+$\sim$75\% of the indexed domain recovered), and transfers to a new
+acquisition in milliseconds. A built-in interpretability protocol
+(representational probing, causal ablation, classical-baseline comparison, and
+ACOM cross-check) shows the clusters are governed by scattered intensity and
+low-$q$ two-dimensional diffraction structure, are rotation-invariant, and
+quantifies when the model is distinctive versus classical analysis: highly
+distinctive on hard low-dose molecular films (indomethacin, IMC) where
+classical decompositions cannot produce a coherent map, and convergent with
+classical analysis on well-ordered samples (NaPHI, EuInAs). The method is most
+valuable exactly where existing tools fail.
+\end{abstract}
+
+\section{Introduction}
+4D-STEM records a full diffraction pattern at every probe position, encoding
+local structure, orientation, strain and disorder across a
+field of view.\cite{ophus2019} Turning that data cube into a meaningful map of
+distinct regions is a prerequisite for almost any downstream analysis. For
+robust, well-ordered crystals this is routine; for the beam-sensitive,
+low-dose, partially-ordered materials of greatest current interest---organic
+semiconductors, pharmaceutical polymorphs, layered and defective
+crystals---it is not. Patterns are sparse and noisy, domains are numerous,
+and diffuse scattering blurs the distinctions a human or a template would key
+on.
+
+Unsupervised and self-supervised analysis is attractive because it needs no
+labels.\cite{caron2021,uhlemann2023} But the standard automated routes each
+demand a subjective choice the microscopist must defend: $k$-means and density
+clustering require the number of clusters (or a density scale); non-negative
+matrix factorization (NMF) and principal component analysis (PCA) require the
+number of components;\cite{spurgeon2021} supervised segmentation requires
+labels, which on hard data is prohibitive; and segmentation-model pipelines
+(e.g.\ SAM) plus orientation mapping are slow and parameterized. Just as
+importantly, even when a clustering succeeds, its \emph{physical} meaning is
+rarely established---so the map cannot be trusted.
+
+Here we address both problems. We present a self-supervised classifier
+engineered specifically for NBED, which produces a label-free, threshold-free
+first segmentation; we validate it against an independent, previously
+published expert result; and we pair it with an interpretability protocol that
+establishes what the clusters physically represent and when the method adds
+value over classical analysis.
+
+\section{Results and Discussion}
+
+\subsection{A diffraction-tailored self-supervised model}
+Our classifier is a self-distillation (DINO) network,\cite{caron2021} but every
+major design choice is dictated by the physics of NBED rather than inherited
+from natural-image vision:
+\begin{itemize}
+\item \textbf{Convolutional, truncated encoder.} We use a truncated ResNet
+rather than a vision transformer. NBED patterns are small, sparse and
+low-count; the convolutional inductive bias and the reduced depth match the
+available signal, whereas transformers are data-hungry and over-parameterized
+for this regime.
+\item \textbf{Physics-chosen augmentations.} An azimuthal ``$\theta$-roll''
+augmentation rotates the pattern in-plane during training, enforcing
+invariance to in-plane crystal rotation---a diffraction pattern rotated about
+the optic axis represents the \emph{same} structure. Flips and colour-jitter,
+standard in vision, are disabled because they are meaningless or harmful for
+diffraction.
+\item \textbf{Radial-gated contrastive + 1-D loss.} A radial-gated
+supervised-contrastive term\cite{khosla2020} and a one-dimensional radial
+clustering loss bias grouping toward the physically meaningful radial/ring
+signature.
+\item \textbf{Emergent $K$ and optional semi-supervision.} We over-specify the
+number of prototypes; the model populates only those it needs, so the active
+cluster count emerges from the data rather than being preset. A small number
+of pairwise ``same/different'' hints can optionally steer the partition
+without reverting to full labelling.
+\end{itemize}
+The result is a single forward pass from raw cube to a class map, with no
+user-set $K$, components, or thresholds.
+
+\subsection{Label-free concordance with expert segmentation}
+We first establish trust on a sample with an independent, published answer. In
+prior work on a NaPHI flake we segmented an oriented ``Line'' domain using a
+SAM segmentation plus orientation mapping with user-defined line
+parameters.\cite{ourNaPHI} Running the present model on the same scan, with no
+labels and no line parameters, the union of two emergent classes reproduces
+that domain (Figure~\ref{fig:naphi}): Dice $=0.81$, IoU $=0.68$, with
+$\sim$75\% of the published domain recovered and $\sim$89\% of the model's
+domain falling within the published one. The model achieves this without the
+SAM step, and a model trained on this flake transfers to a second, tilted
+acquisition in milliseconds---turning a slow, parameterized pipeline into an
+automatic one.
+
+\begin{figure}[t]\centering
+\includegraphics[width=\linewidth]{naphi_concordance.png}
+\caption*{\small\textbf{Figure 1.} NaPHI: the label-free DINO class map (centre)
+versus our previously published SAM+orientation segmentation (left), same scan.
+Overlay (right): green = agreement. The model recovers the oriented domain
+(Dice 0.81, IoU 0.68) with no labels, no SAM and no line parameters.}
+\label{fig:naphi}
+\end{figure}
+
+\subsection{Resolving low-dose molecular films where classical methods fail}
+The payoff is on the hard target. On low-dose indomethacin (IMC) films the
+model produces coherent, fine-grained class maps, whereas classical automated
+methods do not. Clustering virtual dark-field, azimuthal-profile, PCA and NMF
+features of the \emph{same} data into the same number of groups agrees only
+weakly with the DINO map (best adjusted Rand index, ARI $\approx0.11$--$0.21$
+across three IMC films; Figure~\ref{fig:imc}). There is no external ground
+truth here---classical analysis simply cannot deliver a usable map---so the
+method is the only practical route, and its trustworthiness rests on the
+validation above and the interpretability below.
+
+\begin{figure}[t]\centering
+\includegraphics[width=\linewidth]{classical_vs_dino_maps.png}
+\caption*{\small\textbf{Figure 2.} IMC (low-dose molecular): the DINO map (far
+left) versus classical clusterings of the same data (virtual-DF, azimuthal,
+PCA, NMF, combination). Colours are arbitrary; spatial shape is what matters.
+Classical methods recover only coarse regions (best ARI $\approx0.15$).}
+\label{fig:imc}
+\end{figure}
+
+\subsection{What the clusters encode}
+To establish meaning we apply four complementary tests
+(Figure~\ref{fig:interp}). \emph{Representational probing}---5-fold
+ridge regression from the frozen embedding to candidate physical factors, with
+the correlation ratio $\eta^2$---shows the embedding most strongly encodes the
+total scattered intensity and crystallinity, and essentially ignores
+crystallographic orientation and Bragg-peak count. \emph{Causal ablations}
+(re-inference on perturbed inputs, scored by ARI against the original map)
+confirm dependence: normalizing away the scattered intensity collapses the map,
+azimuthal averaging collapses it (the full 2-D pattern is needed, not a 1-D
+profile), and masking the low-$q$ band is far more damaging than masking
+high-$q$. \emph{Classical-baseline comparison} quantifies novelty (above).
+\emph{ACOM cross-check} confirms the partition is uncorrelated with indexed
+zone axis on the molecular samples (adjusted mutual information $\approx0$),
+consistent with the $\theta$-roll-imposed rotation invariance. Together: the
+clusters are driven by scattered intensity and low-$q$ 2-D diffraction
+structure, are rotation-invariant, and their distinctiveness from classical
+analysis is material-dependent.
+
+\begin{figure*}[t]\centering
+\includegraphics[width=0.95\textwidth]{cross_all.png}
+\caption*{\small\textbf{Figure 3.} Cross-sample interpretability (IMC SI3/SI4/SI5,
+NaPHI, EuInAs). (a) classical agreement with the DINO map (rises from
+distinctive IMC to substantially-captured NaPHI/EuInAs); (b) intensity
+dependence (low bar = strongly depends); (c) low-$q$ vs high-$q$ (low bar =
+that band matters---NaPHI/EuInAs depend almost entirely on low-$q$).}
+\label{fig:interp}
+\end{figure*}
+
+\subsection{Generality: crystalline, multi-phase, oriented data}
+The approach is not limited to molecular films. On a layered EuInAs sample with
+multiple phases, the model produces a sensible multi-domain map; classical
+methods here recover about half of it (ARI $\approx0.44$), i.e.\ the model is
+\emph{least} distinctive on well-ordered material---it is most distinctive
+precisely on the hard molecular case. A three-phase ACOM analysis
+(EuInAs/In/As) further shows that, for this crystalline sample, the DINO
+classes additionally track crystal orientation (zone-axis AMI $\approx0.30$), a
+genuine secondary axis that the molecular films lack.
+
+\subsection{A graphical interface for preparation, analysis and comparison}
+To make the method usable by experimentalists who do not program, we provide a
+graphical application built around three roles.
+
+\textbf{(1) Data preparation.} It loads the common cube formats (.prz/.npy/
+.npz/.h5, including detector-linked masters), and offers the preprocessing that
+matters for hard data: intensity scaling (linear $v_{\max}$ or logarithmic
+stretch), centre masking, real- or reciprocal-space Gaussian binning for
+low-dose denoising, region-of-interest selection, and multi-dataset handling
+---all non-destructive, writing new derived datasets.
+
+\textbf{(2) Output analysis.} This is the core value. The class map is fully
+interactive: clicking a position shows its raw pattern; clicking a class shows
+the \emph{class-average} diffraction; grains can be averaged individually; and
+single-frame, per-grain and per-cluster averages can be stacked and compared
+side by side, with on-image $q$/$d$-spacing readout and gradient-attribution
+overlays. A one-click ``Interpretation'' tab runs the full battery above
+(probing, ablation, classical-baseline, ACOM cross-check) and writes a report
+---so the question ``what do the clusters mean?'' is answered inside the same
+tool that produced them.
+
+\textbf{(3) Classical analysis, for comparison or standalone.} The same
+interface runs the classical methods on the same map---automated crystal
+orientation mapping (ACOM), NMF + clustering, crystallinity and
+spottiness mapping, and SAM-based segmentation---so a user can directly compare
+the self-supervised map against any of them, or use the classical tools on
+their own. The model is thus offered not as a black-box replacement but as the
+fast, unbiased first pass within a complete, comparison-ready toolkit.
+
+\section{Conclusions}
+We have introduced a self-supervised, diffraction-tailored classifier that
+turns difficult low-dose 4D-STEM into a label-free, threshold-free, and
+physically interpretable domain map. It reproduces an independent published
+expert segmentation without labels or SAM, transfers across acquisitions in
+milliseconds, and---uniquely among the methods we compared---extracts a
+coherent map from low-dose molecular films that classical decompositions
+cannot. A built-in interpretability protocol establishes that the clusters
+encode scattered intensity and low-$q$ diffraction structure rather than
+orientation, and quantifies where the method adds value. Because it removes the
+subjective choices (labels, $K$, components, thresholds) that gate existing
+workflows while remaining auditable, it is well suited as a first-pass,
+high-throughput tool for beam-sensitive crystalline materials.
+
+\section{Methods}
+\textbf{Model and training.} Truncated ResNet encoder; DINO self-distillation
+with teacher/student temperatures and EMA; azimuthal $\theta$-roll augmentation
+(student/teacher ranges), flips and colour-jitter disabled; radial-gated
+supervised-contrastive term and 1-D radial clustering loss; over-specified
+prototype count with emergent active $K$; optional pairwise semi-supervision.
+\textbf{Data.} NBED cubes of IMC (low-dose molecular), NaPHI and EuInAs.
+\textbf{Interpretability.} Ridge-probe $R^2$ and $\eta^2$; causal input
+ablations re-inferred and scored by ARI; classical baselines (virtual-DF,
+azimuthal-PCA, pattern-PCA, NMF) clustered to the active $K$ and scored by
+ARI/AMI; ACOM via py4DSTEM\cite{savitzky2021,ophus2022}. \textbf{Concordance.}
+IoU/Dice/containment of aligned, same-grid class and reference maps.
+
+\begin{acknowledgement}
+Analyses were performed on frozen, previously validated model checkpoints.
+\end{acknowledgement}
+
+\begin{thebibliography}{9}
+\bibitem{ophus2019} Ophus, C. Four-Dimensional Scanning Transmission Electron
+Microscopy (4D-STEM). \emph{Microsc.\ Microanal.} \textbf{2019}, \emph{25},
+563--582.
+\bibitem{caron2021} Caron, M.\ et al. Emerging Properties in Self-Supervised
+Vision Transformers. \emph{ICCV} \textbf{2021}, 9650--9660.
+\bibitem{uhlemann2023} Self-supervised representation learning for 4D-STEM.
+\emph{(representative prior work)}.
+\bibitem{spurgeon2021} Spurgeon, S.\ R.\ et al. Towards data-driven
+next-generation transmission electron microscopy. \emph{Nat.\ Mater.}
+\textbf{2021}, \emph{20}, 274--279.
+\bibitem{khosla2020} Khosla, P.\ et al. Supervised Contrastive Learning.
+\emph{NeurIPS} \textbf{2020}, \emph{33}, 18661--18673.
+\bibitem{ourNaPHI} [Author]\ et al. \emph{Nano Lett.} \textbf{2025}
+(NaPHI 4D-STEM study; DOI 10.1021/acs.nanolett.5c04946).
+\bibitem{savitzky2021} Savitzky, B.\ H.\ et al. py4DSTEM. \emph{Microsc.\
+Microanal.} \textbf{2021}, \emph{27}, 712--743.
+\bibitem{ophus2022} Ophus, C.\ et al. Automated Crystal Orientation Mapping.
+\emph{Microsc.\ Microanal.} \textbf{2022}, \emph{28}, 390--403.
+\end{thebibliography}
+\end{document}
