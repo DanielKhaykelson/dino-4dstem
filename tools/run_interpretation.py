@@ -55,11 +55,23 @@ def main():
     a = ap.parse_args()
     RUN = a.run
 
-    tk = json.load(open(os.path.join(RUN, "_train_kwargs.json")))
-    sc = tk["_sample_config"]; key = tk["sample"]
-    SAMPLES[key] = sc
-    polar = (int(tk["center_mask_radius"]), int(tk["polar_mask_cols"]),
-             int(tk["center_crop_size"]), bool(tk["com_centering"]))
+    # config: GUI runs carry _train_kwargs.json (+_sample_config); sweep runs
+    # carry run_summary.json with a built-in SAMPLES sample.
+    tkp = os.path.join(RUN, "_train_kwargs.json")
+    if os.path.exists(tkp):
+        cfg = json.load(open(tkp))
+        key = cfg["sample"]; sc = cfg["_sample_config"]; SAMPLES[key] = sc
+    else:
+        rs = json.load(open(os.path.join(RUN, "run_summary.json")))
+        key = rs["sample"]; cfg = rs["cfg"]
+        if key not in SAMPLES:
+            raise RuntimeError(f"sample '{key}' not in SAMPLES and run has no "
+                               "_sample_config")
+        sc = SAMPLES[key]
+    polar = (int(cfg.get("center_mask_radius", 0)),
+             int(cfg.get("polar_mask_cols", 0)),
+             int(cfg.get("center_crop_size", 140)),
+             bool(cfg.get("com_centering", False)))
     inf_path = os.path.join(RUN, "eval", "inference.npz")
     if not os.path.exists(inf_path):
         inf = _make_inference(RUN, sc, polar, inf_path)

@@ -722,26 +722,25 @@ def write_report(ctx, probe=None, ablations=None, acom=None, classical=None,
             L.append(f"| {k} | {v['ARI']} | {v['AMI']} |")
         L.append("")
         b = classical["best_ARI"]
-        single = max((v["ARI"] for k, v in classical["methods"].items()
-                      if "combination" not in k), default=0.0)
-        combo = classical["methods"].get(
-            "combination (DF + radial + pattern)", {}).get("ARI", 0.0)
+        ba = max((v.get("AMI", 0.0) for v in classical["methods"].values()),
+                 default=0.0)
         if b >= 0.8:
             uniq = (f"a classical pipeline (**{classical['best']}**) already "
                     f"reproduces the DINO partition (ARI={b}); DINO is **not** "
                     "adding distinctive structure here")
-        elif combo >= 0.6 and combo > single + 0.1:
-            uniq = (f"no single classical feature matches DINO (best "
-                    f"ARI={round(single, 3)}), but a **combination** of "
-                    f"classical features approaches it (ARI={combo}) — DINO "
-                    "behaves like a non-linear blend of classical descriptors")
-        elif b >= 0.5:
-            uniq = (f"classical methods only **partially** reproduce the map "
-                    f"(best ARI={b}); DINO refines structure beyond them")
+        elif b >= 0.45 or ba >= 0.55:
+            uniq = (f"classical features **substantially capture** the "
+                    f"partition (best ARI={b}, AMI={round(ba, 2)}); DINO "
+                    "refines them but does not depart strongly — it behaves "
+                    "like a non-linear blend of classical descriptors")
+        elif b >= 0.3:
+            uniq = (f"classical methods **partially** reproduce the map (best "
+                    f"ARI={b}, AMI={round(ba, 2)}); DINO refines beyond them")
         else:
             uniq = (f"**no classical baseline reproduces the DINO partition** "
-                    f"(best ARI={b}) — the clustering is distinctive, not a "
-                    "re-labelling of a virtual-DF / radial / PCA / NMF map")
+                    f"(best ARI={b}, AMI={round(ba, 2)}) — the clustering is "
+                    "distinctive, not a re-labelling of a virtual-DF / radial "
+                    "/ PCA / NMF map")
         L.append(f"**Uniqueness:** {uniq}.")
         L.append("")
 
