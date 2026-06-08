@@ -320,7 +320,7 @@ s = slide(LIGHT)
 text(s, "Across all samples", 0.7, 0.4, 12, 0.7, size=32, color=DEEP,
      bold=True, font=HEAD)
 fit_image(s, os.path.join(FIG, "cross_all.png"), 0.5, 1.15, 12.4, 3.5,
-          caption="IMC SI3/SI4 · NaPHI (Na007b) · EuInAs. (a) classical "
+          caption="IMC SI3/SI4/SI5 · NaPHI (Na007b) · EuInAs. (a) classical "
                   "agreement; (b) intensity dependence; (c) low-q vs high-q.")
 box(s, 0.7, 5.05, 5.9, 1.95, fill=ICE, rounded=True)
 text(s, [
