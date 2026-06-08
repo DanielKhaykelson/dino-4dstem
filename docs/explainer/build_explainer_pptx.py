@@ -240,6 +240,29 @@ text(s, [
      {"size": 14}),
 ], 6.45, 5.05, 6.1, 1.6, color=INK)
 
+# ------------------------------------------------------ 5b ABLATION DEMO
+s = slide(LIGHT)
+text(s, "What each edit does — before vs. after", 0.7, 0.45, 12, 0.8,
+     size=30, color=DEEP, bold=True, font=HEAD)
+fit_image(s, os.path.join(FIG, "ablation_demo.png"), 0.7, 1.2, 3.6, 6.1)
+text(s, [
+    ("Same diffraction pattern, edited one way at a time:", {"bold": True,
+     "size": 17, "color": TEAL}),
+    ("• scattered-norm — rescales the overall brightness away (keeps the "
+     "pattern, removes ‘how much it scatters’).", {"size": 15,
+     "space_before": 10}),
+    ("• radial-only — keeps the rings, erases all angular detail.",
+     {"size": 15, "space_before": 8}),
+    ("• blur — washes out the sharp Bragg spots.", {"size": 15,
+     "space_before": 8}),
+    ("• mask low-q / high-q — blanks the inner / outer rings.",
+     {"size": 15, "space_before": 8}),
+    ("We re-run the model on each edited version and check whether the map "
+     "survives (Test 2). The edits that break the map reveal what the model "
+     "relies on.", {"size": 15, "italic": True, "color": DEEP,
+     "space_before": 14}),
+], 4.7, 1.5, 8.0, 5.6)
+
 # ---------------------------------------------------------------- 6 CLASSICAL
 s = slide(LIGHT)
 text(s, "Test 3 · Could a classical method do the same?", 0.7, 0.45,
@@ -292,27 +315,31 @@ for tag, sub, scale, col in cards:
     ], 4.9, y, 7.3, 2.1, anchor=MSO_ANCHOR.MIDDLE)
     y += 2.45
 
-# ---------------------------------------------------------------- 8 FINDINGS
+# ------------------------------------------------------ 8 ALL SAMPLES
 s = slide(LIGHT)
-text(s, "What we found", 0.7, 0.45, 12, 0.8, size=32, color=DEEP, bold=True,
-     font=HEAD)
+text(s, "Across all samples", 0.7, 0.4, 12, 0.7, size=32, color=DEEP,
+     bold=True, font=HEAD)
+fit_image(s, os.path.join(FIG, "cross_all.png"), 0.5, 1.15, 12.4, 3.5,
+          caption="IMC SI3/SI4 · NaPHI (Na007b) · EuInAs. (a) classical "
+                  "agreement; (b) intensity dependence; (c) low-q vs high-q.")
+box(s, 0.7, 5.05, 5.9, 1.95, fill=ICE, rounded=True)
 text(s, [
-    ("• The groups are driven by the overall scattered intensity plus "
-     "the inner, low-angle (low-q) 2-D diffraction structure.", {"size": 16}),
-    ("• NOT by crystal orientation (agreement ≈ 0) — the model "
-     "is rotation-invariant by design.", {"size": 16, "space_before": 8}),
-    ("• Uniqueness is material-dependent: IMC maps are distinctive "
-     "(classical ≈ 0.15); NaPHI is ~half-classical (≈ 0.5).",
-     {"size": 16, "space_before": 8}),
-    ("• Log-stretch preprocessing keeps the same basis but sharpens it "
-     "— more, cleaner groups.", {"size": 16, "space_before": 8}),
-], 0.7, 1.5, 6.1, 5.0)
-box(s, 7.0, 1.6, 5.7, 4.9, fill=WHITE, line=ICE, rounded=True)
-fit_image(s, os.path.join(FIG, "cross_sample.png"), 7.15, 2.6, 5.4, 2.9,
-          caption="Cross-sample: (a) what's encoded, (b) ablations, "
-                  "(c) classical agreement.")
-text(s, "Across IMC SI3/SI4/SI5 and NaPHI", 7.15, 1.75, 5.4, 0.5, size=14,
-     color=MUTE, italic=True, align=PP_ALIGN.CENTER)
+    ("Same physical basis everywhere", {"bold": True, "size": 15,
+     "color": NAVY}),
+    ("Scattered intensity + low-q 2-D structure drive every sample; "
+     "removing intensity or the low-q band breaks the map.", {"size": 14,
+     "space_before": 6}),
+], 0.95, 5.18, 5.45, 1.7, anchor=MSO_ANCHOR.MIDDLE)
+box(s, 6.8, 5.05, 5.9, 1.95, fill=NAVY, rounded=True)
+text(s, [
+    ("Distinctiveness varies by material", {"bold": True, "size": 15,
+     "color": GOLD}),
+    ("IMC: classical ARI ≈ 0.1–0.2 (distinctive). NaPHI & EuInAs: ≈ 0.5 "
+     "(classical gets most of the way).", {"size": 14, "color": WHITE,
+     "space_before": 6}),
+    ("EuInAs alone also tracks crystal orientation (zone-axis AMI ≈ 0.3).",
+     {"size": 13, "color": ICE, "space_before": 5}),
+], 7.05, 5.18, 5.45, 1.7, anchor=MSO_ANCHOR.MIDDLE)
 
 # ---------------------------------------------------------------- 9 MEANING
 s = slide(NAVY)
@@ -325,11 +352,13 @@ text(s, [
      "physically sensible axis, not an arbitrary black box.", {"size": 19,
      "color": WHITE}),
     ("For IMC it is genuinely distinctive (a standard virtual-detector / PCA "
-     "map does not reproduce it); for NaPHI it stays closer to classical.",
-     {"size": 17, "color": ICE, "space_before": 16}),
+     "map does not reproduce it); for NaPHI and EuInAs it stays closer to "
+     "classical. The crystalline EuInAs additionally tracks crystal "
+     "orientation (zone-axis), which the molecular films do not.",
+     {"size": 16, "color": ICE, "space_before": 14}),
     ("Caveat: “scattered intensity” blends crystallinity with "
      "sample thickness — a thickness map would separate the two.",
-     {"size": 15, "color": ICE, "italic": True, "space_before": 16}),
+     {"size": 15, "color": ICE, "italic": True, "space_before": 14}),
 ], 1.0, 1.9, 11.4, 4.8, line_spacing=1.1)
 
 prs.save(OUT)

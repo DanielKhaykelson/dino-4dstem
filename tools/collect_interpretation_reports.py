@@ -64,9 +64,13 @@ def parse_report(path):
 
 
 def main():
+    # clear prior contents but tolerate Windows file locks on the top dir
     if os.path.isdir(DEST):
-        shutil.rmtree(DEST)
-    os.makedirs(DEST)
+        for child in os.listdir(DEST):
+            p = os.path.join(DEST, child)
+            shutil.rmtree(p, ignore_errors=True) if os.path.isdir(p) \
+                else os.remove(p)
+    os.makedirs(DEST, exist_ok=True)
     rows = []
     for idir in sorted(glob.glob(os.path.join(ROOT, "runs", "**",
                                               "_interpretability"),

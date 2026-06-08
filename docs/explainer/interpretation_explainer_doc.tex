@@ -71,6 +71,17 @@ re-run the model, and compare the new map to the original (agreement = ARI).
 If the map survives the edit, that ingredient was not needed; if it falls
 apart, the model depended on it.
 
+\begin{figure}[h]
+\centering
+\includegraphics[width=\linewidth]{ablation_demo_row.png}
+\caption*{\small The same diffraction pattern, before (\emph{Original}) and
+after each modification. \emph{scattered\_norm} rescales the overall
+brightness away; \emph{radial\_only} keeps the rings but erases angular
+detail; \emph{blur} washes out sharp spots; \emph{qmask\_low/high} blank the
+inner / outer rings. Each edited version is re-clustered and compared to the
+original map.}
+\end{figure}
+
 \subsection{3. Classical check --- is the map actually new?}
 \textbf{Plain idea:} does the AI just redraw what a standard, decades-old
 analysis already shows, or something genuinely new?\\
@@ -101,15 +112,21 @@ looks at.
 intensity} together with the \textbf{inner, low-angle (low-$q$) 2-D
 diffraction structure} --- the arrangement of the inner rings/spots
 ($q \lesssim 2.1$\,nm$^{-1}$, i.e.\ $d \gtrsim 4.7$\,\AA).
-\item It is \textbf{not} based on crystal orientation: agreement with the
-indexed zone axis is essentially zero (AMI $\le 0.06$), because the model is
-trained to be rotation-invariant by design.
+\item For the \textbf{molecular} films (IMC, NaPHI) it is \textbf{not} based on
+crystal orientation (zone-axis agreement AMI $\le 0.06$); the model is
+in-plane-rotation-invariant by design.
 \item A 1-D radial profile alone is \textbf{not enough} --- averaging away the
 angles collapses the map; the full 2-D pattern is needed.
-\item \textbf{Uniqueness is material-dependent.} For IMC, no classical method
-reproduces the map (best agreement ARI $\approx 0.15$): the AI map is
-\emph{distinctive}. For NaPHI, classical methods get about halfway
-(ARI $\approx 0.5$): there the AI stays closer to a classical decomposition.
+\item \textbf{Uniqueness is material-dependent.} For the molecular IMC films no
+classical method reproduces the map (best ARI $\approx 0.11$--$0.18$): the AI
+map is \emph{distinctive}. For NaPHI and the layered EuInAs, classical methods
+get about halfway (ARI $\approx 0.44$--$0.52$, AMI up to $0.6$): there the AI
+stays closer to a classical decomposition (see figure).
+\item \textbf{EuInAs is special:} being well-crystallised, its DINO classes
+also \emph{partially track crystal orientation} (3-phase ACOM zone-axis AMI
+$\approx 0.30$ --- much higher than the molecular films), while phase identity
+does not (AMI $\approx 0.08$). Orientation is a genuine \emph{secondary} axis
+here.
 \item Logarithmic intensity stretching (an image-prep choice) keeps the same
 physical basis but \emph{sharpens} it --- more, cleaner groups.
 \end{itemize}
@@ -117,9 +134,11 @@ physical basis but \emph{sharpens} it --- more, cleaner groups.
 \section{What it means (and one caveat)}
 The model groups regions by \emph{how much, and what, they diffract at low
 angles} --- crystallinity, molecular packing, and sample thickness. That is a
-physically sensible axis, not an arbitrary black box. For IMC it is genuinely
-distinctive (a standard virtual-detector or PCA map does not reproduce it);
-for NaPHI it stays closer to classical analysis.
+physically sensible axis, not an arbitrary black box. For the molecular IMC
+films it is genuinely distinctive (a standard virtual-detector or PCA map does
+not reproduce it); for NaPHI and the layered EuInAs it stays closer to
+classical analysis, and EuInAs additionally tracks crystal orientation, which
+the molecular films do not.
 
 \textbf{Caveat:} ``scattered intensity'' blends crystallinity with sample
 thickness --- both raise the total diffracted signal. An independent
@@ -129,11 +148,13 @@ available; the conclusions above hold with or without it.
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=\linewidth]{cross_sample.png}
-\caption*{\small Cross-sample summary. \textbf{(a)} which properties are
-encoded (probe $R^2$); \textbf{(b)} causal ablations (low bar = the model
-depends on that signal); \textbf{(c)} how well classical methods reproduce the
-AI map (all $\le 0.18$ for IMC). Bars: SI4, SI3 (linear), SI3 (log-stretch).}
+\includegraphics[width=\linewidth]{cross_all.png}
+\caption*{\small Cross-sample summary (IMC SI3/SI4, NaPHI, EuInAs).
+\textbf{(a)} how well classical methods reproduce the AI map (rises from
+``distinctive'' IMC to ``substantially captured'' NaPHI/EuInAs);
+\textbf{(b)} intensity dependence (low bar = strongly depends);
+\textbf{(c)} low-$q$ vs high-$q$ (low bar = that band matters --- NaPHI and
+EuInAs depend almost entirely on low-$q$).}
 \end{figure}
 
 \begin{figure}[h]

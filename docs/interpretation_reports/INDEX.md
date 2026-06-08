@@ -10,6 +10,7 @@ Auto-collected by `tools/collect_interpretation_reports.py`. Each subfolder mirr
 | IMC SI4 | [IMC_SI4_m097_k60](IMC_SI4_m097_k60/report_auto.md) | 9 | 16384 | no classical baseline reproduces the DINO partition (best ARI=0.1499, AMI=0.25) — the clustering is distinctive, not a re-labelling of a virtual-DF / radial / PCA / NMF map. |
 | IMC SI5 | [IMC_SI5__m0.9700_seed42_K60](IMC_SI5__m0.9700_seed42_K60/report.md) | 13 | ? | see report |
 | NaPHI Na007b | [Na007b_k60_m097](Na007b_k60_m097/report_auto.md) | 14 | 12600 | classical features substantially capture the partition (best ARI=0.5161, AMI=0.43); DINO refines them but does not depart strongly — it behaves like a non-linear blend of classical descriptors. |
+| NaPHI Na007b | [Na007b_k60_m097_vmax2](Na007b_k60_m097_vmax2/report_auto.md) | 12 | 12600 | classical features substantially capture the partition (best ARI=0.4791, AMI=0.5); DINO refines them but does not depart strongly — it behaves like a non-linear blend of classical descriptors. |
 
 ## Documents (`_documents/`)
 

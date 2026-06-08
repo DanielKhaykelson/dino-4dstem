@@ -9,7 +9,10 @@ Run: `m0.9700_seed42_K60`  ·  K_active = 9  ·  N = 26136
 | spottiness (azim-var) | 0.9277 | 0.7438 | 1.0655 |
 | scattered intensity | 0.9262 | 0.8664 | 1.0811 |
 | crystallinity (peak/halo) | 0.8982 | 0.7745 | 0.791 |
+| ACOM correlation | 0.0976 | 0.1029 | 0.1638 |
 
+ACOM phase vs classes: AMI=0.0828, ARI=0.0449.
+ACOM zone-axis vs classes: AMI=0.3048, ARI=0.1424 (4448 indexed, 63 zone axes).
 
 ## Causal ablations (ARI vs original map)
 
@@ -39,5 +42,3 @@ High ARI = that information was not needed; low ARI = the model depends on it.
 ## Reading
 
 Summary: The embedding most strongly encodes **scattered intensity, crystallinity (peak/halo), spottiness (azim-var)**; removing the overall **scattered intensity** collapses the map (ARI=0.0) — a major driver; **low-q** matters more than high-q (ARI 0.0067 vs 0.9953); classical features **substantially capture** the partition (best ARI=0.4373, AMI=0.61); DINO refines them but does not depart strongly — it behaves like a non-linear blend of classical descriptors.
-
-> **ACOM not available** for this run, so the orientation/phase factors and the zone-axis cross-check were skipped. Run ACOM (Diffraction ▸ ACOM, full-dataset mode) first to include them.

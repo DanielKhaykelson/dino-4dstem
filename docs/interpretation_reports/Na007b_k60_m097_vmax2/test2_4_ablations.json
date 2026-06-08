@@ -1,0 +1,32 @@
+{
+  "baseline": {
+    "ARI_vs_orig": 1.0,
+    "NMI_vs_orig": 1.0,
+    "K_active": 12
+  },
+  "scattered_norm": {
+    "ARI_vs_orig": 0.0019,
+    "NMI_vs_orig": 0.132,
+    "K_active": 3
+  },
+  "radial_only": {
+    "ARI_vs_orig": 0.1103,
+    "NMI_vs_orig": 0.2014,
+    "K_active": 5
+  },
+  "blur(s=2)": {
+    "ARI_vs_orig": 0.3898,
+    "NMI_vs_orig": 0.5391,
+    "K_active": 11
+  },
+  "qmask_low": {
+    "ARI_vs_orig": 0.1121,
+    "NMI_vs_orig": 0.172,
+    "K_active": 5
+  },
+  "qmask_high": {
+    "ARI_vs_orig": 0.9378,
+    "NMI_vs_orig": 0.9195,
+    "K_active": 12
+  }
+}

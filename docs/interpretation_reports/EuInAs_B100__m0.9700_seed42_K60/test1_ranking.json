@@ -17,7 +17,24 @@
       "eta2": 0.7438,
       "MI": 1.0655,
       "probe_R2": 0.9277
+    },
+    {
+      "factor": "ACOM correlation",
+      "eta2": 0.1029,
+      "MI": 0.1638,
+      "probe_R2": 0.0976
     }
   ],
-  "categorical": {}
+  "categorical": {
+    "phase": {
+      "AMI": 0.0828,
+      "ARI": 0.0449
+    },
+    "zone_axis": {
+      "AMI": 0.3048,
+      "ARI": 0.1424,
+      "n_indexed": 4448,
+      "n_zone_axes": 63
+    }
+  }
 }
