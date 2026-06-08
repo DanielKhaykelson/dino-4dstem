@@ -2499,6 +2499,14 @@ class ACOMTabPanel(ctk.CTkFrame):
                       os.path.dirname(SAMPLES[sample]["path"]),
                       "_acom_maps"))
         os.makedirs(base, exist_ok=True)
+        # Persist the raw result arrays (not just PNGs) so the Interpretation
+        # tab can reuse them for the DINO-vs-orientation cross-check.
+        try:
+            np.save(os.path.join(base, "mpfull_phase_id.npy"), phase_id)
+            np.save(os.path.join(base, "mpfull_winning_corr.npy"), win_corr)
+            np.save(os.path.join(base, "mpfull_winning_rmat.npy"), win_rmat)
+        except Exception as _e:
+            print(f"[mpfull] array save failed: {_e!r}")
         from matplotlib.patches import Patch
         from matplotlib.lines import Line2D
 
@@ -2967,6 +2975,13 @@ class ACOMTabPanel(ctk.CTkFrame):
         grain_labels, n_grains = self._segment_grains(
             matched, win_rmat, misori_deg=10.0, min_grain=4)
         mask_rgb = self._grain_rgb(grain_labels, n_grains)
+        # Persist raw arrays for the Interpretation tab (DINO-vs-orientation).
+        try:
+            np.save(os.path.join(base, "mpfull_phase_id.npy"), phase_id)
+            np.save(os.path.join(base, "mpfull_winning_corr.npy"), win_corr)
+            np.save(os.path.join(base, "mpfull_winning_rmat.npy"), win_rmat)
+        except Exception as _e:
+            print(f"[spfull] array save failed: {_e!r}")
         self._mpfull = dict(
             scan_shape=(Ny, Nx), phase_rgb=phase_rgb, za_rgb=za_rgb,
             win_corr=win_corr, phase_id=phase_id, names=[phase_name],

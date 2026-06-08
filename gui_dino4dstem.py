@@ -95,6 +95,7 @@ from gui_app.blob_panel import BlobPanel
 from gui_app.strain_panel import StrainPanel
 from gui_app.fluct_panel import FluctPanel
 from gui_app.symm_panel import SymmPanel
+from gui_app.interpret_panel import InterpretPanel
 from gui_app.nmf_panel import NMFPanel
 from gui_app.dino_pretrained_panel import DINOClusterPanel
 from gui_app.transfer_panel import TransferPanel
@@ -424,26 +425,22 @@ class App(ctk.CTk):
         self.eval_panel = EvalPanel(eval_tab)
         self.eval_panel.pack(fill="both", expand=True)
 
-        # Post-hoc tab is now a sub-tabview: "Analysis" (the original
-        # PostHocPanel), "Fluct-map", "Symm-map". All three live under the
-        # one top-level "Post-hoc" tab.
+        # Post-hoc tab is a sub-tabview: "Analysis" (the original
+        # PostHocPanel) + "Interpretation" (the interpretability battery).
+        # Fluct-map / Symm-map removed for now per request.
         self._posthoc_tabs = ctk.CTkTabview(posthoc_tab, anchor="nw",
                                               command=self._on_posthoc_subtab)
         self._posthoc_tabs.pack(fill="both", expand=True)
         ph_main_tab     = self._posthoc_tabs.add("Analysis")
-        ph_fluct_tab    = self._posthoc_tabs.add("Fluct-map")
-        ph_symm_tab     = self._posthoc_tabs.add("Symm-map")
-        # 'Ordering' sub-tab removed — Crystallinity (under Blob) does
-        # the same peak/background-ratio mapping with the r-window
-        # the user actually wants.
+        ph_interp_tab   = self._posthoc_tabs.add("Interpretation")
         self.posthoc = PostHocPanel(ph_main_tab, app=self)
         self.posthoc.pack(fill="both", expand=True)
-        self.fluct = None
-        self.symm = None
+        self.interpret = None
+        self.fluct = None       # kept None for back-compat callers
+        self.symm = None        # kept None for back-compat callers
         self.ordering = None    # kept for any back-compat callers
         self._posthoc_subtab_frames = {
-            "Fluct-map": ph_fluct_tab,
-            "Symm-map":  ph_symm_tab,
+            "Interpretation": ph_interp_tab,
         }
         self._posthoc_subtab_built = set()
 
@@ -569,31 +566,17 @@ class App(ctk.CTk):
         self._blob_subtab_built.add(name)
 
     def _on_posthoc_subtab(self):
-        """Lazy-build Fluct-map / Symm-map sub-tabs inside Post-hoc."""
+        """Lazy-build the Interpretation sub-tab inside Post-hoc."""
         try:
             name = self._posthoc_tabs.get()
         except Exception:
             return
         if name in self._posthoc_subtab_built:
             return
-        if name == "Fluct-map":
-            self.fluct = FluctPanel(
-                self._posthoc_subtab_frames["Fluct-map"], app=self)
-            self.fluct.pack(fill="both", expand=True)
-            pl = getattr(self, "_pending_fluct_link", None)
-            if pl is not None:
-                try: self.fluct.link_run(*pl)
-                except Exception: pass
-                self._pending_fluct_link = None
-        elif name == "Symm-map":
-            self.symm = SymmPanel(
-                self._posthoc_subtab_frames["Symm-map"], app=self)
-            self.symm.pack(fill="both", expand=True)
-            pl = getattr(self, "_pending_symm_link", None)
-            if pl is not None:
-                try: self.symm.link_run(*pl)
-                except Exception: pass
-                self._pending_symm_link = None
+        if name == "Interpretation":
+            self.interpret = InterpretPanel(
+                self._posthoc_subtab_frames["Interpretation"], app=self)
+            self.interpret.pack(fill="both", expand=True)
         else:
             return
         self._posthoc_subtab_built.add(name)
