@@ -151,10 +151,18 @@ the correlation ratio $\eta^2$---shows the embedding most strongly encodes the
 total scattered intensity and crystallinity, and essentially ignores
 crystallographic orientation and Bragg-peak count. \emph{Causal ablations}
 (re-inference on perturbed inputs, scored by ARI against the original map)
-confirm dependence: normalizing away the scattered intensity collapses the map,
-azimuthal averaging collapses it (the full 2-D pattern is needed, not a 1-D
-profile), and masking the low-$q$ band is far more damaging than masking
-high-$q$. \emph{Classical-baseline comparison} quantifies novelty (above).
+disentangle the contributions. A consistent post-mask intensity normalization
+(rescaling the kept, beam-masked region to constant) collapses the
+intensity-dominated samples (NaPHI, EuInAs $\to$ 1--2 classes) but leaves IMC
+with structure (7 classes, ARI $0.12$): IMC depends on scattered intensity
+\emph{and} low-$q$ 2-D structure, not intensity alone. A complementary
+\emph{per-ring} normalization---flattening the radial profile while preserving
+within-ring angular structure---collapses the molecular samples (NaPHI, IMC;
+i.e.\ radial/intensity-driven and rotation-invariant) but EuInAs retains
+ARI $0.29$, showing it additionally uses angular/orientation structure,
+consistent with its zone-axis correlation (AMI $\approx0.30$). Azimuthal
+averaging collapses all samples (the full 2-D pattern is needed, not a 1-D
+profile), and masking the low-$q$ band is far more damaging than high-$q$. \emph{Classical-baseline comparison} quantifies novelty (above).
 \emph{ACOM cross-check} confirms the partition is uncorrelated with indexed
 zone axis on the molecular samples (adjusted mutual information $\approx0$),
 consistent with the $\theta$-roll-imposed rotation invariance. Together: the
