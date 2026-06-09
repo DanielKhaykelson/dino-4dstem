@@ -27,8 +27,9 @@ clustering loss, with emergent cluster count and optional pairwise
 semi-supervision. The model needs no labels, no preset $K$, and no
 per-feature thresholds. On a sodium-phyllosilicate (NaPHI) flake it reproduces
 our previously published, expert-derived domain segmentation label-free and
-without the slow SAM + orientation-mapping pipeline (Dice $0.81$, IoU $0.68$;
-$\sim$75\% of the indexed domain recovered), and transfers to a new
+without the slow SAM + orientation-mapping pipeline (IoU $0.74$, Dice $0.85$;
+$\sim$85\% of the indexed domain recovered, with near-identical region-average
+diffraction, Pearson $r=0.999$), and transfers to a new
 acquisition in milliseconds. A built-in interpretability protocol
 (representational probing, causal ablation, classical-baseline comparison, and
 ACOM cross-check) shows the clusters are governed by scattered intensity and
@@ -75,7 +76,19 @@ value over classical analysis.
 \subsection{A diffraction-tailored self-supervised model}
 Our classifier is a self-distillation (DINO) network,\cite{caron2021} but every
 major design choice is dictated by the physics of NBED rather than inherited
-from natural-image vision:
+from natural-image vision (Figure~1):
+
+\begin{figure*}[t]\centering
+\includegraphics[width=0.95\textwidth]{model_scheme.png}
+\caption*{\small\textbf{Figure 1.} Model schematic. Each NBED pattern is
+augmented by an azimuthal $\theta$-roll (two rotated views) and passed through
+a truncated convolutional (ResNet) encoder; a DINO self-distillation head
+(teacher/student, EMA) with a radial-gated supervised-contrastive term and a
+1-D radial clustering loss yields an emergent class map with no preset $K$.
+Optional pairwise hints allow semi-supervised steering.}
+\label{fig:scheme}
+\end{figure*}
+
 \begin{itemize}
 \item \textbf{Convolutional, truncated encoder.} We use a truncated ResNet
 rather than a vision transformer. NBED patterns are small, sparse and
@@ -107,21 +120,26 @@ prior work on a NaPHI flake we segmented an oriented ``Line'' domain using a
 SAM segmentation plus orientation mapping with user-defined line
 parameters.\cite{ourNaPHI} Running the present model on the same scan, with no
 labels and no line parameters, the union of two emergent classes reproduces
-that domain (Figure~\ref{fig:naphi}): Dice $=0.81$, IoU $=0.68$, with
-$\sim$75\% of the published domain recovered and $\sim$89\% of the model's
-domain falling within the published one. The model achieves this without the
+that domain (Figure~2): IoU $=0.74$, Dice $=0.85$, with $85\%$ of the
+SAM-indexed domain recovered. Moreover the region-average diffraction patterns
+are near-identical (beam-masked Pearson $r=0.999$ for both the Line domain and
+the rest, versus $r\approx0.5$ for Line-vs-rest), confirming the two
+segmentations are equivalent in diffraction space. The model achieves this without the
 SAM step, and a model trained on this flake transfers to a second, tilted
 acquisition in milliseconds---turning a slow, parameterized pipeline into an
 automatic one.
 
-\begin{figure}[t]\centering
-\includegraphics[width=\linewidth]{naphi_concordance.png}
-\caption*{\small\textbf{Figure 1.} NaPHI: the label-free DINO class map (centre)
-versus our previously published SAM+orientation segmentation (left), same scan.
-Overlay (right): green = agreement. The model recovers the oriented domain
-(Dice 0.81, IoU 0.68) with no labels, no SAM and no line parameters.}
+\begin{figure*}[t]\centering
+\includegraphics[width=0.86\textwidth]{na007b_sam_dino_panel.png}
+\caption*{\small\textbf{Figure 2.} NaPHI (Na007b): top = previously published
+SAM-derived segmentation, bottom = label-free DINO. Column 1: Line (blue) and
+rest (green) areas overlaid on the virtual HAADF (vacuum = grayscale). Columns
+2--3: average diffraction of each region. The two methods isolate the same
+oriented ``Line'' domain (IoU $0.74$, Dice $0.85$) with near-identical
+region-average diffraction (beam-masked Pearson $r=0.999$ for both Line and
+rest), while Line and rest are diffraction-distinct ($r=0.48$--$0.54$).}
 \label{fig:naphi}
-\end{figure}
+\end{figure*}
 
 \subsection{Resolving low-dose molecular films where classical methods fail}
 The payoff is on the hard target. On low-dose indomethacin (IMC) films the
@@ -129,14 +147,14 @@ model produces coherent, fine-grained class maps, whereas classical automated
 methods do not. Clustering virtual dark-field, azimuthal-profile, PCA and NMF
 features of the \emph{same} data into the same number of groups agrees only
 weakly with the DINO map (best adjusted Rand index, ARI $\approx0.11$--$0.21$
-across three IMC films; Figure~\ref{fig:imc}). There is no external ground
+across three IMC films; Figure~3). There is no external ground
 truth here---classical analysis simply cannot deliver a usable map---so the
 method is the only practical route, and its trustworthiness rests on the
 validation above and the interpretability below.
 
 \begin{figure*}[p]\centering
 \includegraphics[width=\textwidth]{imc_all_classical.png}
-\caption*{\small\textbf{Figure 2.} All three IMC films (SI3, SI4, SI5; rows):
+\caption*{\small\textbf{Figure 3.} All three IMC films (SI3, SI4, SI5; rows):
 the DINO map (far left of each row) versus classical clusterings of the same
 data (virtual-DF, azimuthal-profile, PCA, NMF, combination). Colours are
 arbitrary; spatial shape is what matters. Across all three, classical methods
@@ -147,7 +165,7 @@ $0.11$, $0.15$, $0.21$ for SI3/SI4/SI5).}
 
 \subsection{What the clusters encode}
 To establish meaning we apply four complementary tests
-(Figure~\ref{fig:interp}). \emph{Representational probing}---5-fold
+(Figure~4). \emph{Representational probing}---5-fold
 ridge regression from the frozen embedding to candidate physical factors, with
 the correlation ratio $\eta^2$---shows the embedding most strongly encodes the
 total scattered intensity and crystallinity, and essentially ignores
@@ -174,7 +192,7 @@ analysis is material-dependent.
 
 \begin{figure*}[t]\centering
 \includegraphics[width=0.95\textwidth]{cross_all.png}
-\caption*{\small\textbf{Figure 3.} Cross-sample interpretability (IMC SI3/SI4/SI5,
+\caption*{\small\textbf{Figure 4.} Cross-sample interpretability (IMC SI3/SI4/SI5,
 NaPHI, EuInAs). (a) classical agreement with the DINO map (rises from
 distinctive IMC to substantially-captured NaPHI/EuInAs); (b) intensity
 dependence (low bar = strongly depends); (c) low-$q$ vs high-$q$ (low bar =
