@@ -1,0 +1,54 @@
+# DINO-4DSTEM Python dependencies  (Python 3.10)
+# Versions pinned to the validated reference environment.
+#
+# Installed for you by install.bat (into a conda env), or manually with:
+#     pip install -r requirements.txt
+#
+# ---------------------------------------------------------------------------
+
+# --- core scientific stack ---
+numpy==1.26.4
+scipy==1.15.3
+scikit-learn==1.7.0
+scikit-image==0.25.2
+pandas==2.3.0
+matplotlib==3.10.3
+h5py==3.14.0
+hdf5plugin==5.1.0
+pillow==11.2.1
+opencv-python==4.12.0.88
+tqdm==4.67.1
+psutil==7.0.0
+requests==2.32.4
+
+# --- clustering / embedding ---
+umap-learn==0.5.9.post2
+hdbscan==0.8.40
+colorcet==3.1.0
+
+# --- deep learning (CPU build by default) ---
+# For NVIDIA GPU acceleration, install torch FIRST from the CUDA index, e.g.:
+#   pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu118
+# then run this file (the CPU pins below will be skipped as already-satisfied).
+torch==2.7.1
+torchvision==0.22.1
+
+# --- 4D-STEM / microscopy ---
+py4DSTEM==0.14.19
+ase==3.28.0
+
+# --- GUI / reporting ---
+customtkinter==5.2.2
+python-pptx==1.0.2
+
+# ---------------------------------------------------------------------------
+# OPTIONAL extras (only needed for specific features; uncomment to enable):
+#
+# transformers==4.44.2          # "Pretrained DINO" panel
+# abtem==1.0.0b33               # synthetic diffraction simulation panel
+# segment-anything @ git+https://github.com/facebookresearch/segment-anything.git   # SAM masks
+# cupy-cuda11x                  # GPU acceleration for ACOM (NVIDIA, CUDA 11.x)
+# md-to-docx                    # Markdown -> .docx export helper
+#
+# The local NL assistant uses Ollama, which auto-installs on first use
+# (no Python package required).

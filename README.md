@@ -1,6 +1,25 @@
-# dino_sr_contrastive/
+# DINO-4DSTEM
 
-Fresh-session workspace for the DINO-SR + Contrastive Head experiment.
+Self-supervised classification of 4D-STEM diffraction data, with a desktop GUI,
+a natural-language assistant, and an NMF / ACOM / interpretation pipeline.
+
+## Quick start (Windows)
+
+1. Install **Miniconda** (one time): https://docs.conda.io/projects/miniconda/
+2. Download this repo, then double-click **`install.bat`** (creates the env).
+3. Copy-paste this line in the project folder to make desktop icons:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File make_desktop_shortcuts.ps1
+   ```
+4. Launch from the **DINO-4DSTEM GUI** / **Assistant** desktop icons.
+
+Full instructions: [INSTALL.md](INSTALL.md) · Project overview: [PROJECT_SUMMARY.md](PROJECT_SUMMARY.md)
+
+---
+
+## Project history (early workspace notes)
+
+Originally a fresh-session workspace for the DINO-SR + Contrastive Head experiment.
 
 ## What's in here
 
