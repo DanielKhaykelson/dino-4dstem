@@ -449,9 +449,19 @@ class ACOMPanel(ctk.CTkFrame):
         self._fig.clear()
         return self._fig
 
-    def _redraw(self):
+    def _redraw(self, analysis=None):
         self._fig.tight_layout()
         self._canvas.draw_idle()
+        # Auto-save key ACOM results next to the loaded data.
+        if analysis:
+            try:
+                import assistant_io
+                assistant_io.gui_autosave(
+                    self, "acom", self._fig, name=analysis,
+                    summary=f"ACOM {analysis} — sample "
+                            f"{getattr(self, '_sample_var', None) and self._sample_var.get()}")
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # runtime-sample notifications
@@ -1199,7 +1209,7 @@ class ACOMPanel(ctk.CTkFrame):
                 show_strain(self.strain_map,
                               vrange_exx=[-v, v],
                               vrange_theta=[-t, t])
-            self._redraw()
+            self._redraw("strain_map")
             self._set_status("strain rendered.")
         except Exception as e:
             messagebox.showerror("show_strain failed", repr(e))
@@ -1237,7 +1247,7 @@ class ACOMPanel(ctk.CTkFrame):
                     self.orientation_map, symmetry_order=6,
                     corr_range=[0.9, 1.0], figsize=(6, 6),
                     input_fig_handle=fig)
-                self._redraw(); return
+                self._redraw("orientation_map"); return
             except Exception:
                 pass
         # generic plotter
@@ -1246,7 +1256,7 @@ class ACOMPanel(ctk.CTkFrame):
             if callable(fn):
                 try:
                     fig = self._new_fig()
-                    fn(fig=fig); self._redraw(); return
+                    fn(fig=fig); self._redraw("orientation_map"); return
                 except TypeError:
                     try: fn(); return
                     except Exception: continue
@@ -1274,7 +1284,7 @@ class ACOMPanel(ctk.CTkFrame):
             ax.text(0.5, 0.5, "no angles/matrix on orientation_map.",
                       ha="center", va="center")
         ax.set_xticks([]); ax.set_yticks([])
-        self._redraw()
+        self._redraw("orientation_map")
 
     def _render_correlation(self):
         if self.orientation_map is None:

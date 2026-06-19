@@ -1,7 +1,7 @@
 """train_panel.py -- Tab 2 (Training).
 
 A single 'Use paper recipe' toggle gives the locked DINO + cluster1d
-recipe with K=6 used in the manuscript. When unchecked, four
+recipe (K=60, model auto-prunes to the active count). When unchecked, four
 sub-tabs (Core / Schedule / Augmentation / Polar) expose every knob.
 
 Live x=epoch, y=loss plot reads <outdir>/training_log.csv every second.
@@ -20,7 +20,10 @@ matplotlib.use("TkAgg", force=True)
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-from data import SAMPLES
+from data import SAMPLES, loaded_sample_keys
+
+# Sample dropdown lists only data loaded by path this session.
+_NO_DATA_HINT = "(load a cube…)"
 from gui_app.tooltip import add_help_button
 from gui_app.runner import TrainingJob, make_outdir, read_training_log
 
@@ -74,14 +77,15 @@ VARIANT_FLAG_TO_LAMBDAS = {
     "weight":    ("conf_weight_gamma",),
 }
 
-# Locked paper recipe (= "1D" variant with K=6 v=2).
+# Locked paper recipe (= "1D" variant with K=60 v=2; model auto-prunes
+# to the active prototype count).
 PAPER_DEFAULTS = dict(
     variant="1D",
-    K=6, epochs=30, batch_size=128,
+    K=60, epochs=30, batch_size=128,
     lr=3e-4, weight_decay=1e-6,
     T0=0.04, Tfin=0.07,
     warmup_frac=0.2,                        # teacher temp warmup
-    center_momentum=0.9,                    # DINO center EMA
+    center_momentum=0.97,                   # DINO center EMA
     EMA0=0.990, EMAfin=0.999,               # teacher param EMA schedule
     n_layers=1,                              # ResNet18 stages kept (1..4)
     cluster1d_lambda=0.1, cluster1d_margin=0.4,
@@ -170,7 +174,7 @@ class TrainPanel(ctk.CTkFrame):
         # Job state
         self.job: "TrainingJob | None" = None
         self._poll_after = None
-        self._sample_keys = sorted(SAMPLES.keys())
+        self._sample_keys = loaded_sample_keys() or [_NO_DATA_HINT]
         # Apply / snapshot state. The user clicks "Apply changes" to
         # commit current entry values into a snapshot dict.  Train
         # builds its kwargs from the snapshot (not the live entries).
@@ -192,7 +196,7 @@ class TrainPanel(ctk.CTkFrame):
         and seed vmax / beam-mask / center-crop from the Pre-processing
         tab so the user doesn't have to re-tune them here."""
         try:
-            self._sample_keys = sorted(SAMPLES.keys())
+            self._sample_keys = loaded_sample_keys() or [_NO_DATA_HINT]
             if hasattr(self, "_sample_menu"):
                 self._sample_menu.configure(values=self._sample_keys)
             if key in self._sample_keys:
@@ -447,7 +451,8 @@ class TrainPanel(ctk.CTkFrame):
 
         _seg(left, "Optimizer & training")
         _entry_row(left, "K (prototypes)", self.var["K"],
-                    "Number of prototype clusters. K=6 was used in the paper.")
+                    "Number of prototype clusters. Default K=60 (over-"
+                    "specified; the model auto-prunes to the active count).")
         _entry_row(left, "epochs", self.var["epochs"],
                     "Training epochs. Paper uses 30.")
         _entry_row(left, "batch_size", self.var["batch_size"],

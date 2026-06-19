@@ -790,11 +790,90 @@ class PrePanel(ctk.CTkFrame):
                 scan_shape_override = ask_scan_shape(self, N, H, W)
                 if scan_shape_override is None:
                     return
+        # --- Peek shape/dtype cheaply (no frame load), estimate memory,
+        #     and prompt to real-space bin before loading. ---
+        shape4d = None; peek_dtype = None; lazy = True
+        if p.lower().endswith((".h5", ".hdf5")):
+            try:
+                import h5py
+                from data import (_h5_find_data_path,
+                                      _h5_dectris_external_data)
+                with h5py.File(p, "r") as fh:
+                    try:
+                        dpath, _nd = _h5_find_data_path(fh)
+                        ds0 = fh[dpath]; peek_dtype = ds0.dtype
+                        if ds0.ndim == 4:
+                            shape4d = tuple(int(x) for x in ds0.shape)
+                        else:
+                            oy, ox = scan_shape_override
+                            shape4d = (oy, ox, int(ds0.shape[1]),
+                                       int(ds0.shape[2]))
+                    except ValueError:
+                        pairs = _h5_dectris_external_data(fh, p)
+                        with h5py.File(pairs[0][0], "r") as gf:
+                            d0 = gf[pairs[0][1]]; peek_dtype = d0.dtype
+                            H_, W_ = int(d0.shape[1]), int(d0.shape[2])
+                        oy, ox = scan_shape_override
+                        shape4d = (oy, ox, H_, W_)
+            except Exception as e:
+                messagebox.showerror("Error", f"HDF5 peek failed:\n{e}")
+                return
+        else:
+            try:
+                from data import peek_cube_info
+                shape4d, peek_dtype, lazy = peek_cube_info(p)
+            except Exception as e:
+                messagebox.showerror("Error",
+                    f"Could not read file header:\n{e}")
+                return
+        Ny0, Nx0, H0, W0 = (int(x) for x in shape4d)
         try:
-            self.cube = _open_lazy(p, scan_shape=scan_shape_override)
+            itemsize = int(np.dtype(peek_dtype).itemsize)
+        except Exception:
+            itemsize = 2
+        total_bytes = Ny0 * Nx0 * H0 * W0 * itemsize
+        try:
+            import psutil
+            avail_bytes = int(psutil.virtual_memory().available)
+        except Exception:
+            avail_bytes = total_bytes * 100      # psutil missing → don't block
+        pref = getattr(self, "_session_load_pref", None)
+        if pref is not None:
+            decision = dict(pref)
+        else:
+            from gui_app._dialogs import ask_load_options
+            decision = ask_load_options(
+                self, shape=(Ny0, Nx0, H0, W0), dtype=peek_dtype,
+                total_bytes=total_bytes, avail_bytes=avail_bytes, lazy=lazy)
+        if decision.get("action") == "cancel":
+            return
+        if decision.get("remember"):
+            self._session_load_pref = {
+                "action": decision["action"],
+                "n": int(decision.get("n", 1)), "remember": True}
+        load_path = p
+        used_scan_override = scan_shape_override
+        if (decision.get("action") == "bin"
+                and int(decision.get("n", 1)) > 1):
+            n = int(decision["n"])
+            base, _ext = os.path.splitext(p)
+            out = base + f"_bin{n}.cube.npy"
+            if not os.path.exists(out):
+                try:
+                    src = _open_lazy(p, scan_shape=scan_shape_override)
+                except Exception as e:
+                    messagebox.showerror("Error", f"Load failed:\n{e}")
+                    return
+                if not self._run_binning(src, n, out):
+                    return
+            load_path = out
+            used_scan_override = None             # binned .cube.npy is 4D
+        try:
+            self.cube = _open_lazy(load_path, scan_shape=used_scan_override)
         except Exception as e:
             messagebox.showerror("Error", f"Load failed:\n{e}")
             return
+        p = load_path
         # Diagnostic: peek the central frame so the user knows what
         # vmax order-of-magnitude to set (Eiger raw counts can range
         # from ~10 to ~10^4 depending on detector / dose).
@@ -853,6 +932,52 @@ class PrePanel(ctk.CTkFrame):
                               sample_key=self.sample_key,
                               scan_shape=(Ny, Nx),
                               frame_shape=(H, W))
+
+    def _run_binning(self, src, n, out):
+        """Stream a real-space n×n bin of `src` → `out` (.cube.npy) with a
+        modal progress bar.  Returns True on success."""
+        import tkinter as tk
+        import data
+        win = tk.Toplevel(self)
+        win.title("Binning…")
+        win.geometry("440x140")
+        try:
+            win.transient(self.winfo_toplevel())
+        except Exception:
+            pass
+        win.grab_set()
+        ctk.CTkLabel(win, text=f"Real-space binning n={n} — writing a "
+                     f"smaller cube to disk.\nThis runs once; please wait.",
+                     justify="left").pack(padx=12, pady=(12, 6))
+        bar = ctk.CTkProgressBar(win, width=380); bar.pack(padx=12, pady=4)
+        bar.set(0)
+        pct = ctk.CTkLabel(win, text="0%", font=("Consolas", 10))
+        pct.pack()
+        err = {"e": None}
+        def cb(done, total, stage):
+            try:
+                bar.set(done / max(total, 1))
+                pct.configure(text=f"{100 * done // max(total, 1)}%  "
+                                   f"({done}/{total})")
+                win.update()
+            except Exception:
+                pass
+        try:
+            data.bin_realspace_to_npy(src, n, out, progress=cb)
+        except Exception as e:
+            err["e"] = e
+        try:
+            win.grab_release(); win.destroy()
+        except Exception:
+            pass
+        if err["e"] is not None:
+            messagebox.showerror("Binning failed", repr(err["e"]))
+            try:
+                os.remove(out)
+            except Exception:
+                pass
+            return False
+        return True
 
     def _on_idx(self, v):
         self.idx.set(int(round(float(v))))

@@ -166,6 +166,135 @@ class _H5Cube4D:
             f"unsupported index for 3D-backed cube: {type(idx)}")
 
 
+def _npz_member_header(path, member="data"):
+    """Read just the (shape, dtype, is_uncompressed) of a .npy member in a
+    .npz/.prz WITHOUT loading the data (header bytes only — cheap even for
+    compressed archives)."""
+    import zipfile
+    zf = zipfile.ZipFile(path, "r")
+    try:
+        npy = [n for n in zf.namelist() if n.lower().endswith(".npy")]
+        if not npy:
+            raise ValueError("no .npy member")
+        name = None
+        for n in npy:
+            if n.rsplit("/", 1)[-1].lower() in (member.lower() + ".npy",
+                                                member.lower()):
+                name = n; break
+        if name is None:
+            name = max(npy, key=lambda n: zf.getinfo(n).file_size)
+        stored = zf.getinfo(name).compress_type == zipfile.ZIP_STORED
+        with zf.open(name) as fp:
+            version = np.lib.format.read_magic(fp)
+            shape, fortran, dtype = np.lib.format._read_array_header(
+                fp, version)
+    finally:
+        zf.close()
+    return tuple(shape), dtype, stored
+
+
+def peek_cube_info(path):
+    """Cheaply return (shape4d=(Ny,Nx,H,W), dtype, lazy) for .npy/.prz/.npz
+    without loading frame data.  (HDF5 is peeked by the caller.)  `lazy`
+    means it can be memory-mapped (won't fill RAM)."""
+    pl = path.lower()
+    if pl.endswith(".npy"):
+        mm = np.load(path, mmap_mode="r")
+        return tuple(mm.shape), mm.dtype, True
+    if pl.endswith((".prz", ".npz")):
+        base, _ = os.path.splitext(path)
+        cand = base + ".cube.npy"
+        if os.path.exists(cand):
+            mm = np.load(cand, mmap_mode="r")
+            return tuple(mm.shape), mm.dtype, True
+        shape, dtype, stored = _npz_member_header(path, "data")
+        return tuple(shape), dtype, stored
+    raise ValueError("peek_cube_info: unsupported (use h5 peek for hdf5)")
+
+
+def bin_realspace_to_npy(src, n, out_path, progress=None):
+    """Real-space n×n bin a lazy 4D cube `src` (Ny, Nx, H, W) and write a
+    uint16 `.cube.npy` of shape (Ny//n, Nx//n, H, W), STREAMING one output
+    frame at a time so the whole cube is never held in RAM.
+
+    Each output position is the mean of the n×n block of diffraction
+    patterns (full detector detail kept).  Returns out_path.
+    """
+    n = int(n)
+    Ny, Nx, H, W = src.shape
+    oy, ox = Ny // n, Nx // n
+    if oy < 1 or ox < 1:
+        raise ValueError(f"bin factor {n} too large for scan {Ny}x{Nx}")
+    out = np.lib.format.open_memmap(out_path, mode="w+", dtype=np.uint16,
+                                    shape=(oy, ox, H, W))
+    total = oy * ox
+    done = 0
+    try:
+        for i in range(oy):
+            for j in range(ox):
+                acc = np.zeros((H, W), dtype=np.float64)
+                for di in range(n):
+                    for dj in range(n):
+                        acc += np.asarray(src[i * n + di, j * n + dj],
+                                          dtype=np.float64)
+                acc /= float(n * n)
+                out[i, j] = np.rint(acc).astype(np.uint16)
+                done += 1
+                if progress and (done % 32 == 0 or done == total):
+                    progress(done, total, "binning")
+    finally:
+        out.flush()
+        del out
+    return out_path
+
+
+def _npz_member_memmap(path, member="data"):
+    """Memory-map an UNCOMPRESSED .npy member stored inside a .npz/.prz
+    zip, with ZERO RAM (frames read from disk on demand) — the key to
+    loading multi-GB .prz files without filling memory.
+
+    Returns a numpy memmap of the member's array.  Raises if the member
+    is compressed (DEFLATE) — those can't be memory-mapped.
+    """
+    import zipfile
+    import struct
+    zf = zipfile.ZipFile(path, "r")
+    try:
+        npy = [n for n in zf.namelist() if n.lower().endswith(".npy")]
+        if not npy:
+            raise ValueError("no .npy member in archive")
+        # Prefer the requested member ('data'), else the largest array.
+        name = None
+        for n in npy:
+            base = n.rsplit("/", 1)[-1].lower()
+            if base in (member.lower() + ".npy", member.lower()):
+                name = n; break
+        if name is None:
+            name = max(npy, key=lambda n: zf.getinfo(n).file_size)
+        info = zf.getinfo(name)
+        if info.compress_type != zipfile.ZIP_STORED:
+            raise ValueError(f"member '{name}' is compressed; cannot mmap")
+        hdr_off = info.header_offset
+    finally:
+        zf.close()
+    # Skip the local file header to reach the raw .npy bytes.
+    with open(path, "rb") as f:
+        f.seek(hdr_off)
+        local = f.read(30)
+        if local[:4] != b"PK\x03\x04":
+            raise ValueError("bad local zip header")
+        namelen = struct.unpack("<H", local[26:28])[0]
+        extralen = struct.unpack("<H", local[28:30])[0]
+        npy_off = hdr_off + 30 + namelen + extralen
+        # Parse the embedded .npy header to get dtype/shape/order.
+        f.seek(npy_off)
+        version = np.lib.format.read_magic(f)
+        shape, fortran, dtype = np.lib.format._read_array_header(f, version)
+        data_off = f.tell()
+    return np.memmap(path, dtype=dtype, mode="r", offset=data_off,
+                     shape=shape, order="F" if fortran else "C")
+
+
 def open_lazy_cube(path, scan_shape=None,
                      apply_dectris_corrections: bool = False):
     """Universal lazy 4D-cube loader.  Returns a numpy memmap
@@ -214,8 +343,13 @@ def open_lazy_cube(path, scan_shape=None,
         cand = base + ".cube.npy"
         if os.path.exists(cand):
             return np.load(cand, mmap_mode="r", allow_pickle=True)
-        arr = np.load(path, allow_pickle=True, mmap_mode="r")
-        return arr["data"]
+        # Uncompressed members can be memory-mapped in place (~0 RAM).
+        try:
+            return _npz_member_memmap(path, member="data")
+        except Exception:
+            # Compressed / odd layout → must materialize (caller guards RAM).
+            arr = np.load(path, allow_pickle=True)
+            return arr["data"]
     return np.load(path, mmap_mode="r", allow_pickle=True)
 
 
@@ -604,8 +738,13 @@ class LoadPRZ:
                 cube = np.load(used_path, mmap_mode='r',
                                   allow_pickle=True)  # true mmap
             else:
-                arr = np.load(used_path, allow_pickle=True, mmap_mode='r')
-                cube = arr['data']  # NpzFile silently ignores mmap_mode
+                # Memory-map the uncompressed member in place (~0 RAM);
+                # only fall back to a full RAM load if it's compressed.
+                try:
+                    cube = _npz_member_memmap(used_path, member="data")
+                except Exception:
+                    arr = np.load(used_path, allow_pickle=True)
+                    cube = arr['data']
             self.Nx, self.Ny, self.H, self.W = cube.shape
             self.flat = cube.reshape(-1, self.H, self.W)
         self.resize = int(resize); self.vmax = float(vmax)
@@ -922,6 +1061,19 @@ def apply_sample_filters(img_2d: np.ndarray,
         out = np.log1p(np.clip(out, 0.0, None) * 50.0) \
                 / float(np.log1p(50.0))
     return out
+
+
+def loaded_sample_keys():
+    """Keys for datasets LOADED BY PATH this session (runtime-registered
+    via register_runtime_sample / register_runtime_multi_sample), in
+    load order.
+
+    The GUI uses this instead of the full SAMPLES catalogue so users pick
+    data by browsing to a file, not from the long built-in named list.
+    Returns [] when nothing has been loaded yet.
+    """
+    return [k for k, v in SAMPLES.items()
+            if isinstance(v, dict) and v.get("_runtime")]
 
 
 def register_runtime_sample(path, *, scan_shape=None, vmax=2.0,

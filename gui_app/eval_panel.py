@@ -24,7 +24,11 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.colors import ListedColormap, BoundaryNorm
 
-from data import SAMPLES, LoadPRZ
+from data import SAMPLES, LoadPRZ, loaded_sample_keys
+
+# Dataset dropdowns list only data LOADED BY PATH this session (no built-in
+# 46-name catalogue).  This hint shows when nothing is loaded yet.
+_NO_DATA_HINT = "(load a cube…)"
 from gui_app.runner import list_ckpts
 
 
@@ -114,7 +118,7 @@ class EvalPanel(ctk.CTkFrame):
         self._sample_var = ctk.StringVar(value="Na007b")
         self._sample_menu = ctk.CTkOptionMenu(
             self._load_box, variable=self._sample_var,
-            values=sorted(SAMPLES.keys()), width=200)
+            values=(loaded_sample_keys() or [_NO_DATA_HINT]), width=200)
         self._sample_menu.pack(side="left", padx=2)
         ctk.CTkButton(self._load_box, text="Browse cube…", width=110,
                        command=self._browse_dataset).pack(side="left", padx=2)
@@ -260,7 +264,7 @@ class EvalPanel(ctk.CTkFrame):
                         )
                         try:
                             self._sample_menu.configure(
-                                values=sorted(SAMPLES.keys()))
+                                values=(loaded_sample_keys() or [_NO_DATA_HINT]))
                         except Exception:
                             pass
                 except Exception as e:
@@ -340,9 +344,13 @@ class EvalPanel(ctk.CTkFrame):
         """Refresh the dataset dropdown's options from SAMPLES, optionally
         selecting `select`."""
         try:
-            keys = sorted(SAMPLES.keys())
-            self._sample_menu.configure(values=keys)
-            if select and select in keys:
+            keys = loaded_sample_keys()
+            # Keep a run-resolved built-in sample selectable even though
+            # it isn't a path-loaded dataset.
+            if select and select in SAMPLES and select not in keys:
+                keys = keys + [select]
+            self._sample_menu.configure(values=(keys or [_NO_DATA_HINT]))
+            if select and select in SAMPLES:
                 self._sample_var.set(select)
         except Exception:
             pass
@@ -552,6 +560,19 @@ class EvalPanel(ctk.CTkFrame):
         self._status.configure(
             text=f"rendered {label}  ({os.path.basename(ckpt_path)})  "
                   f"K_active={K_act}, counts={counts}")
+        # Auto-save a copy of the class map + averages next to the data.
+        try:
+            import re, assistant_io
+            safe = re.sub(r"[^0-9A-Za-z._-]+", "_", str(label)).strip("_") \
+                if label else "ckpt"
+            assistant_io.gui_autosave(
+                self, "classmap", self._fig,
+                name=f"classmap_{safe}",
+                summary=f"{self.sample} — class map ({label}), "
+                        f"K_active={K_act}, counts={counts}, "
+                        f"ckpt={os.path.basename(ckpt_path)}")
+        except Exception:
+            pass
 
     def _render_failed(self, e):
         self._status.configure(text=f"render failed: {e!r}")

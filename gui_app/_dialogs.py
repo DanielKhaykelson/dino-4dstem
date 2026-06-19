@@ -1,9 +1,114 @@
 """Small modal dialogs shared across panels."""
 from __future__ import annotations
 import os
+import numpy as np
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
+
+
+def ask_load_options(parent, *, shape, dtype, total_bytes, avail_bytes,
+                     lazy):
+    """On loading a cube, ask whether to real-space bin it first.
+
+    Shows the dataset size vs free RAM and warns if a non-lazy file won't
+    fit.  Returns a dict {action: 'bin'|'full'|'cancel', n: int,
+    remember: bool} (never None)."""
+    Ny, Nx, H, W = shape
+    total_gb = total_bytes / 1e9
+    avail_gb = avail_bytes / 1e9
+    low = (not lazy) and (total_bytes > avail_bytes * 0.85)
+
+    dlg = tk.Toplevel(parent)
+    dlg.title("Load data — bin first?")
+    dlg.geometry("580x430")
+    try:
+        dlg.transient(parent.winfo_toplevel())
+    except Exception:
+        pass
+    dlg.grab_set()
+
+    kind = ("lazy — frames read from disk on demand (low RAM)" if lazy
+            else "FULL into RAM — needs the memory shown below")
+    ctk.CTkLabel(dlg, justify="left", wraplength=556, font=("Segoe UI", 11),
+                 text=(f"Dataset:  scan {Ny}×{Nx}   ·   pattern {H}×{W}   ·  "
+                       f" {np.dtype(dtype)}\n"
+                       f"Full size ≈ {total_gb:.2f} GB     free RAM ≈ "
+                       f"{avail_gb:.1f} GB\n"
+                       f"Loading:  {kind}")
+                 ).pack(padx=12, pady=(10, 4), anchor="w")
+    if low:
+        ctk.CTkLabel(dlg, wraplength=556, justify="left",
+                     text="⚠ Insufficient memory to load this fully — "
+                          "binning is strongly recommended.",
+                     text_color=("#c0392b", "#e67e22"),
+                     font=("Segoe UI", 11, "bold")
+                     ).pack(padx=12, pady=2, anchor="w")
+
+    ctk.CTkLabel(dlg, justify="left", wraplength=556,
+                 text="Bin in REAL SPACE — average n×n neighbouring scan "
+                      "positions (full diffraction detail kept):"
+                 ).pack(padx=12, pady=(8, 2), anchor="w")
+    n_var = ctk.IntVar(value=2)
+    row = ctk.CTkFrame(dlg, fg_color="transparent")
+    row.pack(padx=12, pady=2, fill="x")
+    ctk.CTkLabel(row, text="bin factor n =").pack(side="left")
+    ctk.CTkEntry(row, textvariable=n_var, width=64).pack(side="left", padx=6)
+    prev = ctk.CTkLabel(dlg, text="", font=("Consolas", 10))
+
+    def _preview(*_a):
+        try:
+            n = max(1, int(n_var.get()))
+        except Exception:
+            n = 1
+        oy, ox = Ny // n, Nx // n
+        gb = oy * ox * H * W * np.dtype("uint16").itemsize / 1e9
+        prev.configure(text=f"→ binned: {oy}×{ox} scan positions  ≈ "
+                            f"{gb:.2f} GB on disk")
+    for nn in (2, 3, 4, 6, 8):
+        ctk.CTkButton(row, text=str(nn), width=34,
+                      command=(lambda v=nn: (n_var.set(v), _preview()))
+                      ).pack(side="left", padx=2)
+    prev.pack(padx=12, pady=2, anchor="w")
+    try:
+        n_var.trace_add("write", _preview)
+    except Exception:
+        pass
+    _preview()
+
+    remember = ctk.BooleanVar(value=False)
+    ctk.CTkCheckBox(dlg, variable=remember,
+                    text="Remember my choice for this session "
+                         "(don't ask again)").pack(padx=12, pady=(8, 6),
+                                                    anchor="w")
+
+    result = {"d": {"action": "cancel", "n": 1, "remember": False}}
+
+    def _finish(action):
+        try:
+            n = max(1, int(n_var.get()))
+        except Exception:
+            n = 2
+        result["d"] = {"action": action, "n": n,
+                       "remember": bool(remember.get())}
+        dlg.destroy()
+
+    btns = ctk.CTkFrame(dlg, fg_color="transparent")
+    btns.pack(side="bottom", fill="x", padx=12, pady=10)
+    ctk.CTkButton(btns, text="Cancel", width=84, fg_color=("#a33", "#722"),
+                  command=lambda: _finish("cancel")).pack(side="right",
+                                                          padx=4)
+    full_btn = ctk.CTkButton(btns, text="Load full", width=110,
+                             command=lambda: _finish("full"))
+    full_btn.pack(side="right", padx=4)
+    if low:
+        full_btn.configure(fg_color=("#888", "#666"))
+    ctk.CTkButton(btns, text="Bin n×n & load", width=150,
+                  fg_color=("#2D7A2D", "#1F7A1F"),
+                  command=lambda: _finish("bin")).pack(side="right", padx=4)
+    dlg.protocol("WM_DELETE_WINDOW", lambda: _finish("cancel"))
+    parent.wait_window(dlg)
+    return result["d"]
 
 
 def _closest_factor_pair(n: int) -> tuple[int, int]:

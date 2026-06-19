@@ -35,7 +35,7 @@ Auto modes:
 saves a folder of publication-ready PNGs + a PPTX.
 """
 from __future__ import annotations
-import os, json, time, threading
+import os, json, time, threading, webbrowser
 
 import numpy as np
 import customtkinter as ctk
@@ -52,19 +52,39 @@ from matplotlib.colors import ListedColormap
 
 
 # ---------------------------------------------------------------------------
+# Each variant carries a verified citation (ref + url). DOIs checked live
+# against OpenAlex/Crossref (2026-06). NOTE: the earlier "Wang 2024/2025"
+# attributions were INCORRECT — the real polar-NMF-for-4D-STEM references are
+# Uesugi et al. 2020 (Ultramicroscopy, foundational) and Kimoto et al. 2025
+# (Sci. Rep., polar + domain constraints / log handling).
 NMF_VARIANTS = {
-    "Polar  (Wang et al. 2024)":
-        dict(input="polar", log=False, sparse=False, theta_shift=False),
+    "Polar  (Uesugi et al. 2020)":
+        dict(input="polar", log=False, sparse=False, theta_shift=False,
+             ref="Uesugi, Koshiya, Kikkawa, Nagai et al., "
+                 "Ultramicroscopy 218, 113168 (2020)",
+             url="https://doi.org/10.1016/j.ultramic.2020.113168"),
     "Polar + θ-shift  (Krajnak & Etheridge 2020)":
-        dict(input="polar", log=False, sparse=False, theta_shift=True),
-    "Polar + log  (Wang et al. 2025)":
-        dict(input="polar", log=True,  sparse=False, theta_shift=False),
+        dict(input="polar", log=False, sparse=False, theta_shift=True,
+             ref="Krajňák & Etheridge, PNAS 117(45), 27805–27810 (2020)",
+             url="https://doi.org/10.1073/pnas.2006975117"),
+    "Polar + log  (Kimoto et al. 2025)":
+        dict(input="polar", log=True,  sparse=False, theta_shift=False,
+             ref="Kimoto, Uesugi, Harano, Kikkawa, "
+                 "Scientific Reports 15 (2025)",
+             url="https://doi.org/10.1038/s41598-025-23541-7"),
     "Polar + sparse  (Hoyer 2004)":
-        dict(input="polar", log=False, sparse=True,  theta_shift=False),
+        dict(input="polar", log=False, sparse=True,  theta_shift=False,
+             ref="Hoyer, J. Mach. Learn. Res. 5, 1457–1469 (2004)",
+             url="https://www.jmlr.org/papers/v5/hoyer04a.html"),
     "Cartesian flat  (Spurgeon et al. 2020)":
-        dict(input="cart",  log=False, sparse=False, theta_shift=False),
+        dict(input="cart",  log=False, sparse=False, theta_shift=False,
+             ref="Spurgeon et al., Nature Materials 20, 274–279 (2020)",
+             url="https://doi.org/10.1038/s41563-020-00833-z"),
     "1D radial  (baseline)":
-        dict(input="radial", log=False, sparse=False, theta_shift=False),
+        dict(input="radial", log=False, sparse=False, theta_shift=False,
+             ref="Baseline (azimuthal average); cf. py4DSTEM — Savitzky "
+                 "et al., Microsc. Microanal. 27, 712–743 (2021)",
+             url="https://doi.org/10.1017/s1431927621000477"),
 }
 
 
@@ -420,6 +440,26 @@ class NMFPanel(ctk.CTkFrame):
         except Exception:
             self._scan_shape = None
 
+    # ----- variant citation --------------------------------------------
+    def _on_variant_change(self):
+        """Update the clickable citation label for the selected variant."""
+        cfg = NMF_VARIANTS.get(self._vars["variant"].get(), {})
+        self._cite_url = cfg.get("url", "")
+        ref = cfg.get("ref", "")
+        try:
+            self._cite_lbl.configure(
+                text=("↗ " + ref) if ref else "")
+        except Exception:
+            pass
+
+    def _open_variant_ref(self):
+        url = getattr(self, "_cite_url", "")
+        if url:
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+
     # ----- UI ----------------------------------------------------------
     def _build(self):
         self._vars = {
@@ -500,8 +540,19 @@ class NMFPanel(ctk.CTkFrame):
         _section(sb, "NMF variant")
         ctk.CTkOptionMenu(sb, variable=self._vars["variant"],
                             values=list(NMF_VARIANTS.keys()),
-                            width=240
+                            width=240,
+                            command=lambda _v: self._on_variant_change()
                             ).pack(anchor="w", padx=8, pady=2)
+        # clickable citation for the selected variant (opens DOI in browser)
+        self._cite_lbl = ctk.CTkLabel(
+            sb, text="", width=240, anchor="w", justify="left",
+            wraplength=240, font=("Segoe UI", 10),
+            text_color=("#1565C0", "#5BA4F0"), cursor="hand2")
+        self._cite_lbl.pack(anchor="w", padx=8, pady=(0, 2))
+        self._cite_lbl.bind(
+            "<Button-1>",
+            lambda _e: self._open_variant_ref())
+        self._on_variant_change()      # initialise label for default variant
 
         _section(sb, "n_comp")
         n_row = ctk.CTkFrame(sb, fg_color="transparent")
@@ -555,6 +606,13 @@ class NMFPanel(ctk.CTkFrame):
         ctk.CTkCheckBox(k_row, text="auto (silhouette)",
                           variable=self._vars["auto_K"]
                           ).pack(side="left", padx=8)
+        # Re-cluster the EXISTING NMF (no re-fit) — fast way to change K
+        # or add clustering methods without recomputing the decomposition.
+        self._cluster_btn = ctk.CTkButton(
+            sb, text="Cluster  (re-cluster current NMF)",
+            fg_color=("#4D6FB0", "#3A5380"),
+            command=self._kickoff_recluster)
+        self._cluster_btn.pack(fill="x", padx=8, pady=(2, 6))
 
         _section(sb, "View / inspect")
         ctk.CTkOptionMenu(sb, variable=self._vars["view_mode"],
@@ -779,12 +837,106 @@ class NMFPanel(ctk.CTkFrame):
         self._stop_requested = False
         self._run_btn.configure(state="disabled")
         self._report_btn.configure(state="disabled")
+        try:
+            self._cluster_btn.configure(state="disabled")
+        except Exception:
+            pass
         self._stop_btn.configure(state="normal")
         self._compute_progress = "starting…"
         self._thread = threading.Thread(
             target=self._compute_worker, daemon=True)
         self._thread.start()
         self._poll()
+
+    # ---- re-cluster the existing NMF (no re-fit) ----------------------
+    def _do_clustering(self, W, polar_full=None):
+        """Run the selected clustering method(s) on NMF loadings W.
+        Resolves K (auto-silhouette or fixed).  Returns (labels, K, sil)."""
+        labels = {}
+        min_cs = int(self._vars["min_cluster_size"].get())
+        sil = None
+        if self._vars["auto_K"].get():
+            with self._lock:
+                self._compute_progress = "auto K (silhouette)…"
+            K, sil = auto_K(W)
+            self._vars["K"].set(K)
+        else:
+            K = int(self._vars["K"].get())
+        self._check_stop()
+        if self._vars["use_kmeans"].get():
+            with self._lock:
+                self._compute_progress = "K-means…"
+            labels["K-means"] = cluster_W(W, "K-means", k=K)
+            self._check_stop()
+        if self._vars["use_aglo"].get():
+            d = self._vars["aglo_dist"].get()
+            with self._lock:
+                self._compute_progress = f"Aglo ({d})…"
+            if d == "polar-xcorr" and polar_full is None:
+                raise RuntimeError("polar-xcorr needs the polar input "
+                                   "(re-run NMF with the polar variant)")
+            labels["Aglo"] = cluster_W(W, "Aglo", k=K, distance=d,
+                                       polar_full=polar_full)
+            self._check_stop()
+        if self._vars["use_hdbscan"].get():
+            with self._lock:
+                self._compute_progress = "HDBSCAN…"
+            labels["HDBSCAN"] = cluster_W(W, "HDBSCAN",
+                                          min_cluster_size=min_cs)
+            self._check_stop()
+        if self._vars["use_fcm"].get():
+            with self._lock:
+                self._compute_progress = "FCM…"
+            labels["FCM"] = cluster_W(W, "FCM", k=K,
+                                      fcm_m=float(self._vars["fcm_m"].get()))
+            self._check_stop()
+        return labels, K, sil
+
+    def _kickoff_recluster(self):
+        if self._compute_running:
+            messagebox.showinfo("NMF", "compute already running"); return
+        if self._last is None or self._last.get("W") is None:
+            messagebox.showinfo(
+                "Cluster", "No NMF to re-cluster yet — click 'Run' first. "
+                "Then 'Cluster' re-clusters without re-fitting.")
+            return
+        self._compute_running = True
+        self._stop_requested = False
+        self._run_btn.configure(state="disabled")
+        self._report_btn.configure(state="disabled")
+        try:
+            self._cluster_btn.configure(state="disabled")
+        except Exception:
+            pass
+        self._stop_btn.configure(state="normal")
+        self._compute_progress = "re-clustering…"
+        self._thread = threading.Thread(
+            target=self._recluster_worker, daemon=True)
+        self._thread.start()
+        self._poll()
+
+    def _recluster_worker(self):
+        try:
+            d = self._last
+            labels, K, sil = self._do_clustering(d["W"],
+                                                 d.get("polar_full"))
+            d["labels"] = labels
+            d["K"] = K
+            d["sil"] = sil
+            self.last_cluster_labels = dict(labels)
+            with self._lock:
+                self._compute_progress = (
+                    f"re-clustered.  K={K}  "
+                    f"methods={', '.join(labels) or '(none)'}")
+        except NMFPanel._Aborted:
+            with self._lock:
+                self._compute_progress = "stopped by user."
+        except Exception as e:
+            with self._lock:
+                self._compute_progress = f"re-cluster failed: {e!r}"
+            print(f"[nmf] recluster failed: {e!r}", flush=True)
+        finally:
+            self._compute_running = False
 
     def _compute_worker(self):
         try:
@@ -826,58 +978,20 @@ class NMFPanel(ctk.CTkFrame):
                                           sparse=cfg["sparse"],
                                           max_iter=300)
             self._check_stop()
-            # Keep polar_full (un-flat) for polar-xcorr
+            # Keep polar_full (un-flat) for polar-xcorr + later re-cluster.
             polar_full = None
             if cfg["input"] == "polar":
                 polar_full = X.reshape((X.shape[0],) + comp_shape)
-            # K
-            if self._vars["auto_K"].get():
-                with self._lock:
-                    self._compute_progress = "auto K (silhouette)…"
-                K, sil = auto_K(W, progress_cb=cb)
-                self._vars["K"].set(K)
-            else:
-                K = int(self._vars["K"].get())
-                sil = None
             self._check_stop()
-            # Clustering
-            labels = {}
-            min_cs = int(self._vars["min_cluster_size"].get())
-            if self._vars["use_kmeans"].get():
-                with self._lock:
-                    self._compute_progress = "K-means…"
-                labels["K-means"] = cluster_W(W, "K-means", k=K)
-                self._check_stop()
-            if self._vars["use_aglo"].get():
-                d = self._vars["aglo_dist"].get()
-                with self._lock:
-                    self._compute_progress = f"Aglo ({d})…"
-                if d == "polar-xcorr" and polar_full is None:
-                    raise RuntimeError(
-                        "polar-xcorr only with polar input")
-                labels["Aglo"] = cluster_W(
-                    W, "Aglo", k=K, distance=d,
-                    polar_full=polar_full)
-                self._check_stop()
-            if self._vars["use_hdbscan"].get():
-                with self._lock:
-                    self._compute_progress = "HDBSCAN…"
-                labels["HDBSCAN"] = cluster_W(
-                    W, "HDBSCAN", min_cluster_size=min_cs)
-                self._check_stop()
-            if self._vars["use_fcm"].get():
-                with self._lock:
-                    self._compute_progress = "FCM…"
-                labels["FCM"] = cluster_W(
-                    W, "FCM", k=K,
-                    fcm_m=float(self._vars["fcm_m"].get()))
-                self._check_stop()
+            # Clustering (shared with the 'Cluster' re-cluster path; also
+            # resolves K / auto-K).
+            labels, K, sil = self._do_clustering(W, polar_full)
             self._last = dict(
                 variant=variant_name, cfg=cfg,
                 X_shape=X.shape, comp_shape=comp_shape,
                 W=W, H=H, n_comp=n_comp, K=K,
                 labels=labels, errs=errs, sil=sil,
-                err_final=err_final,
+                err_final=err_final, polar_full=polar_full,
             )
             # Expose cluster labels for cross-tab overlays (ACOM).
             self.last_cluster_labels = dict(labels)
@@ -906,6 +1020,10 @@ class NMFPanel(ctk.CTkFrame):
         else:
             self._run_btn.configure(state="normal")
             self._report_btn.configure(state="normal")
+            try:
+                self._cluster_btn.configure(state="normal")
+            except Exception:
+                pass
             try: self._stop_btn.configure(state="disabled")
             except Exception: pass
             self._stop_requested = False
@@ -1046,6 +1164,16 @@ class NMFPanel(ctk.CTkFrame):
         self._fig.suptitle(title, fontsize=11)
         self._fig.tight_layout()
         self._canvas.draw_idle()
+        # Auto-save a copy of the result figure next to the loaded data.
+        try:
+            import assistant_io
+            methods = "+".join(_safe_name(m) for m in d.get("labels", {}))
+            assistant_io.gui_autosave(
+                self.app, "nmf", self._fig,
+                name=f"nmf_K{K}_{methods}" if methods else f"nmf_K{K}",
+                summary=title)
+        except Exception:
+            pass
 
     # ----- interactive map --------------------------------------------
     def _recip_per_px(self):

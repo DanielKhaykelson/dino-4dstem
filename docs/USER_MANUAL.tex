@@ -1,0 +1,474 @@
+\documentclass[11pt]{article}
+\usepackage[margin=2.3cm]{geometry}
+\usepackage{amssymb}
+\usepackage[dvipsnames,table]{xcolor}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{parskip}
+\usepackage{fancyhdr}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=RoyalBlue, urlcolor=RoyalBlue}
+\definecolor{deep}{HTML}{1F4E79}
+\definecolor{soft}{HTML}{EAF1FA}
+\definecolor{warn}{HTML}{FBE9E7}
+\definecolor{tipc}{HTML}{E8F5E9}
+\titleformat{\section}{\Large\bfseries\color{deep}}{\thesection.}{0.5em}{}
+\titleformat{\subsection}{\large\bfseries\color{deep}}{\thesubsection}{0.5em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries}{}{0em}{}
+\setlist{leftmargin=1.4em}
+\newcommand{\btn}[1]{\textbf{#1}}
+\newcommand{\tab}[1]{\textsf{\textbf{#1}}}
+\newcommand{\tip}[1]{\par\smallskip\noindent\colorbox{tipc}{\parbox{\dimexpr\linewidth-2\fboxsep}{\textbf{Tip.} #1}}\par\smallskip}
+\newcommand{\note}[1]{\par\smallskip\noindent\colorbox{soft}{\parbox{\dimexpr\linewidth-2\fboxsep}{\textbf{Note.} #1}}\par\smallskip}
+\newcommand{\caution}[1]{\par\smallskip\noindent\colorbox{warn}{\parbox{\dimexpr\linewidth-2\fboxsep}{\textbf{Caution.} #1}}\par\smallskip}
+\pagestyle{fancy}\fancyhf{}\rhead{\small DINO-4DSTEM user manual}\lhead{\small\leftmark}\rfoot{\small\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+
+\begin{document}
+\begin{titlepage}
+\vspace*{3cm}
+\begin{center}
+{\Huge\bfseries\color{deep} DINO-4DSTEM}\\[6pt]
+{\LARGE A label-free tool for reading 4D-STEM diffraction maps}\\[10pt]
+{\large User manual}\\[4pt]
+{\normalsize For first-time and occasional users. No programming needed.}\\[40pt]
+\colorbox{soft}{\parbox{0.85\linewidth}{\centering\vspace{4pt}
+This program takes a 4D-STEM dataset and automatically sorts every scan position
+into a small number of ``classes'' that share the same diffraction, giving you a
+colour map of your sample, without labels, without choosing the number of classes,
+and without setting peak thresholds. It can also run the classical comparison
+methods (NMF, ACOM, SAM) and tell you what the classes mean, all in one window.
+\vspace{4pt}}}
+\vfill
+{\small Screenshots will be added in a later revision; this edition is text-only.}
+\end{center}
+\end{titlepage}
+
+\tableofcontents
+\clearpage
+
+% =====================================================================
+\section{What this program does (in plain words)}
+A 4D-STEM experiment scans a tiny electron beam across your sample and, at every
+scan position, records a 2D \emph{diffraction pattern}. The result is a large
+4-dimensional dataset: a 2D grid of positions, each holding a 2D diffraction
+image. Looking through thousands of these patterns by hand is slow and subjective.
+
+DINO-4DSTEM learns, on its own, to group scan positions whose diffraction looks
+alike. The output is a \emph{class map}: an image of your scan where each colour is
+one group (``class'') of similar diffraction. From there you can look at the
+average diffraction of each class, ask the program what physically distinguishes
+the classes, and compare the result against the traditional methods.
+
+\textbf{Three things make it easy to use:}
+\begin{itemize}[itemsep=2pt]
+\item \textbf{No labelling.} You do not have to tell it what to look for.
+\item \textbf{No ``number of classes'' to guess.} It finds how many are needed.
+\item \textbf{No thresholds to tune.} It does not rely on peak-finding settings
+that you would otherwise have to adjust by trial and error.
+\end{itemize}
+
+\note{You can use the program in two ways. (1) \emph{Train} a fresh model on your
+own data (takes a while, uses the graphics card), or (2) \emph{load an existing
+trained model} and just look at and analyse the results (fast). Both are covered
+below.}
+
+% =====================================================================
+\section{Starting the program and the main window}
+\subsection{Starting it}
+Launch the program the way it was set up on your computer (a desktop shortcut, or
+by running \texttt{gui\_dino4dstem.py} in the project's Python environment). A
+single window titled \tab{DINO-4DSTEM} opens. A small black text window may also
+appear behind it; that is the program's log. You can ignore it, but do not close
+it, as closing it closes the program.
+
+\tip{Maximise the window (the square button at the top-right) before you start, so
+all the controls and images are visible.}
+
+\subsection{The top bar (always visible)}
+Across the very top of the window, from left to right:
+\begin{itemize}[itemsep=3pt]
+\item \btn{Inspect runs (HTML)} : opens a summary page of all the models you have
+trained, in your web browser. Useful for finding an earlier result.
+\item \btn{Assistant} : opens a plain-English chat helper that can carry out
+common actions for you by typing requests in everyday language. (Optional; may not
+be present in every version.)
+\item \textbf{dataset badge} (``dataset: click to load a cube''): shows which data
+file is currently loaded. Click it to load one.
+\item \textbf{run badge} (``run: none''): shows which trained model is currently
+in use. Click it to pick one.
+\item \textbf{inference dot} : a small status light that tells you whether a class
+map has been computed yet.
+\item \textbf{real space} (\,nm/px\,): the distance between neighbouring scan
+positions, i.e.\ your scan step size in nanometres. Used only for the scale bar and
+axis labels on real-space images.
+\item \textbf{reciprocal} (\,nm$^{-1}$/px\,): the calibration of the detector, in
+nm$^{-1}$ per original detector pixel, as reported by your microscope for the
+camera length you used. Used for the diffraction scale bars and the 1D plots.
+\end{itemize}
+\note{You only ever type these two calibration numbers once. Every plot in the
+program automatically applies the right scaling, so you do not need to recompute
+anything when the program resizes images internally.}
+
+\subsection{How the tabs are organised}
+The work is grouped into five big tabs along the top:
+\begin{itemize}[itemsep=2pt]
+\item \tab{Data} : load your 4D-STEM file and prepare it.
+\item \tab{Model} : train a model, watch it learn, and apply it to other data.
+\item \tab{Analysis} : look at the class map and understand what the classes mean.
+\item \tab{Clustering} : the classical comparison methods (NMF, pretrained-DINO, SAM).
+\item \tab{Diffraction} : per-pattern tools (peak/blob detection and crystal
+orientation mapping, ACOM).
+\end{itemize}
+Each big tab contains smaller sub-tabs (for example \tab{Data} contains
+\tab{Load + Pre-process} and \tab{Synthetic}). Click a big tab first, then the
+sub-tab you want.
+
+% =====================================================================
+\section{The five-minute workflow}
+If you just want a class map of your data, here is the whole path. Each step is
+explained in detail later.
+\begin{enumerate}[itemsep=3pt]
+\item \tab{Data \textrightarrow{} Load + Pre-process}: click \btn{Browse}, choose
+your 4D-STEM file, click \btn{Load}. Set \textbf{vmax} so the rings are visible
+without the centre being a white blob. Leave the crop/mask at their defaults
+unless you have a reason to change them.
+\item Enter your \textbf{real space} and \textbf{reciprocal} calibration in the top
+bar.
+\item \tab{Model \textrightarrow{} Training}: pick your \textbf{Sample}, leave
+\textbf{Use paper recipe (locked)} on, and click \btn{Train}. Wait for it to
+finish. \emph{Or}, to skip training, click the \textbf{run badge} and load an
+existing trained model.
+\item \tab{Model \textrightarrow{} Eval} (or \tab{Analysis \textrightarrow{}
+Post-hoc}): view the class map.
+\item \tab{Analysis \textrightarrow{} Post-hoc \textrightarrow{} Interpretation}:
+click \btn{Run interpretation} to get figures and a written report on what the
+classes mean.
+\end{enumerate}
+
+% =====================================================================
+\section{Data: loading and preparing your file}
+\tab{Data \textrightarrow{} Pre-processing \textrightarrow{} Load + Pre-process}
+
+This is where you open your data and get it ready. It is the first tab you use.
+
+\subsection{Loading a file}
+\begin{itemize}[itemsep=2pt]
+\item \btn{Browse} then \btn{Load}: open a single 4D-STEM cube. Supported file
+types include \texttt{.prz}, \texttt{.npy}, \texttt{.npz}, and \texttt{.h5}.
+\item \btn{Browse multi\dots} : open several files together (for example four
+quadrants of one acquisition).
+\end{itemize}
+After loading, the left side shows one diffraction pattern, and the bottom says how
+the data is shaped. If nothing appears, check the log window for a message.
+
+\subsection{Looking through the patterns}
+\begin{itemize}[itemsep=2pt]
+\item \textbf{Pattern index} slider: moves through the scan positions. Click the
+slider or the image first, then use the left/right arrow keys for single steps, or
+Page-Up/Page-Down for jumps of ten. \btn{Random} jumps to a random position.
+\item \textbf{vmax}: the brightness ceiling. Lower it until you can see the faint
+diffraction rings; raise it if the image is too dark. This only changes the
+display and how the model sees intensities, not your raw file.
+\item \textbf{cmap}: the colour scheme of the diffraction image.
+\item \textbf{log-stretch}: compresses very bright and very faint together; helpful
+when the central beam is far brighter than the rings.
+\end{itemize}
+\tip{Choosing a good \textbf{vmax} is the single most useful thing you do here. Aim
+for a picture where both the bright centre and the outer rings are visible.}
+
+\subsection{Crop and central-beam mask}
+These define what part of each diffraction pattern the model looks at.
+\begin{itemize}[itemsep=2pt]
+\item \textbf{center crop (px, in 192 frame)}: how far out from the centre the
+model looks. Keep your rings of interest comfortably inside this circle.
+\item \textbf{polar mask cols (low-r mask in polar)}: hides the very centre (the
+direct beam) so the intense central spot does not dominate. Too small lets the beam
+bleed in; too large eats the first ring.
+\end{itemize}
+\note{The defaults are sensible for most molecular-film data. Only change them if
+you know the ring you care about is being cut off (too-small crop) or the centre is
+swamping everything (too-small mask).}
+
+\subsection{Other preparation tools (optional)}
+\begin{itemize}[itemsep=3pt]
+\item \textbf{Binning (down-sample)}: \textbf{bin factor n} then
+\btn{Apply binning} writes a new, smaller, faster file. Use only if loading is slow.
+Choose \textbf{real-space} binning to merge scan positions or \textbf{q-space} to
+merge detector pixels.
+\item \textbf{Gaussian blur}: \textbf{$\sigma$ (px)} then \btn{Apply blur to
+dataset} writes a gently smoothed copy. Reduces speckle noise on very low-dose data.
+\item \textbf{Ellipticity correction}: fixes a slightly oval detector. Use
+\btn{Auto-fit}, or type \textbf{a/b} and \textbf{$\theta$} and click \btn{Apply}.
+\btn{Reset} returns to no correction.
+\item \textbf{NBED centering}: \btn{COM-center the direct beam} /
+\btn{Center entire dataset} re-centres each pattern on the beam if your data drifts.
+\item \textbf{Pair labelling (pre-train)}: an advanced option to give the model a
+few ``these two look the same / different'' hints. Most users never need this.
+\end{itemize}
+\caution{The buttons that say ``write new .cube.npy'' create a new file on disk;
+they do not overwrite your original. Note the new file name so you load the right
+one for training.}
+
+\subsection{Synthetic (advanced)}
+\tab{Data \textrightarrow{} Synthetic} simulates diffraction data from a known
+crystal structure, to test the method. It is for advanced users and is not needed
+for normal analysis.
+
+% =====================================================================
+\section{Model: training and applying a model}
+\subsection{Training}
+\tab{Model \textrightarrow{} Training \textrightarrow{} Training}
+
+This teaches a model on your loaded data.
+\begin{enumerate}[itemsep=2pt]
+\item Choose the \textbf{Sample} (the data you prepared).
+\item Optionally type a \textbf{Run name} so you can find the result later.
+\item Leave \btn{Use paper recipe (locked)} switched on. This applies the
+validated default settings, so you do not have to choose anything.
+\item Click \btn{Train}. Progress shows in the status line; you can watch the map
+form live on the \tab{Eval} sub-tab. Click \btn{Stop} to end early.
+\end{enumerate}
+\begin{itemize}[itemsep=2pt]
+\item \btn{Refresh crop/mask/COM from PrePanel}: copies the crop and mask you set
+on the Data tab into the training settings, so the model trains on exactly what you
+previewed.
+\item To change advanced settings, click the lock switch to unlock the recipe, then
+\btn{Apply changes}. \btn{Apply auto-default ($\lambda$\_pair = 0.1)} turns on the
+optional pair-hint term if you provided pair labels.
+\end{itemize}
+\caution{Training uses the graphics card and can take a while. Avoid running other
+heavy GPU work at the same time. If your data loading feels stuck, that is usually
+disk speed, not a crash; give it time.}
+
+\subsection{Eval: viewing the class map}
+\tab{Model \textrightarrow{} Training \textrightarrow{} Eval}
+\begin{itemize}[itemsep=2pt]
+\item During training this updates automatically (``awaiting first
+checkpoint\dots'' then the live map).
+\item To view a finished model: \btn{Load run dir\dots{} (model)}, pick the run
+folder, and click \btn{Render}. \btn{Browse cube\dots} lets you apply the model to
+a different data file.
+\end{itemize}
+
+\subsection{Transfer: applying one model to many files}
+\tab{Model \textrightarrow{} Transfer}
+
+Use a trained model on a whole folder of other datasets in one go.
+\begin{enumerate}[itemsep=2pt]
+\item Point \textbf{Cubes folder} at the folder, click \btn{Refresh}, and tick the
+files you want (up to twenty).
+\item Pick the starting model under \textbf{ckpt}.
+\item Click \btn{Run sequential transfer}. \btn{Stop} ends it.
+\end{enumerate}
+\begin{itemize}[itemsep=2pt]
+\item \textbf{freeze encoder (head-only adapt)}: a faster, lighter adaptation.
+\item \textbf{Chain ckpts}: each file starts from the previous file's result;
+useful for a time series.
+\end{itemize}
+
+% =====================================================================
+\section{Analysis: understanding the class map}
+\subsection{Post-hoc: explore the map}
+\tab{Analysis \textrightarrow{} Post-hoc \textrightarrow{} Analysis}
+
+This is the main place to look at results.
+\begin{itemize}[itemsep=3pt]
+\item \btn{Load run dir\dots} and \btn{Browse cube\dots}: load a trained model and
+its data (or use the ones already in the session).
+\item \textbf{Click the class map} to inspect a position: it shows that position's
+raw pattern. Clicking a class shows the \textbf{class average} diffraction
+(``class avg (top 200)''), which is much cleaner than a single noisy frame.
+\item \textbf{Attribution (Avg + GradCAM + IG)}: \btn{Compute GradCAM + IG} makes a
+picture showing \emph{which part of the diffraction the model used} to decide a
+class. Choose the \textbf{CAM layer} if prompted; the defaults are fine.
+\item \textbf{Merge classes}: tick two or more classes and click \btn{Apply merge}
+to combine ones you consider the same. \btn{Reset} undoes it.
+\item \textbf{Fine-tune with labels}: an advanced option to nudge the model using a
+few of your own pair labels.
+\item \btn{Send grain to ACOM tab}: hands the selected region to the orientation-
+mapping tool (see Diffraction).
+\item \textbf{Saving}: \btn{Save snapshot}, \btn{Save panel (PDF+PNG)}, and
+\btn{Report All (PPTX + PNGs)} export your figures.
+\end{itemize}
+\tip{The class average is your friend. A single low-dose pattern looks like noise;
+the class average reveals the real rings and spots.}
+
+\subsection{Interpretation: what do the classes mean?}
+\tab{Analysis \textrightarrow{} Post-hoc \textrightarrow{} Interpretation}
+
+This runs a battery of checks and writes a short report.
+\begin{enumerate}[itemsep=2pt]
+\item Tick the \textbf{Analyses to run} you want (leave all on for a full report).
+\item Click \btn{Run interpretation}. When done, use the \textbf{Figure} selector
+to flip through the results, or \btn{Open output folder} to find the files.
+\item \btn{Refresh from Post-hoc} re-reads the currently loaded run.
+\end{enumerate}
+The report answers, in figures and text: which physical quantities the classes
+track (for example crystallinity or texture), whether the splits are real or
+redundant, and how the model compares to the classical methods.
+
+% =====================================================================
+\section{Clustering: the classical comparison methods}
+These tabs let you run the traditional approaches on the \emph{same} data, so you
+can compare them with the model directly.
+
+\subsection{NMF + cluster}
+\tab{Clustering \textrightarrow{} NMF + cluster}
+
+Non-negative matrix factorization followed by clustering (a standard baseline).
+\begin{enumerate}[itemsep=2pt]
+\item \btn{Load .prz / .npy} (or use the session sample).
+\item Set \textbf{n\_comp} (how many components) and pick the \textbf{method}
+(\textbf{K-means} is the default; \textbf{Agglomerative}, \textbf{FCM},
+\textbf{HDBSCAN} are alternatives). \textbf{K} is the number of clusters, or choose
+\textbf{auto}.
+\item Click \btn{Run}. \btn{Show class averages} and \btn{Open interactive map}
+display the result; \btn{Save PNG} / \btn{Report All} export it.
+\end{enumerate}
+
+\subsection{DINO + cluster}
+\tab{Clustering \textrightarrow{} DINO + cluster}
+
+Uses a general, pre-trained image model (downloaded automatically) instead of one
+trained on your data, then clusters its features. A second baseline. Controls
+mirror the NMF tab, plus \btn{Show UMAP} (a 2D scatter of the patterns) and
+\btn{Class attentions (grid)}.
+
+\subsection{SAM}
+\tab{Clustering \textrightarrow{} SAM}
+
+Uses the ``Segment Anything'' model to outline features in a class-average
+diffraction pattern.
+\begin{itemize}[itemsep=2pt]
+\item Set \textbf{SAM ckpt} to the model file, pick a \textbf{class}, and click
+\btn{Run on this average}.
+\item \btn{Apply to whole class} / \btn{Apply to ALL classes} repeat it broadly.
+\item \btn{Save tuning to per-class config} remembers your settings per class.
+\end{itemize}
+
+% =====================================================================
+\section{Diffraction: per-pattern tools}
+\subsection{Blob (peak detection)}
+\tab{Diffraction \textrightarrow{} Blob}
+
+Finds spots/peaks in a diffraction image.
+\begin{itemize}[itemsep=2pt]
+\item Pick a \textbf{class} and click \btn{Run on current image}, or set a
+\textbf{frame idx} / \textbf{grain (y, x)} to target a specific pattern.
+\item \textbf{Method} chooses the detector; \textbf{log1p stretch} helps faint
+peaks show up. \btn{Apply to whole class} / \btn{Apply to ALL classes} run broadly.
+\end{itemize}
+
+\subsection{ACOM (crystal orientation mapping)}
+\tab{Diffraction \textrightarrow{} ACOM}
+
+Matches each pattern to a known crystal structure (from a CIF file) to find crystal
+\emph{orientation}. It works in clear steps, left to right:
+\begin{enumerate}[itemsep=3pt]
+\item \btn{Load source}: pulls the current data and class map from the session (no
+separate load button; it uses the top-bar badges).
+\item \btn{+ CIF\dots} then \btn{Build all}: add your structure file(s) and build
+the reference reflections.
+\item \btn{Detect peaks}: finds peaks in the patterns. \textbf{log stretch before
+detection}, \textbf{Top-N}, and \textbf{skip if < N peaks} control sensitivity.
+\item \textbf{Calibration}: set \textbf{1/\AA{} per px} (or click \btn{Auto-fit})
+and \textbf{k\_max}.
+\item \btn{Match single}: solve one position (type a scan (y, x) or click the class
+map). \btn{Single-phase full} / \btn{Multi-phase full} solve the whole scan
+(\textbf{full-dataset stride} trades speed for completeness; \textbf{corr
+threshold} and \textbf{winner margin} control acceptance).
+\item \btn{Overlay} shows the orientation map; tick \textbf{also show in-plane
+orientation} for the rotation angle.
+\end{enumerate}
+\note{ACOM needs a structure file (CIF) and a few detection settings, which is
+exactly the kind of manual tuning the model avoids. Use it as a cross-check or when
+you specifically want crystal orientation, which the model deliberately ignores.}
+
+% =====================================================================
+\section{Where your results are saved}
+\begin{itemize}[itemsep=2pt]
+\item Trained models live in a \texttt{runs} folder, one folder per model, each
+holding the model file, a settings file, a training log, and an \texttt{eval}
+folder with the class map.
+\item Figures and reports you export (snapshots, panels, ``Report All'') are
+written next to the run or to a folder the button names; use \btn{Open output
+folder} on the Interpretation tab to find them.
+\item New data files you create (binned, blurred, centred) are written as new
+\texttt{.cube.npy} files in the same place as the original.
+\end{itemize}
+
+% =====================================================================
+\section{Common tasks at a glance}
+\begin{itemize}[itemsep=4pt]
+\item \textbf{Just show me a class map of my data, using an existing model.}
+Click the \textbf{run badge} (top bar) and load the model; click the
+\textbf{dataset badge} and load your file; go to \tab{Model \textrightarrow{} Eval}
+and click \btn{Render}.
+\item \textbf{Train a new model on my data.}
+\tab{Data} load + set vmax; \tab{Model \textrightarrow{} Training}, pick the sample,
+keep the locked recipe, \btn{Train}.
+\item \textbf{Understand what the classes are.}
+\tab{Analysis \textrightarrow{} Post-hoc \textrightarrow{} Interpretation},
+\btn{Run interpretation}.
+\item \textbf{Compare to the classical method.}
+\tab{Clustering \textrightarrow{} NMF + cluster}, \btn{Run}, then compare its map to
+the model's.
+\item \textbf{Get crystal orientations.}
+\tab{Diffraction \textrightarrow{} ACOM}, add a CIF, \btn{Build all},
+\btn{Detect peaks}, \btn{Single-phase full}, \btn{Overlay}.
+\item \textbf{Apply one model to many files.}
+\tab{Model \textrightarrow{} Transfer}, pick the folder, tick files,
+\btn{Run sequential transfer}.
+\end{itemize}
+
+% =====================================================================
+\section{Troubleshooting}
+\begin{itemize}[itemsep=3pt]
+\item \textbf{Nothing happens after I click Load.} Check the small black log
+window for a message; the file type or scan shape may not have been recognised.
+Try \btn{Browse} again and confirm the file.
+\item \textbf{The diffraction image is all white in the middle, or all black.}
+Adjust \textbf{vmax} on the Data tab and turn on \textbf{log-stretch}.
+\item \textbf{The class map looks empty or a single colour.} Make sure a model is
+loaded (run badge) and a class map has been computed (the inference light); on the
+Eval tab click \btn{Render}.
+\item \textbf{Training seems frozen.} Low-dose data loads slowly; wait a few
+minutes. If the graphics card is busy with other work, training will be slow.
+\item \textbf{A figure looks cramped or mislabelled.} Resize the window larger and
+re-render; many panels redraw to fit.
+\item \textbf{I changed crop/mask but training ignored it.} On the Training tab
+click \btn{Refresh crop/mask/COM from PrePanel} before \btn{Train}.
+\end{itemize}
+
+% =====================================================================
+\section{Glossary}
+\begin{description}[style=nextline,leftmargin=1.4em,itemsep=3pt]
+\item[4D-STEM cube] The whole dataset: a 2D grid of scan positions, each with a 2D
+diffraction pattern.
+\item[Diffraction pattern] The 2D image recorded at one scan position; rings and
+spots in it encode the local structure.
+\item[Class / class map] A group of scan positions with similar diffraction, and
+the colour image showing where each group sits on the sample.
+\item[Class average] The averaged diffraction of all positions in a class; cleaner
+than any single pattern.
+\item[Training] Letting the model learn groupings from your data. Done once per
+dataset; afterwards the model can be reloaded instantly.
+\item[Run] One trained model and its outputs, stored in its own folder.
+\item[vmax] The brightness ceiling used when showing and reading diffraction
+intensities.
+\item[Crop / mask] How much of each pattern the model looks at, and how much of the
+bright central beam is hidden.
+\item[NMF, SAM, ACOM] Classical analysis methods provided for comparison:
+decomposition-plus-clustering, feature segmentation, and crystal-orientation
+mapping, respectively.
+\item[Calibration (real / reciprocal)] The two numbers, scan step size (nm/px) and
+detector calibration (nm$^{-1}$/px), that set the scale bars and axes.
+\end{description}
+
+\vfill
+\noindent\colorbox{soft}{\parbox{\dimexpr\linewidth-2\fboxsep}{\small
+\textbf{Getting help.} If you are unsure which setting to use for a new material,
+the program's defaults (the locked ``paper recipe'') are a safe starting point. The
+on-screen ``\,?\,'' help buttons next to many controls explain each one in place.}}
+\end{document}

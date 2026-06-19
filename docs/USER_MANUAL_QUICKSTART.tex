@@ -1,0 +1,111 @@
+\documentclass[10pt]{article}
+\usepackage[margin=1.3cm,landscape]{geometry}
+\usepackage{amssymb}
+\usepackage[dvipsnames]{xcolor}
+\usepackage{multicol}
+\usepackage{enumitem}
+\usepackage{parskip}
+\usepackage{titlesec}
+\definecolor{deep}{HTML}{1F4E79}
+\definecolor{soft}{HTML}{EAF1FA}
+\definecolor{tipc}{HTML}{E8F5E9}
+\titleformat{\section}{\large\bfseries\color{deep}}{}{0em}{}
+\titlespacing{\section}{0pt}{4pt}{2pt}
+\setlist{leftmargin=1.2em,itemsep=1pt,topsep=2pt}
+\newcommand{\btn}[1]{\textbf{#1}}
+\newcommand{\tabn}[1]{\textsf{\textbf{#1}}}
+\pagestyle{empty}
+\setlength{\columnsep}{1.1cm}
+
+\begin{document}
+\begin{center}
+{\LARGE\bfseries\color{deep} DINO-4DSTEM quick-start card}\\[2pt]
+{\small A one-page cheat sheet. See the full user manual for details.}
+\end{center}
+\vspace{2pt}
+\hrule
+\vspace{6pt}
+
+\begin{multicols}{2}
+
+\section{Get a class map in 5 steps}
+\begin{enumerate}
+\item \tabn{Data \textrightarrow{} Load + Pre-process}: \btn{Browse} your file,
+\btn{Load}. Set \btn{vmax} so rings show but the centre is not a white blob.
+\item Top bar: enter \btn{real space} (nm/px) and \btn{reciprocal} (nm$^{-1}$/px).
+\item \tabn{Model \textrightarrow{} Training}: pick \btn{Sample}, keep
+\btn{Use paper recipe (locked)} \emph{on}, click \btn{Train}.\\
+\emph{Or skip training:} click the \btn{run badge} (top bar) and load an existing
+model.
+\item \tabn{Model \textrightarrow{} Eval}: \btn{Render} to see the class map.
+\item \tabn{Analysis \textrightarrow{} Post-hoc \textrightarrow{} Interpretation}:
+\btn{Run interpretation} for figures + a written report.
+\end{enumerate}
+
+\section{Top bar (always visible)}
+\begin{itemize}
+\item \btn{dataset badge} : click to load your 4D-STEM file.
+\item \btn{run badge} : click to load a trained model.
+\item \btn{inference light} : on = a class map is ready.
+\item \btn{real space} / \btn{reciprocal} : your two calibration numbers (enter
+once; all plots scale automatically).
+\item \btn{Inspect runs} : browse past models in a web page.
+\item \btn{Assistant} : optional plain-English helper.
+\end{itemize}
+
+\section{Which tab for what}
+\begin{itemize}
+\item \tabn{Data} : open + prepare your file (vmax, crop, mask).
+\item \tabn{Model} : train, watch (Eval), apply to many files (Transfer).
+\item \tabn{Analysis} : explore the map (Post-hoc) and explain it (Interpretation).
+\item \tabn{Clustering} : classical comparisons (NMF, pretrained-DINO, SAM).
+\item \tabn{Diffraction} : peak finding (Blob) and orientation mapping (ACOM).
+\end{itemize}
+
+\columnbreak
+
+\section{Common tasks}
+\begin{itemize}
+\item \textbf{Map of my data with an existing model:} run badge \textrightarrow{}
+load model; dataset badge \textrightarrow{} load file; \tabn{Eval} \textrightarrow{}
+\btn{Render}.
+\item \textbf{What do the classes mean:} \tabn{Analysis \textrightarrow{} Post-hoc
+\textrightarrow{} Interpretation} \textrightarrow{} \btn{Run interpretation}.
+\item \textbf{See a class's clean diffraction:} \tabn{Post-hoc}, click a class on
+the map (shows the class average).
+\item \textbf{Compare to NMF:} \tabn{Clustering \textrightarrow{} NMF + cluster}
+\textrightarrow{} \btn{Run}.
+\item \textbf{Crystal orientations:} \tabn{Diffraction \textrightarrow{} ACOM}:
+add a CIF, \btn{Build all}, \btn{Detect peaks}, \btn{Single-phase full},
+\btn{Overlay}.
+\item \textbf{One model on a folder of files:} \tabn{Model \textrightarrow{}
+Transfer}, pick folder, tick files, \btn{Run sequential transfer}.
+\end{itemize}
+
+\section{Good habits}
+\begin{itemize}
+\item Maximise the window before you start.
+\item A single low-dose pattern looks like noise; trust the \textbf{class average}.
+\item Changed crop/mask on \tabn{Data}? On \tabn{Training} click
+\btn{Refresh crop/mask/COM from PrePanel} before \btn{Train}.
+\item Buttons that ``write new .cube.npy'' make a new file; note its name.
+\item The ``\,?\,'' buttons next to controls explain each one in place.
+\end{itemize}
+
+\vspace{2pt}
+\noindent\colorbox{soft}{\parbox{\dimexpr\linewidth-2\fboxsep}{\footnotesize
+\textbf{If unsure of a setting} for a new material, the locked ``paper recipe'' is a
+safe default. Don't close the small black log window: it keeps the program running.}}
+
+\section{Quick fixes}
+\begin{itemize}
+\item \textbf{All white/black diffraction:} lower \btn{vmax}, turn on
+\btn{log-stretch}.
+\item \textbf{Empty / one-colour map:} make sure a model (run badge) and a class
+map (inference light) are loaded; click \btn{Render}.
+\item \textbf{Nothing after Load:} check the black log window for a message.
+\item \textbf{Training feels stuck:} low-dose data loads slowly; give it time.
+\end{itemize}
+
+\end{multicols}
+\end{document}

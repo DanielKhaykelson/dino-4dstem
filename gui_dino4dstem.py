@@ -100,6 +100,7 @@ from gui_app.nmf_panel import NMFPanel
 from gui_app.dino_pretrained_panel import DINOClusterPanel
 from gui_app.transfer_panel import TransferPanel
 from gui_app.acom_tab import ACOMTabPanel
+from gui_app.chat_panel import ChatPanel
 
 
 class App(ctk.CTk):
@@ -211,25 +212,21 @@ class App(ctk.CTk):
         except Exception: pass
 
     def _pick_dataset_badge(self):
-        """Open a quick sample picker."""
+        """Load a 4D-STEM cube BY PATH (path-based loading; no named-sample
+        list).  Drives the Pre-processing panel's loader, which registers
+        the cube and broadcasts it through the session."""
+        from tkinter import filedialog, messagebox
+        path = filedialog.askopenfilename(
+            title="Choose a 4D-STEM cube",
+            filetypes=[("4D-STEM cubes", "*.npy *.npz *.prz *.h5 *.hdf5"),
+                       ("All files", "*.*")])
+        if not path:
+            return
         try:
-            import tkinter as tk
-            from data import SAMPLES
-            top = tk.Toplevel(self); top.title("Pick a sample")
-            top.geometry("420x460")
-            lst = tk.Listbox(top, font=("Consolas", 10))
-            lst.pack(fill="both", expand=True, padx=8, pady=8)
-            keys = sorted(SAMPLES.keys())
-            for k in keys: lst.insert("end", k)
-            def _ok():
-                sel = lst.curselection()
-                if sel:
-                    self.session.set(sample=keys[int(sel[0])])
-                top.destroy()
-            ctk.CTkButton(top, text="Use this sample",
-                           command=_ok).pack(pady=6)
+            self.pre._path_var.set(path)
+            self.pre._load()
         except Exception as e:
-            messagebox.showerror("Pick sample", repr(e))
+            messagebox.showerror("Load data", repr(e))
 
     def _pick_run_badge(self):
         """Open a run-dir picker.  Routes through Session.load_run_dir
@@ -288,6 +285,97 @@ class App(ctk.CTk):
             text=f"run inspector → {out_path}  "
                   f"({len(payload)} runs)")
 
+    # ---- floating assistant window ---------------------------------
+    def _toggle_assistant(self):
+        """Show / hide the floating Assistant window.  Built lazily on
+        first open; thereafter we just withdraw/deiconify so its
+        conversation state survives being closed."""
+        win = self._assist_win
+        try:
+            if win is not None and win.winfo_exists():
+                if (win.state() in ("withdrawn", "iconic")
+                        or not win.winfo_viewable()):
+                    win.deiconify(); win.lift(); win.focus_force()
+                else:
+                    win.withdraw()
+                return
+        except Exception:
+            # stale / broken handle — drop it and reopen fresh
+            self._assist_win = None
+        try:
+            self._open_assistant()
+        except Exception as e:
+            import traceback
+            from tkinter import messagebox
+            traceback.print_exc()
+            try:
+                if (self._assist_win is not None
+                        and self._assist_win.winfo_exists()):
+                    self._assist_win.destroy()
+            except Exception:
+                pass
+            self._assist_win = None
+            messagebox.showerror(
+                "Assistant",
+                "Could not open the Assistant:\n\n" + repr(e)
+                + "\n\n(Details printed to the console.)")
+
+    def _open_assistant(self):
+        import customtkinter as ctk
+        W, Hh = 460, 760
+        win = ctk.CTkToplevel(self)
+        win.title("DINO-4DSTEM Assistant")
+        win.minsize(360, 480)
+        # CENTER over the main window so it's always on the same monitor
+        # and visible (avoids off-screen / wrong-monitor placement).
+        try:
+            self.update_idletasks()
+            mx, my = self.winfo_rootx(), self.winfo_rooty()
+            mw, mh = self.winfo_width(), self.winfo_height()
+            x = mx + max(0, (mw - W) // 2)
+            y = my + max(0, (mh - Hh) // 3)
+            geo = f"{W}x{Hh}+{max(x, 0)}+{max(y, 0)}"
+        except Exception:
+            geo = f"{W}x{Hh}"
+        win.geometry(geo)
+        # Close = hide (keep state), don't destroy.
+        win.protocol("WM_DELETE_WINDOW", win.withdraw)
+        self.chat = ChatPanel(win, app=self)
+        self.chat.pack(fill="both", expand=True)
+        self._assist_win = win
+        # Force it visible + on top (CTkToplevel's anti-flicker can leave
+        # it withdrawn for a moment; topmost-flash guarantees it surfaces).
+        def _reveal():
+            try:
+                if not win.winfo_exists():
+                    return
+                win.deiconify()
+                win.geometry(geo)
+                win.lift()
+                win.attributes("-topmost", True)
+                win.after(500, lambda: self._safe_topmost_off(win))
+                win.focus_force()
+            except Exception:
+                pass
+        win.after(120, _reveal)
+        win.lift(); win.focus_force()
+
+    @staticmethod
+    def _safe_topmost_off(win):
+        try:
+            if win.winfo_exists():
+                win.attributes("-topmost", False)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _safe_geo(win, geo):
+        try:
+            if win.winfo_exists():
+                win.geometry(geo)
+        except Exception:
+            pass
+
     def _build_topbar(self):
         # ----- two-row toolbar -----
         bar = ctk.CTkFrame(self, height=42)
@@ -299,11 +387,18 @@ class App(ctk.CTk):
                        width=170,
                        command=self._open_run_inspector
                        ).pack(side="left", padx=8, pady=4)
+        # Floating natural-language assistant — toggles a side window
+        # that follows you across every tab.
+        self._btn_assist = ctk.CTkButton(
+            bar, text="💬 Assistant", width=130,
+            fg_color=("#4D6FB0", "#3A5380"),
+            command=self._toggle_assistant)
+        self._btn_assist.pack(side="left", padx=8, pady=4)
         # Session badges: dataset + run + inference status.  Click to
         # change.  Updated by any panel that drives a load.
         from gui_app._ui import session_badge, StatusDot
         self._badge_dataset = session_badge(bar,
-            "● dataset:  (none)",
+            "● dataset:  (click to load a cube…)",
             command=self._pick_dataset_badge)
         self._badge_dataset.pack(side="left", padx=4, pady=4)
         self._badge_run = session_badge(bar,
@@ -459,6 +554,14 @@ class App(ctk.CTk):
                                  on_run_started=self._on_train_started,
                                  on_run_finished=self._on_train_finished)
         self.train.pack(fill="both", expand=True)
+
+        # Assistant — natural-language chat that drives the pipeline.
+        # It lives in a FLOATING Toplevel window (not a tab) so it stays
+        # available alongside whatever tab the user is on.  Built lazily
+        # on first open; toggled from the topbar button.  See
+        # _toggle_assistant / _open_assistant.
+        self.chat = None
+        self._assist_win = None
 
         # Lazy — built on first tab visit. Until then these are None.
         self.sam = None

@@ -67,8 +67,28 @@ class _ClusterMapViewer:
     def _build(self, title):
         win = tk.Toplevel(self.parent)
         win.title(title)
-        win.geometry("1080x920")
+        # Position centred over the main window + lift to front, so it
+        # never opens off-screen / behind a maximised window.
+        W_, Hh_ = 1080, 920
+        try:
+            root = self.parent.winfo_toplevel()
+            root.update_idletasks()
+            mx, my = root.winfo_rootx(), root.winfo_rooty()
+            mw, mh = root.winfo_width(), root.winfo_height()
+            sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+            x = min(max(mx + (mw - W_) // 2, 0), max(0, sw - 300))
+            y = min(max(my + (mh - Hh_) // 3, 0), max(0, sh - 300))
+            win.geometry(f"{W_}x{Hh_}+{x}+{y}")
+        except Exception:
+            win.geometry(f"{W_}x{Hh_}")
         self.win = win
+        try:
+            win.lift(); win.focus_force()
+            win.attributes("-topmost", True)
+            win.after(500, lambda: (win.winfo_exists()
+                                    and win.attributes("-topmost", False)))
+        except Exception:
+            pass
         bar = ctk.CTkFrame(win, fg_color="transparent")
         bar.pack(side="top", fill="x", padx=6, pady=4)
         self.method_var = ctk.StringVar(value=next(iter(self.labels)))
@@ -184,6 +204,13 @@ class _ClusterMapViewer:
         win = tk.Toplevel(self.win)
         win.title(title)
         win.geometry("640x680")
+        try:
+            win.lift(); win.focus_force()
+            win.attributes("-topmost", True)
+            win.after(500, lambda: (win.winfo_exists()
+                                    and win.attributes("-topmost", False)))
+        except Exception:
+            pass
         ctrl = ctk.CTkFrame(win, fg_color="transparent")
         ctrl.pack(side="top", fill="x", padx=6, pady=4)
         vmax_var = ctk.DoubleVar(value=train_vmax)
