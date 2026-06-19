@@ -61,19 +61,25 @@ profiles, classical baselines such as NMF/ACOM for comparison).
 All Python lives under `src/`; the root holds only launchers, docs, and config.
 
 ```
-src/
-  dino_sr_contrastive_model.py, dino_sr_*.py   model + training
-  gui_dino4dstem.py, gui_app/                  desktop GUI and all panels
-  assistant_headless.py, assistant_io.py,
-    gui_app/chat_*.py                          assistant (headless + in-GUI),
-                                               figure saving, backends, tools, KB, RAG
-  analyze_*.py, scorecard*.py,
-    contrastive_eval.py, eval_all.py           analysis, evaluation, scorecards
-  tools/                                       one-off experiment / batch scripts
-docs/                                          manuals (.tex/.pdf) + figure drafts
+src/                          KEY code (imported by the app) lives flat here:
+  gui_dino4dstem.py             GUI entry point
+  assistant_headless.py         headless assistant entry point
+  assistant_io.py               figure/output saving
+  data.py, eval_all.py          data loading, evaluation
+  dino_sr_contrastive_model.py  model + training
+  scorecard.py, contrastive_eval.py, sam_utils.py, ...   core helpers
+  gui_app/                      desktop GUI package (all panels + chat assistant)
+  studies/                      ablation / sweep / experiment runner scripts
+  scripts/                      standalone analysis / plotting / baseline utilities
+  tools/                        other one-off batch scripts
+docs/                          manuals (.tex/.pdf) + figure drafts
 launch_gui.bat, launch_assistant.bat,
-  make_desktop_shortcuts.ps1                   entry points / desktop icons
+  install.bat, make_desktop_shortcuts.ps1     install / entry points / desktop icons
 ```
+
+`studies/`, `scripts/`, and `tools/` are NOT imported by the GUI/assistant — they
+are run directly. The "key" set is whatever the two entry points import; sorting
+preserved that flat in `src/` so imports keep working.
 - `docs/USER_MANUAL.pdf`, `docs/USER_MANUAL_QUICKSTART.pdf` — **user manuals**.
 - `docs/USER_MANUAL.tex`, `docs/USER_MANUAL_QUICKSTART.tex` — manual sources.
 - `docs/paper/draft_v2/figs/latest_review/*.png` — **latest figure drafts**.
