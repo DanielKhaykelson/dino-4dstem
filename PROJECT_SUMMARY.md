@@ -23,8 +23,8 @@ profiles, classical baselines such as NMF/ACOM for comparison).
 
 | Entry point | Launch | Use |
 |---|---|---|
-| **GUI** | `launch_gui.bat` (or `python gui_dino4dstem.py`) | Full interactive app: load data, preprocess, train, infer, NMF, ACOM, interpretation. |
-| **Assistant (headless)** | `launch_assistant.bat` (or `python assistant_headless.py <cube>`) | Drive the whole pipeline in plain English with no GUI; saves all figures automatically. |
+| **GUI** | `launch_gui.bat` (or `python src/gui_dino4dstem.py`) | Full interactive app: load data, preprocess, train, infer, NMF, ACOM, interpretation. |
+| **Assistant (headless)** | `launch_assistant.bat` (or `python src/assistant_headless.py <cube>`) | Drive the whole pipeline in plain English with no GUI; saves all figures automatically. |
 | **In-GUI Assistant** | 💬 button inside the GUI | Same natural-language assistant, embedded as a floating window; can also act as a teacher that highlights where to click. |
 
 `make_desktop_shortcuts.ps1` creates two desktop icons (GUI + Assistant).
@@ -58,12 +58,22 @@ profiles, classical baselines such as NMF/ACOM for comparison).
 
 ## Repository layout
 
-- `dino_sr_contrastive_model.py`, `dino_sr_*.py` — model + training.
-- `gui_dino4dstem.py`, `gui_app/` — desktop GUI and all panels.
-- `assistant_headless.py`, `assistant_io.py`, `gui_app/chat_*.py` — the assistant
-  (headless + in-GUI), output/figure saving, backends, tools, KB, RAG.
-- `analyze_*.py`, `scorecard*.py`, `contrastive_eval.py`, `eval_all.py` — analysis,
-  evaluation, scorecards.
+All Python lives under `src/`; the root holds only launchers, docs, and config.
+
+```
+src/
+  dino_sr_contrastive_model.py, dino_sr_*.py   model + training
+  gui_dino4dstem.py, gui_app/                  desktop GUI and all panels
+  assistant_headless.py, assistant_io.py,
+    gui_app/chat_*.py                          assistant (headless + in-GUI),
+                                               figure saving, backends, tools, KB, RAG
+  analyze_*.py, scorecard*.py,
+    contrastive_eval.py, eval_all.py           analysis, evaluation, scorecards
+  tools/                                       one-off experiment / batch scripts
+docs/                                          manuals (.tex/.pdf) + figure drafts
+launch_gui.bat, launch_assistant.bat,
+  make_desktop_shortcuts.ps1                   entry points / desktop icons
+```
 - `docs/USER_MANUAL.pdf`, `docs/USER_MANUAL_QUICKSTART.pdf` — **user manuals**.
 - `docs/USER_MANUAL.tex`, `docs/USER_MANUAL_QUICKSTART.tex` — manual sources.
 - `docs/paper/draft_v2/figs/latest_review/*.png` — **latest figure drafts**.
