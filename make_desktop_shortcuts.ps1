@@ -1,25 +1,40 @@
-# Creates two Desktop shortcuts: the GUI and the headless Assistant.
-# Run once:  right-click -> "Run with PowerShell"   (or from a PS prompt:
-#            powershell -ExecutionPolicy Bypass -File make_desktop_shortcuts.ps1)
+# Creates two Desktop shortcuts (GUI + Assistant) pointing at this folder's
+# launchers. Portable: uses its own location, no hardcoded paths.
+#
+# Run from this folder:
+#     powershell -ExecutionPolicy Bypass -File make_desktop_shortcuts.ps1
 
-$proj    = "D:\DINOSR\Claude\PaperRun_claude\dino_sr_contrastive"
+$proj    = $PSScriptRoot
 $desktop = [Environment]::GetFolderPath("Desktop")
-$py      = "C:\Users\danielkh\AppData\Local\anaconda3\envs\py4DSTEM_SAM\python.exe"
 $ws      = New-Object -ComObject WScript.Shell
 
-function New-AppShortcut($name, $bat, $iconIndex) {
+# Try to locate the env's python.exe for a recognizable icon (optional).
+$icon    = $null
+$envName = "dino4dstem"
+$roots = @(
+  "$env:USERPROFILE\anaconda3", "$env:USERPROFILE\Anaconda3",
+  "$env:USERPROFILE\miniconda3", "$env:USERPROFILE\miniforge3",
+  "$env:LOCALAPPDATA\anaconda3", "$env:LOCALAPPDATA\miniconda3",
+  "$env:LOCALAPPDATA\miniforge3", "$env:PROGRAMDATA\anaconda3",
+  "$env:PROGRAMDATA\miniconda3", "C:\Anaconda3", "C:\Miniconda3"
+)
+foreach ($r in $roots) {
+  $p = Join-Path $r "envs\$envName\python.exe"
+  if (Test-Path $p) { $icon = $p; break }
+}
+
+function New-AppShortcut($name, $bat) {
     $lnkPath = Join-Path $desktop ($name + ".lnk")
     $lnk = $ws.CreateShortcut($lnkPath)
     $lnk.TargetPath       = (Join-Path $proj $bat)
     $lnk.WorkingDirectory = $proj
     $lnk.Description       = $name
-    # Use a python.exe icon so the shortcuts are recognizable.
-    if (Test-Path $py) { $lnk.IconLocation = "$py,0" }
+    if ($icon) { $lnk.IconLocation = "$icon,0" }
     $lnk.Save()
     Write-Host "Created: $lnkPath"
 }
 
-New-AppShortcut "DINO-4DSTEM GUI"        "launch_gui.bat"        0
-New-AppShortcut "DINO-4DSTEM Assistant"  "launch_assistant.bat"  0
+New-AppShortcut "DINO-4DSTEM GUI"        "launch_gui.bat"
+New-AppShortcut "DINO-4DSTEM Assistant"  "launch_assistant.bat"
 Write-Host ""
 Write-Host "Done. Two icons are on your Desktop."

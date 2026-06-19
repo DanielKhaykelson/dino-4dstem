@@ -1,0 +1,12 @@
+# Conda environment for DINO-4DSTEM.
+# Create/update with install.bat, or manually:
+#     conda env create -f environment.yml
+#     conda activate dino4dstem
+name: dino4dstem
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - -r requirements.txt
