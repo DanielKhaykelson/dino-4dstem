@@ -355,6 +355,7 @@ class PostHocPanel(ctk.CTkFrame):
             ("UMAP of embeddings",       self._render_umap),
             ("Virtual BF",               self._render_bf),
             ("Virtual HAADF",            self._render_haadf),
+            ("Virtual annular (r, dr)…", self._open_annular_popup),
         ]:
             ctk.CTkButton(sidebar, text=label, width=240,
                            command=cmd).pack(anchor="w", padx=10, pady=2)
@@ -4496,6 +4497,170 @@ class PostHocPanel(ctk.CTkFrame):
         fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
         self._redraw()
         self._set_status("virtual HAADF rendered.")
+
+    # ---- arbitrary annular virtual detector (user-chosen r, dr) ----
+    def _open_annular_popup(self):
+        """Popup to build a virtual image from an arbitrary annular detector.
+
+        The user picks an inner radius r and ring width dr (detector pixels).
+        The left panel shows a diffraction pattern — either a single scan
+        frame (changeable) or the DP-max over the whole scan — with the
+        annulus (r .. r+dr) drawn on it, so the chosen detector is visible.
+        'Compute map' integrates that annulus at every probe position to give
+        the virtual annular image on the right.
+        """
+        if not getattr(self, "_cube_path", None):
+            messagebox.showinfo("Annular detector",
+                "Load a run / cube first (Load run dir… or Browse cube…).")
+            return
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import (
+            FigureCanvasTkAgg, NavigationToolbar2Tk)
+        from matplotlib.patches import Circle
+
+        st = {"cube": None, "shape": None, "dpmax": None}
+
+        win = ctk.CTkToplevel(self)
+        win.title(f"Annular virtual detector — {self.sample or ''}")
+        win.geometry("1000x640")
+        try:
+            win.after(200, lambda: (win.lift(), win.focus_force()))
+        except Exception:
+            pass
+
+        ctrl = ctk.CTkFrame(win)
+        ctrl.pack(side="top", fill="x", padx=8, pady=6)
+        ctk.CTkLabel(ctrl, text="r (px):").pack(side="left", padx=(8, 2))
+        r_var = ctk.StringVar(value="")
+        ctk.CTkEntry(ctrl, textvariable=r_var, width=70).pack(side="left")
+        ctk.CTkLabel(ctrl, text="dr (px):").pack(side="left", padx=(10, 2))
+        dr_var = ctk.StringVar(value="")
+        ctk.CTkEntry(ctrl, textvariable=dr_var, width=70).pack(side="left")
+        ctk.CTkLabel(ctrl, text="background:").pack(side="left", padx=(12, 2))
+        bg_var = ctk.StringVar(value="single frame")
+        ctk.CTkOptionMenu(ctrl, values=["single frame", "DP-max"],
+                          variable=bg_var, width=130,
+                          command=lambda _v: _update_view()).pack(side="left")
+        ctk.CTkLabel(ctrl, text="frame idx:").pack(side="left", padx=(10, 2))
+        idx_var = ctk.StringVar(value="0")
+        ctk.CTkEntry(ctrl, textvariable=idx_var, width=80).pack(side="left")
+        ctk.CTkButton(ctrl, text="Update view", width=100,
+                      command=lambda: _update_view()).pack(side="left", padx=(12, 2))
+        ctk.CTkButton(ctrl, text="Compute map", width=110,
+                      fg_color=("#2D7A2D", "#1F7A1F"),
+                      command=lambda: _compute_map()).pack(side="left", padx=2)
+        status = ctk.CTkLabel(win, text="", anchor="w")
+        status.pack(side="bottom", fill="x", padx=8, pady=(0, 4))
+
+        fig = Figure(figsize=(9.6, 5.0))
+        ax_dp = fig.add_subplot(121)
+        ax_map = fig.add_subplot(122)
+        for a in (ax_dp, ax_map):
+            a.set_xticks([]); a.set_yticks([])
+        canvas = FigureCanvasTkAgg(fig, master=win)
+        canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
+        NavigationToolbar2Tk(canvas, win)
+
+        def _load_cube():
+            if st["cube"] is None:
+                status.configure(text="opening cube…"); win.update_idletasks()
+                st["cube"] = _open_lazy(self._cube_path)
+                st["shape"] = tuple(st["cube"].shape)
+                H = st["shape"][2]
+                if not r_var.get():
+                    r_var.set(f"{0.25 * H:.0f}")
+                if not dr_var.get():
+                    dr_var.set(f"{0.06 * H:.0f}")
+            return st["cube"]
+
+        def _vals():
+            try: r = max(0.0, float(r_var.get()))
+            except Exception: r = 0.0
+            try: dr = max(0.0, float(dr_var.get()))
+            except Exception: dr = 0.0
+            return r, dr
+
+        def _get_bg():
+            cube = _load_cube()
+            Ny, Nx, H, W = st["shape"]
+            if bg_var.get() == "DP-max":
+                if st["dpmax"] is None:
+                    status.configure(
+                        text="computing DP-max (reads all frames, ~10–30 s)…")
+                    win.update_idletasks()
+                    acc = np.zeros((H, W), np.float32)
+                    for y in range(Ny):
+                        blk = np.asarray(cube[y]).astype(np.float32)
+                        acc = np.maximum(acc, blk.max(axis=0))
+                    st["dpmax"] = acc
+                return st["dpmax"], "DP-max"
+            try: idx = int(float(idx_var.get()))
+            except Exception: idx = 0
+            idx = max(0, min(Ny * Nx - 1, idx))
+            y, x = divmod(idx, Nx)
+            try:
+                frame = np.asarray(cube[y, x]).astype(np.float32)
+            except Exception:
+                frame = np.asarray(cube[y])[x].astype(np.float32)
+            return frame, f"frame idx={idx}  (y={y}, x={x})"
+
+        def _update_view():
+            try:
+                bg, label = _get_bg()
+            except Exception as e:
+                messagebox.showerror("Annular detector", str(e)); return
+            H, W = bg.shape
+            r, dr = _vals()
+            ax_dp.clear()
+            ax_dp.imshow(np.log1p(np.clip(bg, 0, None)), cmap="inferno",
+                         aspect="equal", interpolation="nearest")
+            cy, cx = H / 2.0, W / 2.0
+            ax_dp.add_patch(Circle((cx, cy), r, fill=False, ec="cyan", lw=1.4))
+            ax_dp.add_patch(Circle((cx, cy), r + dr, fill=False,
+                                   ec="yellow", lw=1.4))
+            ax_dp.set_title(f"{label}\nannulus  r={r:.0f} → {r + dr:.0f} px",
+                            fontsize=9)
+            ax_dp.set_xticks([]); ax_dp.set_yticks([])
+            canvas.draw_idle()
+            status.configure(
+                text="view updated — adjust r/dr, then 'Compute map'.")
+
+        def _compute_map():
+            try:
+                cube = _load_cube()
+                Ny, Nx, H, W = st["shape"]
+                r, dr = _vals()
+                mask = _radial_mask(H, W, r, r + dr)
+                n = int(mask.sum())
+                if n == 0:
+                    messagebox.showinfo("Annular detector",
+                        "Annulus contains no pixels — increase dr or r.")
+                    return
+                status.configure(
+                    text=f"computing annular map (r={r:.0f}, dr={dr:.0f}, "
+                         f"{n} det px, reads all frames)…")
+                win.update_idletasks()
+                amap = np.zeros((Ny, Nx), np.float64)
+                for y in range(Ny):
+                    blk = np.asarray(cube[y]).astype(np.float32)
+                    amap[y] = (blk * mask).sum(axis=(1, 2))
+                ax_map.clear()
+                lo, hi = np.percentile(amap, 1), np.percentile(amap, 99)
+                im = ax_map.imshow(np.clip(amap, lo, hi), cmap="gray",
+                                   aspect="equal", interpolation="nearest")
+                ax_map.set_title(f"annular VDF   r={r:.0f}, dr={dr:.0f} px",
+                                 fontsize=10)
+                ax_map.set_xticks([]); ax_map.set_yticks([])
+                fig.colorbar(im, ax=ax_map, fraction=0.046, pad=0.04)
+                _update_view()
+                canvas.draw_idle()
+                status.configure(
+                    text=f"done — r={r:.0f}, dr={dr:.0f} px, {n} detector px. "
+                         f"Save via the toolbar (disk icon).")
+            except Exception as e:
+                messagebox.showerror("Annular detector", str(e))
+
+        _update_view()
 
     def _render_overlay(self, on_haadf=True):
         if not self._ensure_inference(): return
