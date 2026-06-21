@@ -1505,6 +1505,74 @@ def _answer_from_docs(ctx, args) -> str:
     return "\n".join(parts)
 
 
+def _suggest_next_step(ctx, args) -> str:
+    s = getattr(ctx.app, "session", None)
+    sample = getattr(s, "sample", None)
+    run = getattr(s, "run_dir", None)
+    has_inf = bool(getattr(s, "has_inference", lambda: False)())
+    runs = _find_run_dirs()
+    scored = bool(run and (
+        os.path.exists(os.path.join(run, "eval", "scorecard.json")) or
+        os.path.exists(os.path.join(run, "scorecard.json"))))
+    out = ["Suggested next step:"]
+    if not sample:
+        out.append("1) Load a 4D-STEM cube — Pre-processing tab → Browse → Load "
+                   "(.prz / .npz / .h5 master / .npy).")
+        out.append("   Then set beam mask + crop + COM while watching the DP-max.")
+    elif not run and not runs:
+        out.append(f"1) Data '{sample}' is loaded. Tune mask/crop/COM, click "
+                   "'Load parameters to model', then Train (Training tab).")
+        out.append("   For a quick label-free map without training, run NMF + K-means.")
+    elif run and not has_inf:
+        out.append(f"1) Run '{os.path.basename(run)}' exists. Eval it (infer) to get "
+                   "the class map + class-average patterns.")
+    elif has_inf and not scored:
+        out.append("1) Inference is cached → Score the run, then open Interpretation "
+                   "to see WHY the classes split.")
+        out.append("2) Compare with NMF (and ACOM if the sample is crystalline) to "
+                   "validate the map.")
+    else:
+        out.append("1) You have a scored run → interpret it (Grad-CAM / ablations / "
+                   "radial), compare with NMF/ACOM, and refine K or preprocessing if "
+                   "the map is fragmented or collapsed.")
+    out.append("(Full decision guide + validity checks: ask answer_from_docs about "
+               "METHOD_GUIDE.)")
+    return "\n".join(out)
+
+
+def _recommend_params(ctx, args) -> str:
+    stype = str(args.get("sample_type", "auto")).lower().replace("-", "_")
+    goal = str(args.get("goal", "")).strip()
+    common = ("Validated base recipe: polar pipeline + theta-roll aug, "
+              "center_momentum=0.97, EMA 0.99->0.999, ~50 epochs, COM-centering ON, "
+              "beam mask sized to the central disk, crop to the informative FOV. "
+              "Set these on the loader then click 'Load parameters to model'.")
+    layered = ("LAYERED / zone-axis sample (e.g. EuInAs): orientation dominates. "
+               "Enable the confidence/weight loss (these show avg_conf >~0.85 by "
+               "epoch ~5). K small (~6) for a phase/zone map. Cross-check with ACOM "
+               "zone axis (judge by AMI vs ACOM).")
+    nonlayered = ("NON-LAYERED / crystallinity sample (e.g. IMC, NaPHI): the class "
+                  "parameter is crystallinity + azimuthal spottiness (2-D Bragg "
+                  "excess), NOT orientation. Plain polar DINO, no weight loss needed "
+                  "(avg_conf stays low, ~0.3). K~6 focused or large (~60) then merge. "
+                  "Compare to NMF + classical descriptors and SAM masks "
+                  "(IoU / Dice / count r).")
+    out = [common, ""]
+    if stype.startswith("layer"):
+        out.append(layered)
+    elif "non" in stype or stype in ("imc", "naphi"):
+        out.append(nonlayered)
+    else:
+        out += ["Choose by sample type:", "- " + layered, "- " + nonlayered,
+                "Decide: known crystal structure + orientation matters → treat as "
+                "layered/crystalline (ACOM-comparable); contrast is "
+                "crystallinity/texture → non-layered."]
+    if goal:
+        out.append(f"\nGoal: {goal}. Quick no-train map → NMF+K-means; "
+                   "orientation/strain → ACOM (needs a CIF).")
+    return "\n".join(out)
+
+
 # ----------------------------------------------------------------------
 # Registry
 # ----------------------------------------------------------------------
@@ -1824,6 +1892,29 @@ def build_registry(app) -> "dict[str, ToolSpec]":
             summary=lambda a: f"run full-dataset ACOM on "
                 f"{a.get('sample','current sample')} with CIF "
                 f"{os.path.basename(str(a.get('cif','?')))}"),
+
+        ToolSpec("suggest_next_step",
+            "Recommend the next action in the GUI workflow based on the current "
+            "state (data loaded? run trained? inference cached? scored?). Use when "
+            "the user asks 'what should I do', 'what next', or how to proceed.",
+            {"type": "object", "properties": {}, "required": []},
+            _suggest_next_step, confirm=False,
+            summary=lambda a: "suggest the next step"),
+
+        ToolSpec("recommend_params",
+            "Recommend which method to use plus preprocessing/training parameters, "
+            "tailored to the sample type. Use when the user asks which "
+            "algorithm/method or what parameters they need. "
+            "sample_type: 'layered' | 'non_layered' | 'auto'.",
+            {"type": "object",
+             "properties": {
+                "sample_type": {"type": "string",
+                    "description": "layered | non_layered | auto"},
+                "goal": {"type": "string",
+                    "description": "what the user wants to achieve (optional)"}},
+             "required": []},
+            _recommend_params, confirm=False,
+            summary=lambda a: "recommend method/params"),
     ]
     return {s.name: s for s in specs}
 
