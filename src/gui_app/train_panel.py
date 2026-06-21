@@ -908,6 +908,14 @@ class TrainPanel(ctk.CTkFrame):
         if self.use_defaults.get():
             P = PAPER_DEFAULTS
             chosen = dict(P)
+            # "use defaults" governs MODEL params only. DATA/preprocessing
+            # params always follow the loader (synced into these vars via
+            # "Load parameters to model" / on sample load).
+            for _k in ("center_mask_radius", "center_crop_size",
+                       "polar_mask_cols", "com_centering",
+                       "polar_size", "com_search_radius_factor"):
+                if _k in self.var:
+                    chosen[_k] = self.var[_k].get()
         else:
             # Custom mode: ALWAYS re-capture the live entries on Train,
             # so edits made after the last explicit Apply still take
