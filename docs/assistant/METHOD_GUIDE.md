@@ -184,3 +184,37 @@ Red flags: one class swallows most pixels (collapse), the map tracks only thickn
 - **Non-layered / crystallinity sample:** plain polar DINO; compare to NMF + the
   classical crystallinity/spottiness descriptors and SAM masks.
 - Always: set mask + crop + COM on the loader, then **Load parameters to model**.
+
+---
+
+## 9. Troubleshooting (symptom → fix)
+
+**Over-clustering** (one real class split into several; class-averages look alike):
+- *Data:* strengthen invariances so nuisance variation stops spawning classes —
+  COM-centering on, beam mask covering the central disk, polar pipeline + θ-roll aug
+  (so rotated grains don't split), mild blur to kill shot-noise splits; check crop /
+  vmax aren't clipping signal.
+- *Model:* **lower K** (primary); train longer; raise center_momentum (~0.97) + EMA;
+  add a consolidation loss (centroid_lambda or cluster1d); lower conf_weight_gamma if
+  it over-sharpens.
+- *Quick (no retrain):* merge classes in Post-hoc, or re-cluster with smaller K
+  (NMF "Cluster" button; or agglomerative + cut the dendrogram).
+
+**Collapse / under-clustering** (one class swallows most pixels):
+- *Data:* reduce over-aggressive augmentation; ensure the mask isn't deleting the
+  discriminative signal.
+- *Model:* raise K; enable the confidence/weight loss (esp. layered/zone-axis,
+  avg_conf >~0.85 @ epoch ~5); train longer.
+
+**Salt-and-pepper / spatially incoherent:** stronger preprocessing + mild blur;
+add the spatial-smoothness loss (lam_spatial); train longer; consider lower K.
+
+**Map tracks thickness / beam only:** enlarge the beam mask, COM-center, log-stretch;
+confirm polar + masking are active.
+
+**Unstable run-to-run:** fix the seed, train longer, raise EMA/center_momentum, add a
+consolidation loss — and revisit preprocessing/K (instability ⇒ poorly separated
+classes).
+
+After any change: retrain (or re-cluster for NMF), then score + re-check spatial
+coherence and class-average distinctness.

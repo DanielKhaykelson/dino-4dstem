@@ -356,6 +356,7 @@ def build_headless_registry():
         "list_runs": lambda ctx, a: ct._list_runs(ctx, a),
         "recommend_params": lambda ctx, a: ct._recommend_params(ctx, a),
         "suggest_next_step": lambda ctx, a: ct._suggest_next_step(ctx, a),
+        "troubleshoot": lambda ctx, a: ct._troubleshoot(ctx, a),
     }
     reg = {}
     for name, fn in H.items():

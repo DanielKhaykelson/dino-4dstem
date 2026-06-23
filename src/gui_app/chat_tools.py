@@ -1573,6 +1573,66 @@ def _recommend_params(ctx, args) -> str:
     return "\n".join(out)
 
 
+def _troubleshoot(ctx, args) -> str:
+    sym = str(args.get("symptom", "")).lower()
+    def has(*ks): return any(k in sym for k in ks)
+    blocks = []
+    if has("overclust", "over-clust", "over clust", "too many", "split",
+           "indistinct", "fragmented class", "redundant class"):
+        blocks.append(("OVER-CLUSTERING (one real class split into several / "
+            "class-averages look alike)", [
+            "DATA: strengthen invariances so nuisance variation stops spawning "
+            "classes — keep COM-centering ON, size the beam mask to cover the "
+            "central disk, use the polar pipeline + theta-roll aug (so rotated "
+            "grains don't split), add mild Gaussian blur to suppress shot-noise "
+            "splits; check crop/vmax aren't clipping real signal.",
+            "MODEL: lower K (primary fix); train longer; raise center_momentum "
+            "(~0.97) + teacher EMA for steadier prototypes; add a consolidation "
+            "loss (centroid_lambda or cluster1d) to pull same-class together; "
+            "lower conf_weight_gamma if it over-sharpens.",
+            "QUICK (no retrain): merge classes in the Post-hoc panel, or "
+            "re-cluster with a smaller K (NMF 'Cluster' button; or agglomerative "
+            "then cut the dendrogram)."]))
+    if has("collapse", "underclust", "under-clust", "too few", "one class",
+           "single class", "everything one", "merged everything"):
+        blocks.append(("COLLAPSE / UNDER-CLUSTERING (one class swallows most "
+            "pixels)", [
+            "DATA: reduce over-aggressive augmentation; make sure the beam mask "
+            "isn't deleting the discriminative signal.",
+            "MODEL: raise K; enable the confidence/weight loss (esp. layered / "
+            "zone-axis samples, avg_conf >~0.85 at epoch ~5); train longer; "
+            "lower center_momentum slightly if it over-stabilizes."]))
+    if has("salt", "pepper", "incoherent", "speckle", "noisy map", "random",
+           "scattered pixel"):
+        blocks.append(("SALT-AND-PEPPER / spatially incoherent map", [
+            "DATA: stronger preprocessing (mask / crop / COM), mild blur.",
+            "MODEL: add the spatial-smoothness loss (lam_spatial); train longer; "
+            "consider lowering K."]))
+    if has("thickness", "beam", "brightness", "intensity", "central"):
+        blocks.append(("MAP TRACKS THICKNESS / BEAM INTENSITY only", [
+            "DATA: enlarge the beam mask, enable COM-centering, use log-stretch so "
+            "scattered intensity isn't dwarfed by the (000) beam.",
+            "MODEL: ensure the polar pipeline + masking are actually active."]))
+    if has("unstable", "different each", "changes each", "not reproduc", "seed"):
+        blocks.append(("UNSTABLE (map changes run-to-run)", [
+            "MODEL: fix the seed; train longer; raise EMA/center_momentum; add a "
+            "consolidation loss. Large run-to-run change usually means the classes "
+            "aren't well separated — also revisit preprocessing/K."]))
+    if not blocks:
+        blocks.append(("Describe the symptom (overclustered, collapsed, "
+            "salt-and-pepper, tracks-thickness, unstable)", [
+            "Run score_run + open Interpretation to diagnose; see METHOD_GUIDE "
+            "validity section. Then adjust preprocessing (mask/crop/COM/blur) "
+            "and/or K and retrain, or merge / re-cluster post-hoc."]))
+    out = []
+    for title, fixes in blocks:
+        out.append(title + ":")
+        out += ["  - " + f for f in fixes]
+    out.append("After any change: retrain (or re-cluster for NMF), then score_run "
+               "and re-check spatial coherence + class-average distinctness.")
+    return "\n".join(out)
+
+
 # ----------------------------------------------------------------------
 # Registry
 # ----------------------------------------------------------------------
@@ -1915,6 +1975,21 @@ def build_registry(app) -> "dict[str, ToolSpec]":
              "required": []},
             _recommend_params, confirm=False,
             summary=lambda a: "recommend method/params"),
+
+        ToolSpec("troubleshoot",
+            "Diagnose a problem the user reports about their result and give "
+            "concrete data + model fixes. Use when they say the model/map is "
+            "wrong — e.g. over-clustered, collapsed/under-clustered, "
+            "salt-and-pepper, tracks thickness only, or unstable. Pass their "
+            "words as 'symptom'.",
+            {"type": "object",
+             "properties": {
+                "symptom": {"type": "string",
+                    "description": "the problem in the user's words "
+                    "(e.g. 'overclustered', 'one class took everything')"}},
+             "required": ["symptom"]},
+            _troubleshoot, confirm=False,
+            summary=lambda a: "troubleshoot the result"),
     ]
     return {s.name: s for s in specs}
 
