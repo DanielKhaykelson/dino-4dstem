@@ -51,6 +51,52 @@ DEVICES = ["GPU", "CPU"]
 DEFAULT_MODEL = "qwen2.5:7b"
 DEFAULT_DEVICE = "GPU"
 
+_LATEX_SYMBOLS = {
+    r"\approx": "≈", r"\times": "×", r"\cdot": "·", r"\leq": "≤", r"\le": "≤",
+    r"\geq": "≥", r"\ge": "≥", r"\neq": "≠", r"\pm": "±", r"\rightarrow": "→",
+    r"\to": "→", r"\Rightarrow": "⇒", r"\alpha": "α", r"\beta": "β",
+    r"\gamma": "γ", r"\theta": "θ", r"\sigma": "σ", r"\mu": "μ", r"\lambda": "λ",
+    r"\eta": "η", r"\Delta": "Δ", r"\sum": "Σ", r"\sqrt": "√", r"\infty": "∞",
+    r"\partial": "∂", r"\nabla": "∇", r"\approxeq": "≈",
+}
+
+
+def _clean_markup(s: str) -> str:
+    """Render LLM LaTeX/markdown to readable plain text for the Tk transcript
+    (which doesn't render either).
+
+    IMPORTANT: LaTeX symbol conversion happens ONLY inside math delimiters
+    (\\(..\\), \\[..\\], $..$), so Windows paths like D:\\tools\\out — which
+    contain backslash sequences like \\to — are never corrupted.
+    """
+    if not s:
+        return s
+    import re
+
+    def _conv(m):
+        inner = m.group(1)
+        for k, v in _LATEX_SYMBOLS.items():
+            inner = inner.replace(k, v)
+        inner = re.sub(
+            r"\\(?:text|mathrm|mathbf|mathit|operatorname|boldsymbol)\{([^{}]*)\}",
+            r"\1", inner)
+        inner = re.sub(r"[_^]\{([^{}]*)\}", r"\1", inner)
+        inner = re.sub(r"\\([A-Za-z]+)", r"\1", inner)  # safe: math span only
+        return inner.strip()
+
+    s = re.sub(r"\\\[(.+?)\\\]", _conv, s, flags=re.S)
+    s = re.sub(r"\\\((.+?)\\\)", _conv, s, flags=re.S)
+    s = re.sub(r"\$\$(.+?)\$\$", _conv, s, flags=re.S)
+    s = re.sub(r"\$([^$\n]+?)\$", _conv, s, flags=re.S)
+    # drop any leftover (unmatched) math delimiters — safe, not in paths
+    for d in (r"\(", r"\)", r"\[", r"\]"):
+        s = s.replace(d, "")
+    # markdown: **bold**, `code`, ### headers -> plain (none occur in paths)
+    s = re.sub(r"\*\*([^*]+)\*\*", r"\1", s)
+    s = re.sub(r"`([^`]+)`", r"\1", s)
+    s = re.sub(r"(?m)^\s*#{1,6}\s*", "", s)
+    return s
+
 
 class ChatPanel(ctk.CTkFrame):
     """Natural-language assistant tab.
@@ -72,6 +118,8 @@ class ChatPanel(ctk.CTkFrame):
         self._busy = False          # an agent turn is in flight
         self._cancel = False        # cancel flag the loop polls
         self._assistant_open = False  # streaming an assistant bubble?
+        self._assistant_buf = ""      # raw streamed text (cleaned on close)
+        self._assistant_start = None  # transcript index where the bubble began
 
         # Tool registry: {name: ToolSpec}.  Built once; reads live state
         # through `app` at call time.
@@ -309,7 +357,7 @@ class ChatPanel(ctk.CTkFrame):
             self._write(text + "\n", "user")
         elif role == "assistant":
             self._write("\nAssistant\n", "assistant_name")
-            self._write(text + "\n", "assistant")
+            self._write(_clean_markup(text) + "\n", "assistant")
         elif role == "tool":
             self._write("  • " + text + "\n", "tool")
         else:
@@ -377,7 +425,65 @@ class ChatPanel(ctk.CTkFrame):
             self._after(self.add_message, "system",
                         "Ollama isn't installed yet — send a message and "
                         "I'll download + set it up for you.")
+        # Hardware-aware model pick (14b if there's room, else downgrade + note).
+        try:
+            model, note = self._auto_pick_model()
+            if model and note:
+                self._after(self.var_model.set, model)
+                if up:
+                    try:
+                        have = any(str(m).startswith(model.split(":")[0]) and
+                                   model in str(m) for m in models)
+                    except Exception:
+                        have = False
+                    if not have:
+                        sz = {"qwen2.5:14b": "~9 GB", "qwen2.5:7b": "~4.7 GB",
+                              "qwen2.5:3b": "~2 GB"}.get(model, "")
+                        note += f" Will download {sz} on first message."
+                self._after(self.add_message, "system", note)
+        except Exception:
+            pass
         self._after(self.set_status, "")
+
+    def _auto_pick_model(self):
+        """Return (model, note): measure free VRAM (GPU) or RAM (CPU) and pick
+        the largest qwen2.5 that should fit. Conservative — downgrades when
+        unsure rather than risking an OOM."""
+        import shutil, subprocess
+        try:
+            device = self.var_device.get()
+        except Exception:
+            device = "GPU"
+        free_gb, where = None, ""
+        if device == "GPU" and shutil.which("nvidia-smi"):
+            try:
+                r = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=memory.free",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=6)
+                free_gb = float(r.stdout.strip().splitlines()[0]) / 1024.0
+                where = "GPU VRAM"
+            except Exception:
+                free_gb = None
+        if free_gb is None:
+            try:
+                import psutil
+                free_gb = psutil.virtual_memory().available / 1e9
+                where = "system RAM"
+            except Exception:
+                return DEFAULT_MODEL, ""
+        if where == "GPU VRAM":
+            model = ("qwen2.5:14b" if free_gb >= 11 else
+                     "qwen2.5:7b" if free_gb >= 6 else "qwen2.5:3b")
+        else:  # CPU: 14b is painfully slow — only with lots of RAM
+            model = ("qwen2.5:14b" if free_gb >= 24 else
+                     "qwen2.5:7b" if free_gb >= 10 else "qwen2.5:3b")
+        note = f"Auto-selected {model} ({free_gb:.0f} GB free {where})."
+        if model != "qwen2.5:14b":
+            note += " (Not enough free memory for 14b — using a smaller model.)"
+        elif where == "system RAM":
+            note += " Note: 14b on CPU is slow."
+        return model, note
 
     # ------------------------------------------------------------------
     # Event handlers (skeleton behavior)
@@ -975,9 +1081,13 @@ class ChatPanel(ctk.CTkFrame):
     def _append_token(self, tok):
         # Runs on the Tk thread.  Opens the assistant bubble lazily so we
         # don't print an empty header when a turn is pure tool-calling.
+        tb = self.transcript._textbox
         if not self._assistant_open:
             self._write("\nAssistant\n", "assistant_name")
             self._assistant_open = True
+            self._assistant_buf = ""
+            self._assistant_start = tb.index("end-1c")
+        self._assistant_buf += tok
         self._write(tok, "assistant")
 
     def _end_assistant(self):
@@ -985,8 +1095,24 @@ class ChatPanel(ctk.CTkFrame):
 
     def _close_assistant(self):
         if self._assistant_open:
+            # Re-render the streamed text cleaned (LaTeX/markdown -> plain),
+            # since we couldn't clean it token-by-token while streaming.
+            buf = getattr(self, "_assistant_buf", "")
+            start = getattr(self, "_assistant_start", None)
+            cleaned = _clean_markup(buf)
+            if buf and start and cleaned != buf:
+                try:
+                    tb = self.transcript._textbox
+                    self.transcript.configure(state="normal")
+                    tb.delete(start, "end-1c")
+                    tb.insert(start, cleaned, "assistant")
+                    self.transcript.configure(state="disabled")
+                except Exception:
+                    pass
             self._write("\n", "assistant")
             self._assistant_open = False
+            self._assistant_buf = ""
+            self._assistant_start = None
 
     # ------------------------------------------------------------------
     # Busy / cancel UI state
