@@ -1633,6 +1633,133 @@ def _troubleshoot(ctx, args) -> str:
     return "\n".join(out)
 
 
+_PARAM_GLOSSARY = {
+    "vmax": "Display contrast cap only (NOT used by training normalization). "
+            "~2 to view rings without saturating; ~5 for a training-style view.",
+    "center_crop_size": "Detector field of view (px): keep the diffraction rings "
+            "inside and cut high-q noise. ~120-150 (e.g. 140), not 256.",
+    "center_mask_radius": "Beam-mask radius (px): zeroes the central (000) disk so "
+            "clustering is driven by scattered intensity, not the beam. Size just "
+            "larger than the central disk + tails.",
+    "polar_mask_cols": "Inner radial columns zeroed in polar space (a beam mask for "
+            "the polar pipeline). ~30-45.",
+    "com_centering": "Re-center each pattern on its center of mass before masking. "
+            "Almost always ON for NBED (handles descan / beam wander).",
+    "polar_size": "Output size of the polar transform (radius/angle bins). ~192.",
+    "k": "Number of prototypes/classes (upper bound; unused ones collapse). ~6 for a "
+            "focused map; large (e.g. 60) for fine structure, then merge.",
+    "epochs": "Training epochs. ~50 is the validated working point here.",
+    "center_momentum": "Teacher centering momentum; ~0.97 helps fight collapse.",
+    "ema": "Teacher EMA schedule (~0.99 -> 0.999); higher = steadier teacher.",
+    "conf_weight_gamma": "Confidence-weighting strength; higher sharpens assignments "
+            "(can over-sharpen).",
+    "lam_spatial": "Spatial-smoothness loss weight; raise to reduce salt-and-pepper "
+            "maps.",
+    "centroid_lambda": "Consolidation loss: pulls a class toward its centroid (fights "
+            "over-splitting).",
+    "cluster1d_lambda": "1-D separation loss between classes (optional regularizer).",
+    "supcon_lambda": "Supervised-contrastive loss weight (needs pair labels).",
+    "theta_shift_student": "theta-roll augmentation range (student) in polar space -> "
+            "rotation invariance.",
+    "theta_shift_teacher": "theta-roll augmentation range (teacher).",
+    "n_components": "NMF: number of non-negative factors. Pick with the auto "
+            "heuristic, then re-cluster to explore K.",
+    "blur_sigma": "Display/augmentation Gaussian blur (px); mild blur suppresses "
+            "shot-noise-driven spurious classes.",
+}
+
+def _explain_parameter(ctx, args) -> str:
+    q = str(args.get("name", "")).strip().lower().replace(" ", "_")
+    if not q:
+        return ("Name a parameter, e.g. center_mask_radius, K, lam_spatial, "
+                "n_components.")
+    for k, v in _PARAM_GLOSSARY.items():
+        if q == k or q in k or k in q:
+            return f"{k}: {v}"
+    return (f"I don't have a vetted glossary entry for '{q}', and I won't guess. "
+            "Try answer_from_docs (METHOD_GUIDE / the manual), or ask about the "
+            "control by its exact GUI label.")
+
+
+def _assess_run(ctx, args) -> str:
+    import json
+    import numpy as np
+    run = args.get("run_dir") or getattr(
+        getattr(ctx.app, "session", None), "run_dir", None)
+    if not run:
+        runs = _find_run_dirs()
+        run = runs[0]["dir"] if runs else None
+    if not run:
+        return "No run to assess — train/eval a run first (no run_dir available)."
+    npz = os.path.join(run, "eval", "inference.npz")
+    if not os.path.exists(npz):
+        return (f"Run '{os.path.basename(run)}' has no cached inference "
+                "(eval/inference.npz). Run infer/Eval first, then I can assess it "
+                "from the ACTUAL assignments (I won't guess without data).")
+    try:
+        d = np.load(npz, allow_pickle=True)
+        assigns = np.asarray(d["assigns"]).ravel()
+        soft = np.asarray(d["soft_probs"]) if "soft_probs" in d else None
+    except Exception as e:
+        return f"Could not read {npz}: {e!r}"
+    N = int(assigns.size)
+    K = int(soft.shape[1]) if (soft is not None and soft.ndim == 2) \
+        else int(assigns.max() + 1)
+    counts = np.bincount(assigns, minlength=K)
+    active = int((counts > 0).sum())
+    frac = counts / max(1, N)
+    largest = float(frac.max())
+    tiny = int(((counts > 0) & (counts < 0.01 * N)).sum())
+    conf = (float(soft.max(1).mean())
+            if (soft is not None and soft.ndim == 2) else None)
+    p = frac[frac > 0]
+    ent = float(-(p * np.log(p)).sum() / np.log(active)) if active > 1 else 0.0
+    coh = None
+    scan = None
+    rs = os.path.join(run, "run_summary.json")
+    try:
+        if os.path.exists(rs):
+            scan = json.load(open(rs, encoding="utf-8")).get("scan_shape")
+    except Exception:
+        scan = None
+    if scan and len(scan) == 2 and int(scan[0]) * int(scan[1]) == N:
+        m = assigns.reshape(int(scan[0]), int(scan[1]))
+        same = int((m[:, 1:] == m[:, :-1]).sum()) + int((m[1:, :] == m[:-1, :]).sum())
+        tot = m[:, 1:].size + m[1:, :].size
+        coh = same / max(1, tot)
+    L = [f"Assessment of '{os.path.basename(run)}' (from cached inference, "
+         f"N={N} px, K_active={active}/{K}):",
+         f"- largest class = {largest*100:.0f}% of pixels; tiny classes (<1%) "
+         f"= {tiny}; balance = {ent:.2f} (1 = perfectly even)"]
+    if conf is not None:
+        L.append(f"- mean assignment confidence = {conf:.2f}")
+    if coh is not None:
+        L.append(f"- spatial coherence (neighbour agreement) = {coh:.2f} "
+                 "(higher = more contiguous)")
+    else:
+        L.append("- spatial coherence: UNKNOWN (scan shape unavailable) — open the "
+                 "class map in Eval to judge contiguity by eye")
+    flags = []
+    if largest > 0.85:
+        flags.append("possible COLLAPSE/under-clustering (one class dominates) — "
+                     "troubleshoot('collapsed')")
+    if tiny >= max(2, active // 3):
+        flags.append("possible OVER-CLUSTERING (several tiny classes) — "
+                     "troubleshoot('overclustered')")
+    if coh is not None and coh < 0.6:
+        flags.append("low spatial coherence / salt-and-pepper — "
+                     "troubleshoot('salt-and-pepper')")
+    if flags:
+        L.append("Flags: " + "; ".join(flags))
+    else:
+        L.append("No strong red flags in these numbers — but numbers alone can't "
+                 "confirm correctness: verify the class-average patterns look "
+                 "physically distinct and the map matches known microstructure.")
+    L.append("(These are heuristic indicators computed from the actual "
+             "assignments, not ground truth.)")
+    return "\n".join(L)
+
+
 # ----------------------------------------------------------------------
 # Registry
 # ----------------------------------------------------------------------
@@ -1990,6 +2117,30 @@ def build_registry(app) -> "dict[str, ToolSpec]":
              "required": ["symptom"]},
             _troubleshoot, confirm=False,
             summary=lambda a: "troubleshoot the result"),
+
+        ToolSpec("explain_parameter",
+            "Explain what a GUI / training parameter does and a sensible range, "
+            "from a vetted glossary. Says it doesn't know rather than guessing. "
+            "Use for 'what does X do', 'what should X be'.",
+            {"type": "object",
+             "properties": {"name": {"type": "string",
+                "description": "parameter name, e.g. center_mask_radius, K"}},
+             "required": ["name"]},
+            _explain_parameter, confirm=False,
+            summary=lambda a: f"explain '{a.get('name','?')}'"),
+
+        ToolSpec("assess_run",
+            "Assess a run's quality from its ACTUAL cached inference "
+            "(class balance, largest-class fraction, confidence, spatial "
+            "coherence) and flag over/under-clustering. Reads real data; reports "
+            "what it cannot determine. Use for 'is my model good', 'assess this "
+            "run'. Optional run_dir; defaults to the current/most recent run.",
+            {"type": "object",
+             "properties": {"run_dir": {"type": "string",
+                "description": "run directory (optional; defaults to current)"}},
+             "required": []},
+            _assess_run, confirm=False,
+            summary=lambda a: "assess the run quality"),
     ]
     return {s.name: s for s in specs}
 

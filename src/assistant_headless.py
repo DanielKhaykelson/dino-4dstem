@@ -357,6 +357,8 @@ def build_headless_registry():
         "recommend_params": lambda ctx, a: ct._recommend_params(ctx, a),
         "suggest_next_step": lambda ctx, a: ct._suggest_next_step(ctx, a),
         "troubleshoot": lambda ctx, a: ct._troubleshoot(ctx, a),
+        "explain_parameter": lambda ctx, a: ct._explain_parameter(ctx, a),
+        "assess_run": lambda ctx, a: ct._assess_run(ctx, a),
     }
     reg = {}
     for name, fn in H.items():
@@ -380,8 +382,11 @@ _SYS = (
     "data. There are no named samples — data is loaded by file path. Be "
     "concise. Tools: load_data, run_nmf, infer, class_average, "
     "run_interpretation, run_acom, score_run, get_state, list_runs, "
-    "answer_from_docs, recommend_params, suggest_next_step. For method/"
-    "parameter advice call recommend_params; you are a 4D-STEM + ML expert. "
+    "answer_from_docs, recommend_params, suggest_next_step, troubleshoot, "
+    "explain_parameter, assess_run. For method/parameter advice call "
+    "recommend_params; for a bad result call troubleshoot; to judge a run call "
+    "assess_run (reads real data). You are a 4D-STEM + ML expert, but NEVER "
+    "fabricate numbers/paths — if unsure, say so. "
     "For NMF, multiple methods: methods=['kmeans','aglo',"
     "'hdbscan','fcm'] or 'all'. NMF is model-free; infer/interpretation/"
     "acom need a trained run_dir.")
