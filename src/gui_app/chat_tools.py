@@ -39,12 +39,15 @@ from typing import Callable
 # ----------------------------------------------------------------------
 class ToolContext:
     """Handed to every tool fn.  Bound to a ChatPanel by the panel."""
-    def __init__(self, app, call_ui, post, status, cancel=None):
+    def __init__(self, app, call_ui, post, status, cancel=None,
+                 post_image=None):
         self.app = app
         self.call_ui = call_ui      # (fn, *a, timeout=?) -> result (blocks)
         self.post = post            # (role, text) -> None
         self.status = status        # (text) -> None
         self.cancel = cancel or (lambda: False)   # () -> bool (Stop pressed)
+        # (path, caption) -> None : display an image inline in the chat.
+        self.post_image = post_image or (lambda *a, **k: None)
 
 
 @dataclass
@@ -1760,6 +1763,42 @@ def _assess_run(ctx, args) -> str:
     return "\n".join(L)
 
 
+def _capabilities(ctx, args) -> str:
+    return (
+        "Here's what I can do for DINO-4DSTEM:\n"
+        "• DATA — load_data (by file path), set_preproc (vmax / crop / beam mask "
+        "/ COM), show_pattern, show_class_map.\n"
+        "• RUN — train, infer, class_average, run_nmf, recluster_nmf, run_acom, "
+        "run_interpretation, score_run.\n"
+        "• ADVISE — suggest_next_step, recommend_params (by sample type), "
+        "troubleshoot (fix a bad result), assess_run (judge a run from real data), "
+        "explain_parameter, answer_from_docs (search the manual + method guide).\n"
+        "• SHOW — show_figure (display a saved image here), show_me_how "
+        "(highlight where to click in the GUI).\n"
+        "• MEMORY — remember / list_knowledge / forget.\n\n"
+        "Try: 'what should I do next?' · 'which method for a layered sample?' · "
+        "'I think it overclustered — how do I fix it?' · 'assess this run' · "
+        "'load <path> then train then score' · 'where is vmax?'\n"
+        "I won't invent paths or numbers — if I'm unsure I'll say so.")
+
+
+def _show_figure(ctx, args) -> str:
+    p = str(args.get("path", "")).strip().strip('"').strip("'")
+    if not p:
+        return "Give a path to an image (.png/.jpg)."
+    if not os.path.exists(p):
+        return (f"No file at '{p}'. I won't guess a path — find one with "
+                "list_runs / get_state or an analysis output folder.")
+    if not p.lower().endswith((".png", ".jpg", ".jpeg", ".gif")):
+        return (f"'{os.path.basename(p)}' isn't a raster image I can show inline "
+                "(png/jpg/gif only).")
+    try:
+        ctx.post_image(p, os.path.basename(p))
+        return f"Displayed {os.path.basename(p)} in the chat."
+    except Exception as e:
+        return f"Could not display image: {e!r}"
+
+
 # ----------------------------------------------------------------------
 # Registry
 # ----------------------------------------------------------------------
@@ -2141,6 +2180,24 @@ def build_registry(app) -> "dict[str, ToolSpec]":
              "required": []},
             _assess_run, confirm=False,
             summary=lambda a: "assess the run quality"),
+
+        ToolSpec("help",
+            "List what the assistant can do, with example prompts. Use when the "
+            "user asks 'what can you do', 'help', or how to get started.",
+            {"type": "object", "properties": {}, "required": []},
+            _capabilities, confirm=False,
+            summary=lambda a: "show capabilities"),
+
+        ToolSpec("show_figure",
+            "Display a saved image (png/jpg) inline in the chat — e.g. a class "
+            "map, a diffraction pattern, or an NMF/interpretation figure. Pass a "
+            "real file path (find one via list_runs / get_state / output folders).",
+            {"type": "object",
+             "properties": {"path": {"type": "string",
+                "description": "path to a .png/.jpg image to show"}},
+             "required": ["path"]},
+            _show_figure, confirm=False,
+            summary=lambda a: f"show {os.path.basename(str(a.get('path','?')))}"),
     ]
     return {s.name: s for s in specs}
 

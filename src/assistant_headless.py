@@ -359,6 +359,9 @@ def build_headless_registry():
         "troubleshoot": lambda ctx, a: ct._troubleshoot(ctx, a),
         "explain_parameter": lambda ctx, a: ct._explain_parameter(ctx, a),
         "assess_run": lambda ctx, a: ct._assess_run(ctx, a),
+        "help": lambda ctx, a: ct._capabilities(ctx, a),
+        "show_figure": lambda ctx, a: (
+            f"(headless) figure saved at: {a.get('path','?')}"),
     }
     reg = {}
     for name, fn in H.items():

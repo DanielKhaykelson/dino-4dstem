@@ -89,12 +89,15 @@ class ChatPanel(ctk.CTkFrame):
         # Context object handed to every tool fn (worker thread).  Widget
         # access funnels through call_ui / post / status so tools never
         # touch Tk directly.
+        # Keep PhotoImage refs alive (Tk drops un-referenced images).
+        self._img_refs: list = []
         self._tool_ctx = chat_tools.ToolContext(
             app=app,
             call_ui=self._call_ui,
             post=self._post,
             status=lambda t: self._after(self.set_status, t),
-            cancel=lambda: self._cancel)
+            cancel=lambda: self._cancel,
+            post_image=lambda p, cap=None: self._after(self._post_image, p, cap))
 
         # Cross-thread UI marshaling.  Tkinter is NOT thread-safe and
         # even `widget.after(...)` raises if called off the Tk thread, so
@@ -121,6 +124,7 @@ class ChatPanel(ctk.CTkFrame):
         self._build_transcript()
         self._build_statusline()
         self._build_inputbar()
+        self._build_suggestions()
 
     def _build_topbar(self):
         bar = ctk.CTkFrame(self)
@@ -170,6 +174,12 @@ class ChatPanel(ctk.CTkFrame):
         self.dot_conn = StatusDot(bar, label="backend")
         self.dot_conn.set("idle", "not connected yet (Step 2)")
         self.dot_conn.pack(side="left", padx=(4, 0))
+
+        # Feedback on the last answer → learned KB (👎 asks what was wrong).
+        ctk.CTkButton(bar, text="👎", width=34,
+                      command=self._on_feedback_down).pack(side="right", padx=2)
+        ctk.CTkButton(bar, text="👍", width=34,
+                      command=self._on_feedback_up).pack(side="right", padx=(8, 2))
 
     def _build_transcript(self):
         # CTkTextbox wraps a tkinter Text widget — gives us easy
@@ -234,6 +244,50 @@ class ChatPanel(ctk.CTkFrame):
         self.btn_cancel.grid(row=0, column=2, padx=(0, 6), pady=6)
         self.btn_cancel.configure(state="disabled")
 
+    def _build_suggestions(self):
+        """A row of one-click example prompts (helps discovery)."""
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.grid(row=4, column=0, sticky="ew", padx=8, pady=(0, 6))
+        for label in ("What can you do?", "What should I do next?",
+                      "Assess this run", "Fix overclustering"):
+            ctk.CTkButton(
+                row, text=label, height=24,
+                fg_color=("#E5E5E5", "#3A3A3A"),
+                text_color=("#222", "#DDD"), hover_color=("#D5D5D5", "#4A4A4A"),
+                command=lambda t=label: self._send_prompt(t)
+            ).pack(side="left", padx=3)
+
+    def _send_prompt(self, text):
+        if self._busy:
+            return
+        self.entry.delete(0, "end")
+        self.entry.insert(0, text)
+        self._on_send()
+
+    # ---- feedback (thumbs) → learned KB ----
+    def _on_feedback_up(self):
+        self.set_status("👍 thanks — glad that helped.")
+
+    def _on_feedback_down(self):
+        from tkinter import simpledialog
+        last = next((m.get("content", "") for m in reversed(self.messages)
+                     if m.get("role") == "assistant"), "")
+        what = simpledialog.askstring(
+            "Correct me",
+            "What was wrong, or what should I do instead?", parent=self)
+        if not what:
+            return
+        try:
+            import gui_app.chat_kb as kb
+            note = "User correction: " + what
+            if last:
+                note += f"  (re: {last[:160]})"
+            kb.add_note("correction", note)
+            self.add_message(
+                "system", "Thanks — saved that correction; I'll apply it.")
+        except Exception as e:
+            self.add_message("system", f"(couldn't save feedback: {e})")
+
     # ------------------------------------------------------------------
     # Transcript helpers (always called on the Tk thread; the worker
     # marshals through self.after).
@@ -283,7 +337,8 @@ class ChatPanel(ctk.CTkFrame):
             "interpret the classes, and even show you where to click.\n"
             f"Loaded data: {sample}   |   current run: {run}\n"
             "Load a cube with the 📂 Load data button (or tell me a file "
-            "path), then just ask in plain English.")
+            "path), then just ask in plain English.\n"
+            "New here? Ask \"what can you do?\" (or click a suggestion below).")
 
     # ------------------------------------------------------------------
     # Startup readiness probe (the "loading" state on open).  Lightweight:
@@ -492,7 +547,16 @@ class ChatPanel(ctk.CTkFrame):
             "- JUDGING A RUN: for 'is my model good / assess this run', call "
             "assess_run (it reads the real cached inference and reports what it "
             "cannot determine — do not invent a verdict). For 'what does this "
-            "parameter do / what should it be', call explain_parameter.\n\n"
+            "parameter do / what should it be', call explain_parameter.\n"
+            "- CAPABILITIES: if the user asks what you can do / for help / how to "
+            "start, call help.\n"
+            "- SHOWING IMAGES: to display a saved figure (class map, pattern, "
+            "NMF/interpretation output) inline, call show_figure(path) with a "
+            "REAL path (find one via list_runs / get_state / the analysis output "
+            "folder). Never invent a path.\n"
+            "- COMPOUND requests ('load X then train then score'): carry out the "
+            "steps in order, calling each tool in turn across rounds — don't stop "
+            "after the first step.\n\n"
             "DOMAIN TIPS (4D-STEM — STARTING points; verify on the data then "
             "refine):\n"
             "- vmax: contrast only; ~2 to view (show halo+rings without "
@@ -815,6 +879,34 @@ class ChatPanel(ctk.CTkFrame):
 
     def _post(self, role, text):
         self._after(self.add_message, role, text)
+
+    def _post_image(self, path, caption=None):
+        """Embed an image inline in the transcript (Tk thread). Degrades to
+        a text line if Pillow is missing or the file can't be read."""
+        try:
+            from PIL import Image, ImageTk
+        except Exception:
+            self.add_message("system", f"(install Pillow to show images) {path}")
+            return
+        try:
+            img = Image.open(path)
+            maxw = 420
+            if img.width > maxw:
+                img = img.resize((maxw, int(img.height * maxw / img.width)))
+            photo = ImageTk.PhotoImage(img)
+            self._img_refs.append(photo)
+            tb = self.transcript._textbox
+            self.transcript.configure(state="normal")
+            if caption:
+                tb.insert("end", f"\n{caption}\n", "system")
+            else:
+                tb.insert("end", "\n")
+            tb.image_create("end", image=photo)
+            tb.insert("end", "\n")
+            self.transcript.configure(state="disabled")
+            self.transcript.see("end")
+        except Exception as e:
+            self.add_message("system", f"(couldn't show image {path}: {e})")
 
     def _stream_token(self, tok):
         """Backend calls this from the worker thread per token."""
