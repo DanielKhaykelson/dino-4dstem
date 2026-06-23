@@ -494,6 +494,9 @@ class ChatPanel(ctk.CTkFrame):
             "the app pops its own confirmation. Just call the tool.\n"
             "- Call ONE tool, wait for its result, then continue. Don't "
             "narrate a multi-step plan or repeat yourself.\n"
+            "- Once a tool's result lets you answer, REPLY IN PLAIN TEXT "
+            "immediately and STOP — never call the same tool twice, and don't "
+            "keep calling tools after you already have what you need.\n"
             "- When the user asks an OPEN-ENDED question ('what can I do?', "
             "'any other ways?', 'show me something'), briefly LIST the "
             "relevant options instead of pushing a single one.\n"
@@ -635,6 +638,11 @@ class ChatPanel(ctk.CTkFrame):
         schemas = chat_tools.tool_schemas(self.registry)
 
         try:
+            import json as _json
+            executed = {}          # sig -> output (dedup within this turn)
+            last_out = None        # last useful tool output (answer fallback)
+            repeats = 0
+            produced_text = False
             for _round in range(MAX_TOOL_ROUNDS):
                 if self._cancel:
                     self._post("system", "(cancelled)")
@@ -671,20 +679,51 @@ class ChatPanel(ctk.CTkFrame):
                     if text.strip():
                         self.messages.append({"role": "assistant",
                                               "content": text})
+                        produced_text = True
                     break
 
                 # Execute each tool call, append its result, loop again.
                 for c in calls:
                     if self._cancel:
                         break
+                    try:
+                        sig = c["name"] + "|" + _json.dumps(
+                            c.get("arguments") or {}, sort_keys=True,
+                            default=str)
+                    except Exception:
+                        sig = c["name"]
+                    if sig in executed:
+                        # Same tool+args already ran this turn — don't repeat;
+                        # push the model to give its final answer.
+                        repeats += 1
+                        self._after(self.add_message, "tool",
+                                    f"↳ {c['name']} (repeat — skipped)")
+                        convo.append({"role": "tool", "name": c["name"],
+                            "content": ("You ALREADY called this with the same "
+                            "arguments; its result is above. Do NOT call any "
+                            "tool again — write your final answer to the user "
+                            "now in plain text.")})
+                        continue
                     out = self._execute_tool(c, force_confirm=from_text)
+                    executed[sig] = out
+                    last_out = out
                     convo.append({"role": "tool",
                                   "name": c["name"],
                                   "content": out})
-            else:
-                self._post("system",
-                           f"(stopped after {MAX_TOOL_ROUNDS} tool "
-                           f"rounds without a final answer)")
+                if repeats >= 2:
+                    break
+
+            # Turn ended without a plain-text answer: surface the last tool
+            # output as the answer rather than a bare "(stopped)" note.
+            if not produced_text and not self._cancel:
+                if last_out:
+                    self.messages.append({"role": "assistant",
+                                          "content": last_out})
+                    self._post("assistant", last_out)
+                else:
+                    self._post("system",
+                               f"(stopped after {MAX_TOOL_ROUNDS} tool rounds "
+                               "without a final answer)")
         except BackendError as e:
             self._post("system", f"Backend error: {e}")
         except Exception as e:
