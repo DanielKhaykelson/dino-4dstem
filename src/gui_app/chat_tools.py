@@ -58,6 +58,8 @@ class ToolSpec:
     fn: Callable                 # (ctx, args_dict) -> str
     confirm: bool = True
     summary: Callable = None     # (args_dict) -> str
+    display: bool = False         # show output verbatim to user (don't let
+                                  # the model paraphrase it)
 
 
 # ----------------------------------------------------------------------
@@ -2125,7 +2127,7 @@ def build_registry(app) -> "dict[str, ToolSpec]":
             "the user asks 'what should I do', 'what next', or how to proceed.",
             {"type": "object", "properties": {}, "required": []},
             _suggest_next_step, confirm=False,
-            summary=lambda a: "suggest the next step"),
+            summary=lambda a: "suggest the next step", display=True),
 
         ToolSpec("recommend_params",
             "Recommend which method to use plus preprocessing/training parameters, "
@@ -2140,7 +2142,7 @@ def build_registry(app) -> "dict[str, ToolSpec]":
                     "description": "what the user wants to achieve (optional)"}},
              "required": []},
             _recommend_params, confirm=False,
-            summary=lambda a: "recommend method/params"),
+            summary=lambda a: "recommend method/params", display=True),
 
         ToolSpec("troubleshoot",
             "Diagnose a problem the user reports about their result and give "
@@ -2155,7 +2157,7 @@ def build_registry(app) -> "dict[str, ToolSpec]":
                     "(e.g. 'overclustered', 'one class took everything')"}},
              "required": ["symptom"]},
             _troubleshoot, confirm=False,
-            summary=lambda a: "troubleshoot the result"),
+            summary=lambda a: "troubleshoot the result", display=True),
 
         ToolSpec("explain_parameter",
             "Explain what a GUI / training parameter does and a sensible range, "
@@ -2166,7 +2168,7 @@ def build_registry(app) -> "dict[str, ToolSpec]":
                 "description": "parameter name, e.g. center_mask_radius, K"}},
              "required": ["name"]},
             _explain_parameter, confirm=False,
-            summary=lambda a: f"explain '{a.get('name','?')}'"),
+            summary=lambda a: f"explain '{a.get('name','?')}'", display=True),
 
         ToolSpec("assess_run",
             "Assess a run's quality from its ACTUAL cached inference "
@@ -2179,14 +2181,14 @@ def build_registry(app) -> "dict[str, ToolSpec]":
                 "description": "run directory (optional; defaults to current)"}},
              "required": []},
             _assess_run, confirm=False,
-            summary=lambda a: "assess the run quality"),
+            summary=lambda a: "assess the run quality", display=True),
 
         ToolSpec("help",
             "List what the assistant can do, with example prompts. Use when the "
             "user asks 'what can you do', 'help', or how to get started.",
             {"type": "object", "properties": {}, "required": []},
             _capabilities, confirm=False,
-            summary=lambda a: "show capabilities"),
+            summary=lambda a: "show capabilities", display=True),
 
         ToolSpec("show_figure",
             "Display a saved image (png/jpg) inline in the chat — e.g. a class "
@@ -2253,8 +2255,16 @@ def parse_text_tool_calls(text, registry) -> list:
                         args = _json.loads(args)
                     except Exception:
                         args = {}
+                args = args if isinstance(args, dict) else {}
+                # Skip obvious EXAMPLE/placeholder calls (the model often pastes
+                # template snippets) so we don't execute them for real.
+                _ph = ("sample_name", "/path/to", "path/to", "your_", "<",
+                       "example", "run_directory", "cif_file")
+                blob = _json.dumps(args, default=str).lower()
+                if any(t in blob for t in _ph):
+                    continue
                 out.append({"id": f"text_{len(out)}", "name": name,
-                            "arguments": args if isinstance(args, dict) else {}})
+                            "arguments": args})
     return out
 
 

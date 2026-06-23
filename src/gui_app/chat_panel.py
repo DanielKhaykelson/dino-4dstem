@@ -497,6 +497,15 @@ class ChatPanel(ctk.CTkFrame):
             "- Once a tool's result lets you answer, REPLY IN PLAIN TEXT "
             "immediately and STOP — never call the same tool twice, and don't "
             "keep calling tools after you already have what you need.\n"
+            "- If the user asks what you can do / for an overview / says they're "
+            "new, call help ONCE and then stop (its output is shown to them "
+            "directly — don't restate or summarize it).\n"
+            "- Loading is BY FILE PATH ONLY. There are NO named samples/sample "
+            "configurations — NEVER ask the user for a sample name. If nothing "
+            "is loaded, tell them to click 📂 Load data or give a file path.\n"
+            "- NEVER put JSON, ```code```, or pseudo-calls like train(sample=…) "
+            "in your reply. Speak in plain English; to act, use the real tool "
+            "call mechanism.\n"
             "- When the user asks an OPEN-ENDED question ('what can I do?', "
             "'any other ways?', 'show me something'), briefly LIST the "
             "relevant options instead of pushing a single one.\n"
@@ -643,6 +652,7 @@ class ChatPanel(ctk.CTkFrame):
             last_out = None        # last useful tool output (answer fallback)
             repeats = 0
             produced_text = False
+            self._turn_displayed = False
             for _round in range(MAX_TOOL_ROUNDS):
                 if self._cancel:
                     self._post("system", "(cancelled)")
@@ -661,7 +671,10 @@ class ChatPanel(ctk.CTkFrame):
                 if not calls and text:
                     tcalls = chat_tools.parse_text_tool_calls(
                         text, self.registry)
-                    if tcalls:
+                    # Only auto-run a tool parsed from text when the message is
+                    # basically JUST that call — never execute example/pseudo
+                    # snippets embedded in an explanation.
+                    if tcalls and len(text.strip()) < 240:
                         calls = tcalls
                         from_text = True
 
@@ -715,8 +728,8 @@ class ChatPanel(ctk.CTkFrame):
 
             # Turn ended without a plain-text answer: surface the last tool
             # output as the answer rather than a bare "(stopped)" note.
-            if not produced_text and not self._cancel:
-                if last_out:
+            if not produced_text and not self._cancel and not self._turn_displayed:
+                if last_out and not last_out.startswith("(Already shown"):
                     self.messages.append({"role": "assistant",
                                           "content": last_out})
                     self._post("assistant", last_out)
@@ -771,7 +784,15 @@ class ChatPanel(ctk.CTkFrame):
         except Exception as e:
             out = f"ERROR running {name}: {e!r}"
         self._after(self.set_status, "")
-        return str(out)
+        out = str(out)
+        # Informational tools: show their curated text DIRECTLY to the user so
+        # a weak model can't mangle/ignore it; tell the model not to repeat it.
+        if getattr(spec, "display", False) and not out.startswith("ERROR"):
+            self._after(self.add_message, "assistant", out)
+            self._turn_displayed = True
+            return ("(Already shown to the user verbatim — do NOT repeat it. "
+                    "Add at most one short follow-up sentence, or just stop.)")
+        return out
 
     # ------------------------------------------------------------------
     # Blocking run-on-Tk-thread helper (used by tools via ToolContext).
