@@ -107,9 +107,10 @@ class ChatPanel(ctk.CTkFrame):
     call sibling panels.
     """
 
-    def __init__(self, parent, app=None):
+    def __init__(self, parent, app=None, registry=None):
         super().__init__(parent)
         self.app = app
+        self._ext_registry = registry   # optional: standalone/headless toolset
 
         # Conversation state (the message list handed to the backend).
         # Kept here so the worker thread can read/append it.  Holds the
@@ -124,7 +125,8 @@ class ChatPanel(ctk.CTkFrame):
 
         # Tool registry: {name: ToolSpec}.  Built once; reads live state
         # through `app` at call time.
-        self.registry = chat_tools.build_registry(app)
+        self.registry = (registry if registry is not None
+                         else chat_tools.build_registry(app))
         # Tools the user has chosen to allow for the rest of the session
         # (confirm dialog "allow for session" checkbox).  Default: empty
         # -> every tool is gated, per the confirmed policy.
@@ -551,11 +553,15 @@ class ChatPanel(ctk.CTkFrame):
                        ("All files", "*.*")])
         if not path:
             return
+        # Standalone assistant (no full GUI / no pre panel): load via chat.
+        pre = getattr(self.app, "pre", None)
+        if pre is None:
+            self._send_prompt(f"load {path}")
+            return
         self.add_message("system", f"loading {path} …")
         try:
-            self.app.pre._path_var.set(path)
-            self.app.pre._load()
-            key = self.app.pre.get_sample_key()
+            pre._path_var.set(path)
+            pre._load()
             self.add_message("system",
                 f"loaded {os.path.basename(path)} — it's now the active "
                 f"dataset.")

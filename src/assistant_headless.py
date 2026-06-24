@@ -369,7 +369,8 @@ def build_headless_registry():
         if name in P:
             sp = P[name]
             reg[name] = ToolSpec(sp.name, sp.description, sp.parameters,
-                                 fn, confirm=False, summary=sp.summary)
+                                 fn, confirm=False, summary=sp.summary,
+                                 display=getattr(sp, "display", False))
         else:
             reg[name] = ToolSpec(name, name, {"type": "object",
                                  "properties": {}, "required": []}, fn,
