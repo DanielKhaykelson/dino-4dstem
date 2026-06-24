@@ -199,13 +199,19 @@ class PrePanel(ctk.CTkFrame):
                 self._load_params_status.configure(
                     text="(Training tab not available)"); return
             tp._sync_from_prepanel()
-            pk = self.get_pre_kwargs()
+            # Read back what the Training tab ACTUALLY holds now, so the
+            # transfer is verifiable (and the derived beam mask is explained).
+            def _gv(k):
+                try:
+                    return tp.var[k].get()
+                except Exception:
+                    return "?"
             self._load_params_status.configure(
-                text=f"→ model: crop={pk['center_crop_size']}, "
-                     f"mask r={pk['center_mask_radius']}, "
-                     f"polar_mask={pk['polar_mask_cols']}, "
-                     f"COM={pk['com_centering']}  "
-                     f"(uncheck 'use defaults' in Training to apply)")
+                text=f"Training now uses  crop={_gv('center_crop_size')}, "
+                     f"beam-mask r={_gv('center_mask_radius')} "
+                     f"(= polar_mask//2), polar_mask={_gv('polar_mask_cols')}, "
+                     f"COM={_gv('com_centering')}.  (vmax is display-only — "
+                     f"training normalizes internally.)")
         except Exception as e:
             self._load_params_status.configure(text=f"failed: {e}")
 
