@@ -73,7 +73,7 @@ class TransferJob:
         self._t_start = time.perf_counter()
         self._proc = subprocess.Popen(
             [sys.executable, "-u", WORKER, spec_path],
-            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            cwd=os.getcwd(),  # GUI working dir (NOT src/ from __file__ after reorg)
             env=env,
             stdout=open(os.path.join(self.outdir, "_stdout.log"), "w",
                           encoding="utf-8"),

@@ -126,7 +126,11 @@ class TrainingJob:
         # use the SAME interpreter as the GUI
         self._proc = subprocess.Popen(
             [sys.executable, "-u", WORKER, spec_path],
-            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            # Run in the GUI's working dir so the relative outdir / kwargs
+            # paths resolve identically. (Do NOT derive this from __file__:
+            # after the move into src/, dirname(dirname(__file__)) is src/,
+            # not the repo root, which broke training.)
+            cwd=os.getcwd(),
             env=env,
             stdout=open(os.path.join(self.outdir, "_stdout.log"), "w",
                           encoding="utf-8"),
