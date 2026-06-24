@@ -4,6 +4,8 @@ REM (Helper used by the launchers -- not run directly.)
 REM
 REM If your environment has a different name, change ENV_NAME below.
 set "ENV_NAME=dino4dstem"
+REM Optional override: put a different env name in env_name.txt next to this file.
+if exist "%~dp0env_name.txt" set /p ENV_NAME=<"%~dp0env_name.txt"
 
 call "%~dp0_find_conda.bat" || exit /b 1
 call "%CONDA_BAT%" activate %ENV_NAME%
