@@ -29,7 +29,8 @@ matplotlib.use("Agg")
 import numpy as np
 
 from assistant_io import new_output_dir, save_fig, save_array_png, write_summary
-from gui_app.chat_backends import OllamaBackend, BackendError
+from gui_app.chat_backends import (OllamaBackend, GeminiBackend, BackendError,
+                                    GEMINI_MODELS, gemini_get_key, gemini_set_key)
 from gui_app import chat_tools as ct
 from gui_app.chat_tools import ToolSpec, ToolContext
 
@@ -438,7 +439,14 @@ def main():
     ap = argparse.ArgumentParser(description="Headless DINO-4DSTEM assistant")
     ap.add_argument("data", nargs="?", help="cube file to load on start")
     ap.add_argument("--task", help="run one task and exit")
-    ap.add_argument("--model", default="qwen2.5:7b")
+    ap.add_argument("--backend", choices=["ollama", "gemini"], default="ollama",
+                    help="LLM backend (default: ollama, local/free)")
+    ap.add_argument("--model", default=None,
+                    help="model name (default: qwen2.5:7b for ollama, "
+                         "gemini-2.0-flash for gemini)")
+    ap.add_argument("--gemini-key", default=None,
+                    help="Gemini API key (else uses saved key or "
+                         "GEMINI_API_KEY env)")
     args = ap.parse_args()
 
     app = _HeadlessApp()
@@ -449,8 +457,15 @@ def main():
                       status=lambda t: print("   …", t, flush=True),
                       cancel=lambda: cancel[0])
 
-    backend = OllamaBackend(model=args.model)
-    print("Preparing local model…", flush=True)
+    if args.backend == "gemini":
+        if args.gemini_key:
+            gemini_set_key(args.gemini_key)
+        backend = GeminiBackend(model=args.model or GEMINI_MODELS[0],
+                                api_key=gemini_get_key())
+        print("Using Gemini…", flush=True)
+    else:
+        backend = OllamaBackend(model=args.model or "qwen2.5:7b")
+        print("Preparing local model…", flush=True)
     ok, msg = backend.provision(on_progress=lambda t: print("   " + t,
                                                             flush=True))
     if not ok:
