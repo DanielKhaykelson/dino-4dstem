@@ -441,3 +441,157 @@ class OllamaBackend(LLMBackend):
             args = {}
         return {"id": tc.get("id") or f"call_{idx}",
                 "name": name, "arguments": args}
+
+
+# ----------------------------------------------------------------------
+# Gemini (cloud, bring-your-own FREE API key)
+# ----------------------------------------------------------------------
+GEMINI_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
+_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+
+
+def _gemini_key_path() -> str:
+    # Under runs/ which is git-ignored, so the key is never committed.
+    return os.path.join("runs", "_gui", "_gemini_key.txt")
+
+
+def gemini_get_key() -> str:
+    k = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if k:
+        return k.strip()
+    try:
+        p = _gemini_key_path()
+        if os.path.exists(p):
+            return open(p, encoding="utf-8").read().strip()
+    except Exception:
+        pass
+    return ""
+
+
+def gemini_set_key(key: str):
+    p = _gemini_key_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write((key or "").strip())
+
+
+def _gem_type(t):
+    return {"string": "STRING", "integer": "INTEGER", "number": "NUMBER",
+            "boolean": "BOOLEAN", "array": "ARRAY", "object": "OBJECT"
+            }.get(str(t).lower(), "STRING")
+
+
+def _gem_schema(s):
+    if not isinstance(s, dict):
+        return {"type": "STRING"}
+    out = {"type": _gem_type(s.get("type", "object"))}
+    if s.get("description"):
+        out["description"] = s["description"]
+    if s.get("type") == "object":
+        props = s.get("properties") or {}
+        if props:
+            out["properties"] = {k: _gem_schema(v) for k, v in props.items()}
+        if s.get("required"):
+            out["required"] = list(s["required"])
+    if s.get("type") == "array" and "items" in s:
+        out["items"] = _gem_schema(s["items"])
+    return out
+
+
+class GeminiBackend(LLMBackend):
+    """Google Gemini via the public generativelanguage REST API, using the
+    user's own (free-tier) API key. Same chat() contract as OllamaBackend.
+    Non-streaming: the full reply text is emitted once via on_token."""
+
+    def __init__(self, model: str = "gemini-2.0-flash", api_key: str = None):
+        self.model = model or "gemini-2.0-flash"
+        self.active_model = self.model
+        self.api_key = (api_key or gemini_get_key()).strip()
+
+    def provision(self, on_progress=None, cancel=None):
+        if not self.api_key:
+            return False, ("No Gemini API key set. Click the '🔑 Gemini key' "
+                           "button and paste a free key from "
+                           "https://aistudio.google.com/apikey")
+        return True, ""
+
+    def _build_payload(self, messages, tools):
+        system_txt, contents = [], []
+        for m in messages:
+            role = m.get("role")
+            if role == "system":
+                if m.get("content"):
+                    system_txt.append(m["content"])
+            elif role == "user":
+                contents.append({"role": "user",
+                                 "parts": [{"text": m.get("content", "")}]})
+            elif role == "assistant":
+                parts = []
+                if m.get("content"):
+                    parts.append({"text": m["content"]})
+                for tc in m.get("tool_calls") or []:
+                    fn = tc.get("function", tc)
+                    args = fn.get("arguments") or {}
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except Exception:
+                            args = {}
+                    parts.append({"functionCall": {"name": fn.get("name"),
+                                                   "args": args}})
+                contents.append({"role": "model",
+                                 "parts": parts or [{"text": ""}]})
+            elif role == "tool":
+                contents.append({"role": "user", "parts": [{"functionResponse": {
+                    "name": m.get("name", "tool"),
+                    "response": {"result": str(m.get("content", ""))}}}]})
+        payload = {"contents": contents}
+        if system_txt:
+            payload["systemInstruction"] = {
+                "parts": [{"text": "\n\n".join(system_txt)}]}
+        if tools:
+            decls = [{"name": (t.get("function", t))["name"],
+                      "description": (t.get("function", t)).get("description", ""),
+                      "parameters": _gem_schema(
+                          (t.get("function", t)).get("parameters")
+                          or {"type": "object"})}
+                     for t in tools]
+            payload["tools"] = [{"function_declarations": decls}]
+        return payload
+
+    def chat(self, messages, tools=None, on_token=None, cancel=None) -> dict:
+        if not self.api_key:
+            raise BackendError("No Gemini API key set.")
+        payload = self._build_payload(messages, tools)
+        url = f"{_GEMINI_BASE}/{self.active_model}:generateContent?key={self.api_key}"
+        try:
+            r = requests.post(url, json=payload, timeout=120)
+        except Exception as e:
+            raise BackendError(f"Network error talking to Gemini: {e}")
+        if r.status_code != 200:
+            msg = r.text[:300]
+            try:
+                msg = r.json().get("error", {}).get("message", msg)
+            except Exception:
+                pass
+            raise BackendError(f"Gemini HTTP {r.status_code}: {msg}")
+        text_parts, tool_calls = [], []
+        try:
+            cand = (r.json().get("candidates") or [{}])[0]
+            for p in (cand.get("content", {}).get("parts") or []):
+                if p.get("text"):
+                    text_parts.append(p["text"])
+                fc = p.get("functionCall")
+                if fc:
+                    tool_calls.append({"id": f"gem_{len(tool_calls)}",
+                                       "name": fc.get("name"),
+                                       "arguments": fc.get("args") or {}})
+        except Exception as e:
+            raise BackendError(f"Bad Gemini response: {e}")
+        text = "".join(text_parts)
+        if text and on_token:
+            try:
+                on_token(text)
+            except Exception:
+                pass
+        return {"text": text, "tool_calls": tool_calls}

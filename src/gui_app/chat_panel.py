@@ -30,7 +30,8 @@ import threading
 import customtkinter as ctk
 
 from gui_app._ui import btn, COLOR, StatusDot
-from gui_app.chat_backends import OllamaBackend, BackendError
+from gui_app.chat_backends import (OllamaBackend, GeminiBackend, BackendError,
+                                    GEMINI_MODELS, gemini_get_key, gemini_set_key)
 from gui_app import chat_tools
 
 # Safety cap on tool-call rounds per user turn, so a confused model
@@ -41,7 +42,7 @@ MAX_TOOL_ROUNDS = 8
 # Backend / model / device choices surfaced in the dropdowns.  The
 # actual backends are wired in Step 2; these are the labels the user
 # picks from.
-BACKENDS = ["Ollama (local, free)", "Cloud (bring your own key)"]
+BACKENDS = ["Ollama (local, free)", "Gemini (free API key)"]
 OLLAMA_MODELS = ["qwen2.5:7b", "qwen2.5:3b", "qwen2.5:14b"]
 DEVICES = ["GPU", "CPU"]
 
@@ -228,6 +229,8 @@ class ChatPanel(ctk.CTkFrame):
                       command=self._on_feedback_down).pack(side="right", padx=2)
         ctk.CTkButton(bar, text="👍", width=34,
                       command=self._on_feedback_up).pack(side="right", padx=(8, 2))
+        ctk.CTkButton(bar, text="🔑 Gemini key", width=110,
+                      command=self._on_set_gemini_key).pack(side="right", padx=8)
 
     def _build_transcript(self):
         # CTkTextbox wraps a tkinter Text widget — gives us easy
@@ -489,15 +492,45 @@ class ChatPanel(ctk.CTkFrame):
     # Event handlers (skeleton behavior)
     # ------------------------------------------------------------------
     def _on_backend_change(self, choice):
-        if choice.startswith("Cloud"):
-            self.dd_model.configure(values=["claude / openai (Settings)"])
-            self.var_model.set("claude / openai (Settings)")
-            self.set_status("Cloud backend selected — key entry comes "
-                            "in a later step.")
+        if choice.startswith("Gemini"):
+            self.dd_model.configure(values=GEMINI_MODELS)
+            self.var_model.set(GEMINI_MODELS[0])
+            if gemini_get_key():
+                self.set_status("Gemini selected — using your saved API key.")
+            else:
+                self.set_status("Gemini selected — click '🔑 Gemini key' to "
+                                "paste a free key (aistudio.google.com/apikey).")
+                self.add_message("system",
+                    "To use Gemini: click '🔑 Gemini key' and paste a free key "
+                    "from https://aistudio.google.com/apikey . It's stored "
+                    "locally (never uploaded). Ollama (local) stays free + "
+                    "offline if you prefer.")
         else:
             self.dd_model.configure(values=OLLAMA_MODELS)
             self.var_model.set(DEFAULT_MODEL)
             self.set_status("")
+
+    def _on_set_gemini_key(self):
+        from tkinter import simpledialog
+        cur = gemini_get_key()
+        prompt = ("Paste your Google Gemini API key (free at "
+                  "aistudio.google.com/apikey):")
+        if cur:
+            prompt = "Key is set. Paste a new key to replace it (or Cancel):"
+        key = simpledialog.askstring("Gemini API key", prompt, parent=self,
+                                     show="*")
+        if key is None:
+            return
+        try:
+            gemini_set_key(key)
+            if key.strip():
+                self.add_message("system",
+                    "Saved Gemini key (stored locally under runs/_gui). "
+                    "Set the backend to 'Gemini (free API key)' to use it.")
+            else:
+                self.add_message("system", "Cleared the Gemini key.")
+        except Exception as e:
+            self.add_message("system", f"(couldn't save key: {e})")
 
     def _on_autorun_toggle(self):
         # Runs on the Tk thread; mirror into the plain bool the worker reads.
@@ -571,8 +604,11 @@ class ChatPanel(ctk.CTkFrame):
         t.start()
 
     def _make_backend(self, cfg):
-        if cfg["backend"].startswith("Cloud"):
-            return None   # cloud wired in a later step
+        if cfg["backend"].startswith("Gemini"):
+            model = cfg["model"]
+            if not str(model).startswith("gemini"):
+                model = GEMINI_MODELS[0]
+            return GeminiBackend(model=model, api_key=gemini_get_key())
         return OllamaBackend(model=cfg["model"], device=cfg["device"])
 
     def _system_prompt(self) -> str:
@@ -733,7 +769,9 @@ class ChatPanel(ctk.CTkFrame):
         # Auto-provision: start the server if installed, download+launch
         # the installer if not, and pull the model if missing.  Progress
         # shows in the status line; Cancel aborts a long download.
-        self._after(self.dot_conn.set, "busy", "preparing Ollama…")
+        _prep = ("contacting Gemini…" if cfg["backend"].startswith("Gemini")
+                 else "preparing Ollama…")
+        self._after(self.dot_conn.set, "busy", _prep)
         ok, msg = backend.provision(
             on_progress=lambda t: self._after(self.set_status, t),
             cancel=lambda: self._cancel)
