@@ -39,12 +39,15 @@ from typing import Callable
 # ----------------------------------------------------------------------
 class ToolContext:
     """Handed to every tool fn.  Bound to a ChatPanel by the panel."""
-    def __init__(self, app, call_ui, post, status, cancel=None):
+    def __init__(self, app, call_ui, post, status, cancel=None,
+                 post_image=None):
         self.app = app
         self.call_ui = call_ui      # (fn, *a, timeout=?) -> result (blocks)
         self.post = post            # (role, text) -> None
         self.status = status        # (text) -> None
         self.cancel = cancel or (lambda: False)   # () -> bool (Stop pressed)
+        # (path, caption) -> None : display an image inline in the chat.
+        self.post_image = post_image or (lambda *a, **k: None)
 
 
 @dataclass
@@ -55,6 +58,8 @@ class ToolSpec:
     fn: Callable                 # (ctx, args_dict) -> str
     confirm: bool = True
     summary: Callable = None     # (args_dict) -> str
+    display: bool = False         # show output verbatim to user (don't let
+                                  # the model paraphrase it)
 
 
 # ----------------------------------------------------------------------
@@ -1505,6 +1510,297 @@ def _answer_from_docs(ctx, args) -> str:
     return "\n".join(parts)
 
 
+def _suggest_next_step(ctx, args) -> str:
+    s = getattr(ctx.app, "session", None)
+    sample = getattr(s, "sample", None)
+    run = getattr(s, "run_dir", None)
+    has_inf = bool(getattr(s, "has_inference", lambda: False)())
+    runs = _find_run_dirs()
+    scored = bool(run and (
+        os.path.exists(os.path.join(run, "eval", "scorecard.json")) or
+        os.path.exists(os.path.join(run, "scorecard.json"))))
+    out = ["Suggested next step:"]
+    if not sample:
+        out.append("1) Load a 4D-STEM cube — Pre-processing tab → Browse → Load "
+                   "(.prz / .npz / .h5 master / .npy).")
+        out.append("   Then set beam mask + crop + COM while watching the DP-max.")
+    elif not run and not runs:
+        out.append(f"1) Data '{sample}' is loaded. Tune mask/crop/COM, click "
+                   "'Load parameters to model', then Train (Training tab).")
+        out.append("   For a quick label-free map without training, run NMF + K-means.")
+    elif run and not has_inf:
+        out.append(f"1) Run '{os.path.basename(run)}' exists. Eval it (infer) to get "
+                   "the class map + class-average patterns.")
+    elif has_inf and not scored:
+        out.append("1) Inference is cached → Score the run, then open Interpretation "
+                   "to see WHY the classes split.")
+        out.append("2) Compare with NMF (and ACOM if the sample is crystalline) to "
+                   "validate the map.")
+    else:
+        out.append("1) You have a scored run → interpret it (Grad-CAM / ablations / "
+                   "radial), compare with NMF/ACOM, and refine K or preprocessing if "
+                   "the map is fragmented or collapsed.")
+    out.append("(Full decision guide + validity checks: ask answer_from_docs about "
+               "METHOD_GUIDE.)")
+    return "\n".join(out)
+
+
+def _recommend_params(ctx, args) -> str:
+    stype = str(args.get("sample_type", "auto")).lower().replace("-", "_")
+    goal = str(args.get("goal", "")).strip()
+    common = ("Validated base recipe: polar pipeline + theta-roll aug, "
+              "center_momentum=0.97, EMA 0.99->0.999, ~50 epochs, COM-centering ON, "
+              "beam mask sized to the central disk, crop to the informative FOV. "
+              "Set these on the loader then click 'Load parameters to model'.")
+    layered = ("LAYERED / zone-axis sample (e.g. EuInAs): orientation dominates. "
+               "Enable the confidence/weight loss (these show avg_conf >~0.85 by "
+               "epoch ~5). K small (~6) for a phase/zone map. Cross-check with ACOM "
+               "zone axis (judge by AMI vs ACOM).")
+    nonlayered = ("NON-LAYERED / crystallinity sample (e.g. IMC, NaPHI): the class "
+                  "parameter is crystallinity + azimuthal spottiness (2-D Bragg "
+                  "excess), NOT orientation. Plain polar DINO, no weight loss needed "
+                  "(avg_conf stays low, ~0.3). K~6 focused or large (~60) then merge. "
+                  "Compare to NMF + classical descriptors and SAM masks "
+                  "(IoU / Dice / count r).")
+    out = [common, ""]
+    if stype.startswith("layer"):
+        out.append(layered)
+    elif "non" in stype or stype in ("imc", "naphi"):
+        out.append(nonlayered)
+    else:
+        out += ["Choose by sample type:", "- " + layered, "- " + nonlayered,
+                "Decide: known crystal structure + orientation matters → treat as "
+                "layered/crystalline (ACOM-comparable); contrast is "
+                "crystallinity/texture → non-layered."]
+    if goal:
+        out.append(f"\nGoal: {goal}. Quick no-train map → NMF+K-means; "
+                   "orientation/strain → ACOM (needs a CIF).")
+    return "\n".join(out)
+
+
+def _troubleshoot(ctx, args) -> str:
+    sym = str(args.get("symptom", "")).lower()
+    def has(*ks): return any(k in sym for k in ks)
+    blocks = []
+    if has("overclust", "over-clust", "over clust", "too many", "split",
+           "indistinct", "fragmented class", "redundant class"):
+        blocks.append(("OVER-CLUSTERING (one real class split into several / "
+            "class-averages look alike)", [
+            "DATA: strengthen invariances so nuisance variation stops spawning "
+            "classes — keep COM-centering ON, size the beam mask to cover the "
+            "central disk, use the polar pipeline + theta-roll aug (so rotated "
+            "grains don't split), add mild Gaussian blur to suppress shot-noise "
+            "splits; check crop/vmax aren't clipping real signal.",
+            "MODEL: lower K (primary fix); train longer; raise center_momentum "
+            "(~0.97) + teacher EMA for steadier prototypes; add a consolidation "
+            "loss (centroid_lambda or cluster1d) to pull same-class together; "
+            "lower conf_weight_gamma if it over-sharpens.",
+            "QUICK (no retrain): merge classes in the Post-hoc panel, or "
+            "re-cluster with a smaller K (NMF 'Cluster' button; or agglomerative "
+            "then cut the dendrogram)."]))
+    if has("collapse", "underclust", "under-clust", "too few", "one class",
+           "single class", "everything one", "merged everything"):
+        blocks.append(("COLLAPSE / UNDER-CLUSTERING (one class swallows most "
+            "pixels)", [
+            "DATA: reduce over-aggressive augmentation; make sure the beam mask "
+            "isn't deleting the discriminative signal.",
+            "MODEL: raise K; enable the confidence/weight loss (esp. layered / "
+            "zone-axis samples, avg_conf >~0.85 at epoch ~5); train longer; "
+            "lower center_momentum slightly if it over-stabilizes."]))
+    if has("salt", "pepper", "incoherent", "speckle", "noisy map", "random",
+           "scattered pixel"):
+        blocks.append(("SALT-AND-PEPPER / spatially incoherent map", [
+            "DATA: stronger preprocessing (mask / crop / COM), mild blur.",
+            "MODEL: add the spatial-smoothness loss (lam_spatial); train longer; "
+            "consider lowering K."]))
+    if has("thickness", "beam", "brightness", "intensity", "central"):
+        blocks.append(("MAP TRACKS THICKNESS / BEAM INTENSITY only", [
+            "DATA: enlarge the beam mask, enable COM-centering, use log-stretch so "
+            "scattered intensity isn't dwarfed by the (000) beam.",
+            "MODEL: ensure the polar pipeline + masking are actually active."]))
+    if has("unstable", "different each", "changes each", "not reproduc", "seed"):
+        blocks.append(("UNSTABLE (map changes run-to-run)", [
+            "MODEL: fix the seed; train longer; raise EMA/center_momentum; add a "
+            "consolidation loss. Large run-to-run change usually means the classes "
+            "aren't well separated — also revisit preprocessing/K."]))
+    if not blocks:
+        blocks.append(("Describe the symptom (overclustered, collapsed, "
+            "salt-and-pepper, tracks-thickness, unstable)", [
+            "Run score_run + open Interpretation to diagnose; see METHOD_GUIDE "
+            "validity section. Then adjust preprocessing (mask/crop/COM/blur) "
+            "and/or K and retrain, or merge / re-cluster post-hoc."]))
+    out = []
+    for title, fixes in blocks:
+        out.append(title + ":")
+        out += ["  - " + f for f in fixes]
+    out.append("After any change: retrain (or re-cluster for NMF), then score_run "
+               "and re-check spatial coherence + class-average distinctness.")
+    return "\n".join(out)
+
+
+_PARAM_GLOSSARY = {
+    "vmax": "Display contrast cap only (NOT used by training normalization). "
+            "~2 to view rings without saturating; ~5 for a training-style view.",
+    "center_crop_size": "Detector field of view (px): keep the diffraction rings "
+            "inside and cut high-q noise. ~120-150 (e.g. 140), not 256.",
+    "center_mask_radius": "Beam-mask radius (px): zeroes the central (000) disk so "
+            "clustering is driven by scattered intensity, not the beam. Size just "
+            "larger than the central disk + tails.",
+    "polar_mask_cols": "Inner radial columns zeroed in polar space (a beam mask for "
+            "the polar pipeline). ~30-45.",
+    "com_centering": "Re-center each pattern on its center of mass before masking. "
+            "Almost always ON for NBED (handles descan / beam wander).",
+    "polar_size": "Output size of the polar transform (radius/angle bins). ~192.",
+    "k": "Number of prototypes/classes (upper bound; unused ones collapse). ~6 for a "
+            "focused map; large (e.g. 60) for fine structure, then merge.",
+    "epochs": "Training epochs. ~50 is the validated working point here.",
+    "center_momentum": "Teacher centering momentum; ~0.97 helps fight collapse.",
+    "ema": "Teacher EMA schedule (~0.99 -> 0.999); higher = steadier teacher.",
+    "conf_weight_gamma": "Confidence-weighting strength; higher sharpens assignments "
+            "(can over-sharpen).",
+    "lam_spatial": "Spatial-smoothness loss weight; raise to reduce salt-and-pepper "
+            "maps.",
+    "centroid_lambda": "Consolidation loss: pulls a class toward its centroid (fights "
+            "over-splitting).",
+    "cluster1d_lambda": "1-D separation loss between classes (optional regularizer).",
+    "supcon_lambda": "Supervised-contrastive loss weight (needs pair labels).",
+    "theta_shift_student": "theta-roll augmentation range (student) in polar space -> "
+            "rotation invariance.",
+    "theta_shift_teacher": "theta-roll augmentation range (teacher).",
+    "n_components": "NMF: number of non-negative factors. Pick with the auto "
+            "heuristic, then re-cluster to explore K.",
+    "blur_sigma": "Display/augmentation Gaussian blur (px); mild blur suppresses "
+            "shot-noise-driven spurious classes.",
+}
+
+def _explain_parameter(ctx, args) -> str:
+    q = str(args.get("name", "")).strip().lower().replace(" ", "_")
+    if not q:
+        return ("Name a parameter, e.g. center_mask_radius, K, lam_spatial, "
+                "n_components.")
+    for k, v in _PARAM_GLOSSARY.items():
+        if q == k or q in k or k in q:
+            return f"{k}: {v}"
+    return (f"I don't have a vetted glossary entry for '{q}', and I won't guess. "
+            "Try answer_from_docs (METHOD_GUIDE / the manual), or ask about the "
+            "control by its exact GUI label.")
+
+
+def _assess_run(ctx, args) -> str:
+    import json
+    import numpy as np
+    run = args.get("run_dir") or getattr(
+        getattr(ctx.app, "session", None), "run_dir", None)
+    if not run:
+        runs = _find_run_dirs()
+        run = runs[0]["dir"] if runs else None
+    if not run:
+        return "No run to assess — train/eval a run first (no run_dir available)."
+    npz = os.path.join(run, "eval", "inference.npz")
+    if not os.path.exists(npz):
+        return (f"Run '{os.path.basename(run)}' has no cached inference "
+                "(eval/inference.npz). Run infer/Eval first, then I can assess it "
+                "from the ACTUAL assignments (I won't guess without data).")
+    try:
+        d = np.load(npz, allow_pickle=True)
+        assigns = np.asarray(d["assigns"]).ravel()
+        soft = np.asarray(d["soft_probs"]) if "soft_probs" in d else None
+    except Exception as e:
+        return f"Could not read {npz}: {e!r}"
+    N = int(assigns.size)
+    K = int(soft.shape[1]) if (soft is not None and soft.ndim == 2) \
+        else int(assigns.max() + 1)
+    counts = np.bincount(assigns, minlength=K)
+    active = int((counts > 0).sum())
+    frac = counts / max(1, N)
+    largest = float(frac.max())
+    tiny = int(((counts > 0) & (counts < 0.01 * N)).sum())
+    conf = (float(soft.max(1).mean())
+            if (soft is not None and soft.ndim == 2) else None)
+    p = frac[frac > 0]
+    ent = float(-(p * np.log(p)).sum() / np.log(active)) if active > 1 else 0.0
+    coh = None
+    scan = None
+    rs = os.path.join(run, "run_summary.json")
+    try:
+        if os.path.exists(rs):
+            scan = json.load(open(rs, encoding="utf-8")).get("scan_shape")
+    except Exception:
+        scan = None
+    if scan and len(scan) == 2 and int(scan[0]) * int(scan[1]) == N:
+        m = assigns.reshape(int(scan[0]), int(scan[1]))
+        same = int((m[:, 1:] == m[:, :-1]).sum()) + int((m[1:, :] == m[:-1, :]).sum())
+        tot = m[:, 1:].size + m[1:, :].size
+        coh = same / max(1, tot)
+    L = [f"Assessment of '{os.path.basename(run)}' (from cached inference, "
+         f"N={N} px, K_active={active}/{K}):",
+         f"- largest class = {largest*100:.0f}% of pixels; tiny classes (<1%) "
+         f"= {tiny}; balance = {ent:.2f} (1 = perfectly even)"]
+    if conf is not None:
+        L.append(f"- mean assignment confidence = {conf:.2f}")
+    if coh is not None:
+        L.append(f"- spatial coherence (neighbour agreement) = {coh:.2f} "
+                 "(higher = more contiguous)")
+    else:
+        L.append("- spatial coherence: UNKNOWN (scan shape unavailable) — open the "
+                 "class map in Eval to judge contiguity by eye")
+    flags = []
+    if largest > 0.85:
+        flags.append("possible COLLAPSE/under-clustering (one class dominates) — "
+                     "troubleshoot('collapsed')")
+    if tiny >= max(2, active // 3):
+        flags.append("possible OVER-CLUSTERING (several tiny classes) — "
+                     "troubleshoot('overclustered')")
+    if coh is not None and coh < 0.6:
+        flags.append("low spatial coherence / salt-and-pepper — "
+                     "troubleshoot('salt-and-pepper')")
+    if flags:
+        L.append("Flags: " + "; ".join(flags))
+    else:
+        L.append("No strong red flags in these numbers — but numbers alone can't "
+                 "confirm correctness: verify the class-average patterns look "
+                 "physically distinct and the map matches known microstructure.")
+    L.append("(These are heuristic indicators computed from the actual "
+             "assignments, not ground truth.)")
+    return "\n".join(L)
+
+
+def _capabilities(ctx, args) -> str:
+    return (
+        "Here's what I can do for DINO-4DSTEM:\n"
+        "• DATA — load_data (by file path), set_preproc (vmax / crop / beam mask "
+        "/ COM), show_pattern, show_class_map.\n"
+        "• RUN — train, infer, class_average, run_nmf, recluster_nmf, run_acom, "
+        "run_interpretation, score_run.\n"
+        "• ADVISE — suggest_next_step, recommend_params (by sample type), "
+        "troubleshoot (fix a bad result), assess_run (judge a run from real data), "
+        "explain_parameter, answer_from_docs (search the manual + method guide).\n"
+        "• SHOW — show_figure (display a saved image here), show_me_how "
+        "(highlight where to click in the GUI).\n"
+        "• MEMORY — remember / list_knowledge / forget.\n\n"
+        "Try: 'what should I do next?' · 'which method for a layered sample?' · "
+        "'I think it overclustered — how do I fix it?' · 'assess this run' · "
+        "'load <path> then train then score' · 'where is vmax?'\n"
+        "I won't invent paths or numbers — if I'm unsure I'll say so.")
+
+
+def _show_figure(ctx, args) -> str:
+    p = str(args.get("path", "")).strip().strip('"').strip("'")
+    if not p:
+        return "Give a path to an image (.png/.jpg)."
+    if not os.path.exists(p):
+        return (f"No file at '{p}'. I won't guess a path — find one with "
+                "list_runs / get_state or an analysis output folder.")
+    if not p.lower().endswith((".png", ".jpg", ".jpeg", ".gif")):
+        return (f"'{os.path.basename(p)}' isn't a raster image I can show inline "
+                "(png/jpg/gif only).")
+    try:
+        ctx.post_image(p, os.path.basename(p))
+        return f"Displayed {os.path.basename(p)} in the chat."
+    except Exception as e:
+        return f"Could not display image: {e!r}"
+
+
 # ----------------------------------------------------------------------
 # Registry
 # ----------------------------------------------------------------------
@@ -1824,6 +2120,86 @@ def build_registry(app) -> "dict[str, ToolSpec]":
             summary=lambda a: f"run full-dataset ACOM on "
                 f"{a.get('sample','current sample')} with CIF "
                 f"{os.path.basename(str(a.get('cif','?')))}"),
+
+        ToolSpec("suggest_next_step",
+            "Recommend the next action in the GUI workflow based on the current "
+            "state (data loaded? run trained? inference cached? scored?). Use when "
+            "the user asks 'what should I do', 'what next', or how to proceed.",
+            {"type": "object", "properties": {}, "required": []},
+            _suggest_next_step, confirm=False,
+            summary=lambda a: "suggest the next step", display=True),
+
+        ToolSpec("recommend_params",
+            "Recommend which method to use plus preprocessing/training parameters, "
+            "tailored to the sample type. Use when the user asks which "
+            "algorithm/method or what parameters they need. "
+            "sample_type: 'layered' | 'non_layered' | 'auto'.",
+            {"type": "object",
+             "properties": {
+                "sample_type": {"type": "string",
+                    "description": "layered | non_layered | auto"},
+                "goal": {"type": "string",
+                    "description": "what the user wants to achieve (optional)"}},
+             "required": []},
+            _recommend_params, confirm=False,
+            summary=lambda a: "recommend method/params", display=True),
+
+        ToolSpec("troubleshoot",
+            "Diagnose a problem the user reports about their result and give "
+            "concrete data + model fixes. Use when they say the model/map is "
+            "wrong — e.g. over-clustered, collapsed/under-clustered, "
+            "salt-and-pepper, tracks thickness only, or unstable. Pass their "
+            "words as 'symptom'.",
+            {"type": "object",
+             "properties": {
+                "symptom": {"type": "string",
+                    "description": "the problem in the user's words "
+                    "(e.g. 'overclustered', 'one class took everything')"}},
+             "required": ["symptom"]},
+            _troubleshoot, confirm=False,
+            summary=lambda a: "troubleshoot the result", display=True),
+
+        ToolSpec("explain_parameter",
+            "Explain what a GUI / training parameter does and a sensible range, "
+            "from a vetted glossary. Says it doesn't know rather than guessing. "
+            "Use for 'what does X do', 'what should X be'.",
+            {"type": "object",
+             "properties": {"name": {"type": "string",
+                "description": "parameter name, e.g. center_mask_radius, K"}},
+             "required": ["name"]},
+            _explain_parameter, confirm=False,
+            summary=lambda a: f"explain '{a.get('name','?')}'", display=True),
+
+        ToolSpec("assess_run",
+            "Assess a run's quality from its ACTUAL cached inference "
+            "(class balance, largest-class fraction, confidence, spatial "
+            "coherence) and flag over/under-clustering. Reads real data; reports "
+            "what it cannot determine. Use for 'is my model good', 'assess this "
+            "run'. Optional run_dir; defaults to the current/most recent run.",
+            {"type": "object",
+             "properties": {"run_dir": {"type": "string",
+                "description": "run directory (optional; defaults to current)"}},
+             "required": []},
+            _assess_run, confirm=False,
+            summary=lambda a: "assess the run quality", display=True),
+
+        ToolSpec("help",
+            "List what the assistant can do, with example prompts. Use when the "
+            "user asks 'what can you do', 'help', or how to get started.",
+            {"type": "object", "properties": {}, "required": []},
+            _capabilities, confirm=False,
+            summary=lambda a: "show capabilities", display=True),
+
+        ToolSpec("show_figure",
+            "Display a saved image (png/jpg) inline in the chat — e.g. a class "
+            "map, a diffraction pattern, or an NMF/interpretation figure. Pass a "
+            "real file path (find one via list_runs / get_state / output folders).",
+            {"type": "object",
+             "properties": {"path": {"type": "string",
+                "description": "path to a .png/.jpg image to show"}},
+             "required": ["path"]},
+            _show_figure, confirm=False,
+            summary=lambda a: f"show {os.path.basename(str(a.get('path','?')))}"),
     ]
     return {s.name: s for s in specs}
 
@@ -1879,8 +2255,16 @@ def parse_text_tool_calls(text, registry) -> list:
                         args = _json.loads(args)
                     except Exception:
                         args = {}
+                args = args if isinstance(args, dict) else {}
+                # Skip obvious EXAMPLE/placeholder calls (the model often pastes
+                # template snippets) so we don't execute them for real.
+                _ph = ("sample_name", "/path/to", "path/to", "your_", "<",
+                       "example", "run_directory", "cif_file")
+                blob = _json.dumps(args, default=str).lower()
+                if any(t in blob for t in _ph):
+                    continue
                 out.append({"id": f"text_{len(out)}", "name": name,
-                            "arguments": args if isinstance(args, dict) else {}})
+                            "arguments": args})
     return out
 
 

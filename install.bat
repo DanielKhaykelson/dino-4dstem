@@ -6,6 +6,7 @@ REM  Prerequisite: Miniconda or Anaconda installed.
 REM ============================================================
 cd /d "%~dp0"
 set "ENV_NAME=dino4dstem"
+if exist "%~dp0env_name.txt" set /p ENV_NAME=<"%~dp0env_name.txt"
 
 call "%~dp0_find_conda.bat" || ( echo. & pause & exit /b 1 )
 echo Using conda at: %CONDA_BAT%

@@ -100,3 +100,6 @@ desktop.ini
 
 # --- stray logs ---
 *.err
+
+# machine-specific env override
+env_name.txt

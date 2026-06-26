@@ -190,6 +190,31 @@ class PrePanel(ctk.CTkFrame):
             vmax=float(self.vmax.get()),
         )
 
+    def _load_params_to_model(self):
+        """Push current crop / beam-mask / polar-mask / COM into the
+        Training tab (its _sync_from_prepanel pulls from get_pre_kwargs)."""
+        try:
+            tp = getattr(self.winfo_toplevel(), "train", None)
+            if tp is None or not hasattr(tp, "_sync_from_prepanel"):
+                self._load_params_status.configure(
+                    text="(Training tab not available)"); return
+            tp._sync_from_prepanel()
+            # Read back what the Training tab ACTUALLY holds now, so the
+            # transfer is verifiable (and the derived beam mask is explained).
+            def _gv(k):
+                try:
+                    return tp.var[k].get()
+                except Exception:
+                    return "?"
+            self._load_params_status.configure(
+                text=f"Training now uses  crop={_gv('center_crop_size')}, "
+                     f"beam-mask r={_gv('center_mask_radius')} "
+                     f"(= polar_mask//2), polar_mask={_gv('polar_mask_cols')}, "
+                     f"COM={_gv('com_centering')}.  (vmax is display-only — "
+                     f"training normalizes internally.)")
+        except Exception as e:
+            self._load_params_status.configure(text=f"failed: {e}")
+
     def get_loaded_path(self) -> str:
         return self.path
 
@@ -361,6 +386,17 @@ class PrePanel(ctk.CTkFrame):
             font=("Consolas", 9), justify="left",
             text_color=("#444", "#aaa"))
         self._blur_status.pack(anchor="w", padx=10, pady=(0, 4))
+
+        # Push current crop / beam-mask / polar-mask / COM into the Training tab.
+        load_row = ctk.CTkFrame(ctrl, fg_color="transparent")
+        load_row.pack(fill="x", padx=8, pady=(2, 4))
+        ctk.CTkButton(load_row,
+            text="Load parameters to model",
+            width=320,
+            command=self._load_params_to_model).pack(side="left")
+        self._load_params_status = ctk.CTkLabel(ctrl, text="",
+            font=("Consolas", 9), text_color=("#444", "#aaa"))
+        self._load_params_status.pack(anchor="w", padx=10, pady=(0, 4))
 
         # ---- Binning section -----------------------------------------
         # Down-sample the dataset two ways:

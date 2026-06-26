@@ -30,7 +30,8 @@ import threading
 import customtkinter as ctk
 
 from gui_app._ui import btn, COLOR, StatusDot
-from gui_app.chat_backends import OllamaBackend, BackendError
+from gui_app.chat_backends import (OllamaBackend, GeminiBackend, BackendError,
+                                    GEMINI_MODELS, gemini_get_key, gemini_set_key)
 from gui_app import chat_tools
 
 # Safety cap on tool-call rounds per user turn, so a confused model
@@ -41,7 +42,7 @@ MAX_TOOL_ROUNDS = 8
 # Backend / model / device choices surfaced in the dropdowns.  The
 # actual backends are wired in Step 2; these are the labels the user
 # picks from.
-BACKENDS = ["Ollama (local, free)", "Cloud (bring your own key)"]
+BACKENDS = ["Ollama (local, free)", "Gemini (free API key)"]
 OLLAMA_MODELS = ["qwen2.5:7b", "qwen2.5:3b", "qwen2.5:14b"]
 DEVICES = ["GPU", "CPU"]
 
@@ -50,6 +51,52 @@ DEVICES = ["GPU", "CPU"]
 # lack of resources.
 DEFAULT_MODEL = "qwen2.5:7b"
 DEFAULT_DEVICE = "GPU"
+
+_LATEX_SYMBOLS = {
+    r"\approx": "≈", r"\times": "×", r"\cdot": "·", r"\leq": "≤", r"\le": "≤",
+    r"\geq": "≥", r"\ge": "≥", r"\neq": "≠", r"\pm": "±", r"\rightarrow": "→",
+    r"\to": "→", r"\Rightarrow": "⇒", r"\alpha": "α", r"\beta": "β",
+    r"\gamma": "γ", r"\theta": "θ", r"\sigma": "σ", r"\mu": "μ", r"\lambda": "λ",
+    r"\eta": "η", r"\Delta": "Δ", r"\sum": "Σ", r"\sqrt": "√", r"\infty": "∞",
+    r"\partial": "∂", r"\nabla": "∇", r"\approxeq": "≈",
+}
+
+
+def _clean_markup(s: str) -> str:
+    """Render LLM LaTeX/markdown to readable plain text for the Tk transcript
+    (which doesn't render either).
+
+    IMPORTANT: LaTeX symbol conversion happens ONLY inside math delimiters
+    (\\(..\\), \\[..\\], $..$), so Windows paths like D:\\tools\\out — which
+    contain backslash sequences like \\to — are never corrupted.
+    """
+    if not s:
+        return s
+    import re
+
+    def _conv(m):
+        inner = m.group(1)
+        for k, v in _LATEX_SYMBOLS.items():
+            inner = inner.replace(k, v)
+        inner = re.sub(
+            r"\\(?:text|mathrm|mathbf|mathit|operatorname|boldsymbol)\{([^{}]*)\}",
+            r"\1", inner)
+        inner = re.sub(r"[_^]\{([^{}]*)\}", r"\1", inner)
+        inner = re.sub(r"\\([A-Za-z]+)", r"\1", inner)  # safe: math span only
+        return inner.strip()
+
+    s = re.sub(r"\\\[(.+?)\\\]", _conv, s, flags=re.S)
+    s = re.sub(r"\\\((.+?)\\\)", _conv, s, flags=re.S)
+    s = re.sub(r"\$\$(.+?)\$\$", _conv, s, flags=re.S)
+    s = re.sub(r"\$([^$\n]+?)\$", _conv, s, flags=re.S)
+    # drop any leftover (unmatched) math delimiters — safe, not in paths
+    for d in (r"\(", r"\)", r"\[", r"\]"):
+        s = s.replace(d, "")
+    # markdown: **bold**, `code`, ### headers -> plain (none occur in paths)
+    s = re.sub(r"\*\*([^*]+)\*\*", r"\1", s)
+    s = re.sub(r"`([^`]+)`", r"\1", s)
+    s = re.sub(r"(?m)^\s*#{1,6}\s*", "", s)
+    return s
 
 
 class ChatPanel(ctk.CTkFrame):
@@ -60,9 +107,10 @@ class ChatPanel(ctk.CTkFrame):
     call sibling panels.
     """
 
-    def __init__(self, parent, app=None):
+    def __init__(self, parent, app=None, registry=None):
         super().__init__(parent)
         self.app = app
+        self._ext_registry = registry   # optional: standalone/headless toolset
 
         # Conversation state (the message list handed to the backend).
         # Kept here so the worker thread can read/append it.  Holds the
@@ -72,10 +120,13 @@ class ChatPanel(ctk.CTkFrame):
         self._busy = False          # an agent turn is in flight
         self._cancel = False        # cancel flag the loop polls
         self._assistant_open = False  # streaming an assistant bubble?
+        self._assistant_buf = ""      # raw streamed text (cleaned on close)
+        self._assistant_start = None  # transcript index where the bubble began
 
         # Tool registry: {name: ToolSpec}.  Built once; reads live state
         # through `app` at call time.
-        self.registry = chat_tools.build_registry(app)
+        self.registry = (registry if registry is not None
+                         else chat_tools.build_registry(app))
         # Tools the user has chosen to allow for the rest of the session
         # (confirm dialog "allow for session" checkbox).  Default: empty
         # -> every tool is gated, per the confirmed policy.
@@ -89,12 +140,15 @@ class ChatPanel(ctk.CTkFrame):
         # Context object handed to every tool fn (worker thread).  Widget
         # access funnels through call_ui / post / status so tools never
         # touch Tk directly.
+        # Keep PhotoImage refs alive (Tk drops un-referenced images).
+        self._img_refs: list = []
         self._tool_ctx = chat_tools.ToolContext(
             app=app,
             call_ui=self._call_ui,
             post=self._post,
             status=lambda t: self._after(self.set_status, t),
-            cancel=lambda: self._cancel)
+            cancel=lambda: self._cancel,
+            post_image=lambda p, cap=None: self._after(self._post_image, p, cap))
 
         # Cross-thread UI marshaling.  Tkinter is NOT thread-safe and
         # even `widget.after(...)` raises if called off the Tk thread, so
@@ -121,6 +175,7 @@ class ChatPanel(ctk.CTkFrame):
         self._build_transcript()
         self._build_statusline()
         self._build_inputbar()
+        self._build_suggestions()
 
     def _build_topbar(self):
         bar = ctk.CTkFrame(self)
@@ -170,6 +225,14 @@ class ChatPanel(ctk.CTkFrame):
         self.dot_conn = StatusDot(bar, label="backend")
         self.dot_conn.set("idle", "not connected yet (Step 2)")
         self.dot_conn.pack(side="left", padx=(4, 0))
+
+        # Feedback on the last answer → learned KB (👎 asks what was wrong).
+        ctk.CTkButton(bar, text="👎", width=34,
+                      command=self._on_feedback_down).pack(side="right", padx=2)
+        ctk.CTkButton(bar, text="👍", width=34,
+                      command=self._on_feedback_up).pack(side="right", padx=(8, 2))
+        ctk.CTkButton(bar, text="🔑 Gemini key", width=110,
+                      command=self._on_set_gemini_key).pack(side="right", padx=8)
 
     def _build_transcript(self):
         # CTkTextbox wraps a tkinter Text widget — gives us easy
@@ -234,6 +297,50 @@ class ChatPanel(ctk.CTkFrame):
         self.btn_cancel.grid(row=0, column=2, padx=(0, 6), pady=6)
         self.btn_cancel.configure(state="disabled")
 
+    def _build_suggestions(self):
+        """A row of one-click example prompts (helps discovery)."""
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.grid(row=4, column=0, sticky="ew", padx=8, pady=(0, 6))
+        for label in ("What can you do?", "What should I do next?",
+                      "Assess this run", "Fix overclustering"):
+            ctk.CTkButton(
+                row, text=label, height=24,
+                fg_color=("#E5E5E5", "#3A3A3A"),
+                text_color=("#222", "#DDD"), hover_color=("#D5D5D5", "#4A4A4A"),
+                command=lambda t=label: self._send_prompt(t)
+            ).pack(side="left", padx=3)
+
+    def _send_prompt(self, text):
+        if self._busy:
+            return
+        self.entry.delete(0, "end")
+        self.entry.insert(0, text)
+        self._on_send()
+
+    # ---- feedback (thumbs) → learned KB ----
+    def _on_feedback_up(self):
+        self.set_status("👍 thanks — glad that helped.")
+
+    def _on_feedback_down(self):
+        from tkinter import simpledialog
+        last = next((m.get("content", "") for m in reversed(self.messages)
+                     if m.get("role") == "assistant"), "")
+        what = simpledialog.askstring(
+            "Correct me",
+            "What was wrong, or what should I do instead?", parent=self)
+        if not what:
+            return
+        try:
+            import gui_app.chat_kb as kb
+            note = "User correction: " + what
+            if last:
+                note += f"  (re: {last[:160]})"
+            kb.add_note("correction", note)
+            self.add_message(
+                "system", "Thanks — saved that correction; I'll apply it.")
+        except Exception as e:
+            self.add_message("system", f"(couldn't save feedback: {e})")
+
     # ------------------------------------------------------------------
     # Transcript helpers (always called on the Tk thread; the worker
     # marshals through self.after).
@@ -255,7 +362,7 @@ class ChatPanel(ctk.CTkFrame):
             self._write(text + "\n", "user")
         elif role == "assistant":
             self._write("\nAssistant\n", "assistant_name")
-            self._write(text + "\n", "assistant")
+            self._write(_clean_markup(text) + "\n", "assistant")
         elif role == "tool":
             self._write("  • " + text + "\n", "tool")
         else:
@@ -283,7 +390,8 @@ class ChatPanel(ctk.CTkFrame):
             "interpret the classes, and even show you where to click.\n"
             f"Loaded data: {sample}   |   current run: {run}\n"
             "Load a cube with the 📂 Load data button (or tell me a file "
-            "path), then just ask in plain English.")
+            "path), then just ask in plain English.\n"
+            "New here? Ask \"what can you do?\" (or click a suggestion below).")
 
     # ------------------------------------------------------------------
     # Startup readiness probe (the "loading" state on open).  Lightweight:
@@ -322,21 +430,109 @@ class ChatPanel(ctk.CTkFrame):
             self._after(self.add_message, "system",
                         "Ollama isn't installed yet — send a message and "
                         "I'll download + set it up for you.")
+        # Hardware-aware model pick (14b if there's room, else downgrade + note).
+        try:
+            model, note = self._auto_pick_model()
+            if model and note:
+                self._after(self.var_model.set, model)
+                if up:
+                    try:
+                        have = any(str(m).startswith(model.split(":")[0]) and
+                                   model in str(m) for m in models)
+                    except Exception:
+                        have = False
+                    if not have:
+                        sz = {"qwen2.5:14b": "~9 GB", "qwen2.5:7b": "~4.7 GB",
+                              "qwen2.5:3b": "~2 GB"}.get(model, "")
+                        note += f" Will download {sz} on first message."
+                self._after(self.add_message, "system", note)
+        except Exception:
+            pass
         self._after(self.set_status, "")
+
+    def _auto_pick_model(self):
+        """Return (model, note): measure free VRAM (GPU) or RAM (CPU) and pick
+        the largest qwen2.5 that should fit. Conservative — downgrades when
+        unsure rather than risking an OOM."""
+        import shutil, subprocess
+        try:
+            device = self.var_device.get()
+        except Exception:
+            device = "GPU"
+        free_gb, where = None, ""
+        if device == "GPU" and shutil.which("nvidia-smi"):
+            try:
+                r = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=memory.free",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=6)
+                free_gb = float(r.stdout.strip().splitlines()[0]) / 1024.0
+                where = "GPU VRAM"
+            except Exception:
+                free_gb = None
+        if free_gb is None:
+            try:
+                import psutil
+                free_gb = psutil.virtual_memory().available / 1e9
+                where = "system RAM"
+            except Exception:
+                return DEFAULT_MODEL, ""
+        if where == "GPU VRAM":
+            model = ("qwen2.5:14b" if free_gb >= 11 else
+                     "qwen2.5:7b" if free_gb >= 6 else "qwen2.5:3b")
+        else:  # CPU: 14b is painfully slow — only with lots of RAM
+            model = ("qwen2.5:14b" if free_gb >= 24 else
+                     "qwen2.5:7b" if free_gb >= 10 else "qwen2.5:3b")
+        note = f"Auto-selected {model} ({free_gb:.0f} GB free {where})."
+        if model != "qwen2.5:14b":
+            note += " (Not enough free memory for 14b — using a smaller model.)"
+        elif where == "system RAM":
+            note += " Note: 14b on CPU is slow."
+        return model, note
 
     # ------------------------------------------------------------------
     # Event handlers (skeleton behavior)
     # ------------------------------------------------------------------
     def _on_backend_change(self, choice):
-        if choice.startswith("Cloud"):
-            self.dd_model.configure(values=["claude / openai (Settings)"])
-            self.var_model.set("claude / openai (Settings)")
-            self.set_status("Cloud backend selected — key entry comes "
-                            "in a later step.")
+        if choice.startswith("Gemini"):
+            self.dd_model.configure(values=GEMINI_MODELS)
+            self.var_model.set(GEMINI_MODELS[0])
+            if gemini_get_key():
+                self.set_status("Gemini selected — using your saved API key.")
+            else:
+                self.set_status("Gemini selected — click '🔑 Gemini key' to "
+                                "paste a free key (aistudio.google.com/apikey).")
+                self.add_message("system",
+                    "To use Gemini: click '🔑 Gemini key' and paste a free key "
+                    "from https://aistudio.google.com/apikey . It's stored "
+                    "locally (never uploaded). Ollama (local) stays free + "
+                    "offline if you prefer.")
         else:
             self.dd_model.configure(values=OLLAMA_MODELS)
             self.var_model.set(DEFAULT_MODEL)
             self.set_status("")
+
+    def _on_set_gemini_key(self):
+        from tkinter import simpledialog
+        cur = gemini_get_key()
+        prompt = ("Paste your Google Gemini API key (free at "
+                  "aistudio.google.com/apikey):")
+        if cur:
+            prompt = "Key is set. Paste a new key to replace it (or Cancel):"
+        key = simpledialog.askstring("Gemini API key", prompt, parent=self,
+                                     show="*")
+        if key is None:
+            return
+        try:
+            gemini_set_key(key)
+            if key.strip():
+                self.add_message("system",
+                    "Saved Gemini key (stored locally under runs/_gui). "
+                    "Set the backend to 'Gemini (free API key)' to use it.")
+            else:
+                self.add_message("system", "Cleared the Gemini key.")
+        except Exception as e:
+            self.add_message("system", f"(couldn't save key: {e})")
 
     def _on_autorun_toggle(self):
         # Runs on the Tk thread; mirror into the plain bool the worker reads.
@@ -357,11 +553,15 @@ class ChatPanel(ctk.CTkFrame):
                        ("All files", "*.*")])
         if not path:
             return
+        # Standalone assistant (no full GUI / no pre panel): load via chat.
+        pre = getattr(self.app, "pre", None)
+        if pre is None:
+            self._send_prompt(f"load {path}")
+            return
         self.add_message("system", f"loading {path} …")
         try:
-            self.app.pre._path_var.set(path)
-            self.app.pre._load()
-            key = self.app.pre.get_sample_key()
+            pre._path_var.set(path)
+            pre._load()
             self.add_message("system",
                 f"loaded {os.path.basename(path)} — it's now the active "
                 f"dataset.")
@@ -410,8 +610,11 @@ class ChatPanel(ctk.CTkFrame):
         t.start()
 
     def _make_backend(self, cfg):
-        if cfg["backend"].startswith("Cloud"):
-            return None   # cloud wired in a later step
+        if cfg["backend"].startswith("Gemini"):
+            model = cfg["model"]
+            if not str(model).startswith("gemini"):
+                model = GEMINI_MODELS[0]
+            return GeminiBackend(model=model, api_key=gemini_get_key())
         return OllamaBackend(model=cfg["model"], device=cfg["device"])
 
     def _system_prompt(self) -> str:
@@ -423,6 +626,20 @@ class ChatPanel(ctk.CTkFrame):
             "You are the in-app assistant for DINO-4DSTEM: it trains a "
             "self-supervised DINO classifier on 4D-STEM electron "
             "diffraction data and analyses the class maps.\n\n"
+            "HONESTY (highest priority): NEVER fabricate file paths, parameter "
+            "values, metrics, or results. State a number only if you read it "
+            "from a tool (get_state / assess_run / score_run / answer_from_docs) "
+            "in this conversation. If you are not sure, SAY SO plainly and offer "
+            "to check — 'I'm not certain, let me look' — rather than guessing. A "
+            "hedged 'I don't know' is always better than a confident wrong "
+            "answer. You may give expert judgement, but label it as judgement, "
+            "not fact.\n"
+            "LANGUAGE: always reply in ENGLISH, unless the user writes to you "
+            "in another language (then match theirs). Never switch language on "
+            "your own.\n"
+            "TOOL vs TEXT: in a single turn, EITHER write an answer OR call a "
+            "tool — never both. If you call a tool, output no other text that "
+            "turn; wait for the result, then answer.\n\n"
             "HOW TO ACT:\n"
             "- Drive the app ONLY by calling the provided functions/tools. "
             "NEVER write a tool call as JSON or a code block in your reply, "
@@ -431,6 +648,18 @@ class ChatPanel(ctk.CTkFrame):
             "the app pops its own confirmation. Just call the tool.\n"
             "- Call ONE tool, wait for its result, then continue. Don't "
             "narrate a multi-step plan or repeat yourself.\n"
+            "- Once a tool's result lets you answer, REPLY IN PLAIN TEXT "
+            "immediately and STOP — never call the same tool twice, and don't "
+            "keep calling tools after you already have what you need.\n"
+            "- If the user asks what you can do / for an overview / says they're "
+            "new, call help ONCE and then stop (its output is shown to them "
+            "directly — don't restate or summarize it).\n"
+            "- Loading is BY FILE PATH ONLY. There are NO named samples/sample "
+            "configurations — NEVER ask the user for a sample name. If nothing "
+            "is loaded, tell them to click 📂 Load data or give a file path.\n"
+            "- NEVER put JSON, ```code```, or pseudo-calls like train(sample=…) "
+            "in your reply. Speak in plain English; to act, use the real tool "
+            "call mechanism.\n"
             "- When the user asks an OPEN-ENDED question ('what can I do?', "
             "'any other ways?', 'show me something'), briefly LIST the "
             "relevant options instead of pushing a single one.\n"
@@ -465,7 +694,35 @@ class ChatPanel(ctk.CTkFrame):
             "words (e.g. 'vmax', 'run NMF', 'train', 'class map'). Do this "
             "EVERY time, even if repeated, and NEVER reply with written "
             "directions instead. (If instead they want YOU to perform the "
-            "action, call the action tool, e.g. run_nmf / train.)\n\n"
+            "action, call the action tool, e.g. run_nmf / train.)\n"
+            "- ADVISING / 'what should I do next', 'which method or "
+            "algorithm', 'what parameters', 'how do I proceed': you ARE a "
+            "4D-STEM + ML + clustering expert. Call suggest_next_step (reads "
+            "the current state) and/or recommend_params (tailored by sample "
+            "type: layered vs non-layered), and consult answer_from_docs "
+            "about METHOD_GUIDE, then give a SHORT concrete recommendation "
+            "grounded in those tools — not generic ML advice. After finishing "
+            "an action, briefly offer the logical next step. Prefer the "
+            "project's validated recipes.\n"
+            "- FIXING A BAD RESULT: when the user says the result is wrong — "
+            "'overclustered', 'collapsed', 'one class took everything', "
+            "'salt-and-pepper', 'tracks thickness', 'unstable' — call "
+            "troubleshoot(symptom=their words) and relay the concrete data + "
+            "model fixes; offer to apply one (e.g. lower K and retrain, or "
+            "merge/re-cluster post-hoc).\n"
+            "- JUDGING A RUN: for 'is my model good / assess this run', call "
+            "assess_run (it reads the real cached inference and reports what it "
+            "cannot determine — do not invent a verdict). For 'what does this "
+            "parameter do / what should it be', call explain_parameter.\n"
+            "- CAPABILITIES: if the user asks what you can do / for help / how to "
+            "start, call help.\n"
+            "- SHOWING IMAGES: to display a saved figure (class map, pattern, "
+            "NMF/interpretation output) inline, call show_figure(path) with a "
+            "REAL path (find one via list_runs / get_state / the analysis output "
+            "folder). Never invent a path.\n"
+            "- COMPOUND requests ('load X then train then score'): carry out the "
+            "steps in order, calling each tool in turn across rounds — don't stop "
+            "after the first step.\n\n"
             "DOMAIN TIPS (4D-STEM — STARTING points; verify on the data then "
             "refine):\n"
             "- vmax: contrast only; ~2 to view (show halo+rings without "
@@ -524,7 +781,9 @@ class ChatPanel(ctk.CTkFrame):
         # Auto-provision: start the server if installed, download+launch
         # the installer if not, and pull the model if missing.  Progress
         # shows in the status line; Cancel aborts a long download.
-        self._after(self.dot_conn.set, "busy", "preparing Ollama…")
+        _prep = ("contacting Gemini…" if cfg["backend"].startswith("Gemini")
+                 else "preparing Ollama…")
+        self._after(self.dot_conn.set, "busy", _prep)
         ok, msg = backend.provision(
             on_progress=lambda t: self._after(self.set_status, t),
             cancel=lambda: self._cancel)
@@ -544,6 +803,12 @@ class ChatPanel(ctk.CTkFrame):
         schemas = chat_tools.tool_schemas(self.registry)
 
         try:
+            import json as _json
+            executed = {}          # sig -> output (dedup within this turn)
+            last_out = None        # last useful tool output (answer fallback)
+            repeats = 0
+            produced_text = False
+            self._turn_displayed = False
             for _round in range(MAX_TOOL_ROUNDS):
                 if self._cancel:
                     self._post("system", "(cancelled)")
@@ -562,7 +827,10 @@ class ChatPanel(ctk.CTkFrame):
                 if not calls and text:
                     tcalls = chat_tools.parse_text_tool_calls(
                         text, self.registry)
-                    if tcalls:
+                    # Only auto-run a tool parsed from text when the message is
+                    # basically JUST that call — never execute example/pseudo
+                    # snippets embedded in an explanation.
+                    if tcalls and len(text.strip()) < 240:
                         calls = tcalls
                         from_text = True
 
@@ -580,20 +848,51 @@ class ChatPanel(ctk.CTkFrame):
                     if text.strip():
                         self.messages.append({"role": "assistant",
                                               "content": text})
+                        produced_text = True
                     break
 
                 # Execute each tool call, append its result, loop again.
                 for c in calls:
                     if self._cancel:
                         break
+                    try:
+                        sig = c["name"] + "|" + _json.dumps(
+                            c.get("arguments") or {}, sort_keys=True,
+                            default=str)
+                    except Exception:
+                        sig = c["name"]
+                    if sig in executed:
+                        # Same tool+args already ran this turn — don't repeat;
+                        # push the model to give its final answer.
+                        repeats += 1
+                        self._after(self.add_message, "tool",
+                                    f"↳ {c['name']} (repeat — skipped)")
+                        convo.append({"role": "tool", "name": c["name"],
+                            "content": ("You ALREADY called this with the same "
+                            "arguments; its result is above. Do NOT call any "
+                            "tool again — write your final answer to the user "
+                            "now in plain text.")})
+                        continue
                     out = self._execute_tool(c, force_confirm=from_text)
+                    executed[sig] = out
+                    last_out = out
                     convo.append({"role": "tool",
                                   "name": c["name"],
                                   "content": out})
-            else:
-                self._post("system",
-                           f"(stopped after {MAX_TOOL_ROUNDS} tool "
-                           f"rounds without a final answer)")
+                if repeats >= 2:
+                    break
+
+            # Turn ended without a plain-text answer: surface the last tool
+            # output as the answer rather than a bare "(stopped)" note.
+            if not produced_text and not self._cancel and not self._turn_displayed:
+                if last_out and not last_out.startswith("(Already shown"):
+                    self.messages.append({"role": "assistant",
+                                          "content": last_out})
+                    self._post("assistant", last_out)
+                else:
+                    self._post("system",
+                               f"(stopped after {MAX_TOOL_ROUNDS} tool rounds "
+                               "without a final answer)")
         except BackendError as e:
             self._post("system", f"Backend error: {e}")
         except Exception as e:
@@ -641,7 +940,15 @@ class ChatPanel(ctk.CTkFrame):
         except Exception as e:
             out = f"ERROR running {name}: {e!r}"
         self._after(self.set_status, "")
-        return str(out)
+        out = str(out)
+        # Informational tools: show their curated text DIRECTLY to the user so
+        # a weak model can't mangle/ignore it; tell the model not to repeat it.
+        if getattr(spec, "display", False) and not out.startswith("ERROR"):
+            self._after(self.add_message, "assistant", out)
+            self._turn_displayed = True
+            return ("(Already shown to the user verbatim — do NOT repeat it. "
+                    "Add at most one short follow-up sentence, or just stop.)")
+        return out
 
     # ------------------------------------------------------------------
     # Blocking run-on-Tk-thread helper (used by tools via ToolContext).
@@ -789,6 +1096,34 @@ class ChatPanel(ctk.CTkFrame):
     def _post(self, role, text):
         self._after(self.add_message, role, text)
 
+    def _post_image(self, path, caption=None):
+        """Embed an image inline in the transcript (Tk thread). Degrades to
+        a text line if Pillow is missing or the file can't be read."""
+        try:
+            from PIL import Image, ImageTk
+        except Exception:
+            self.add_message("system", f"(install Pillow to show images) {path}")
+            return
+        try:
+            img = Image.open(path)
+            maxw = 420
+            if img.width > maxw:
+                img = img.resize((maxw, int(img.height * maxw / img.width)))
+            photo = ImageTk.PhotoImage(img)
+            self._img_refs.append(photo)
+            tb = self.transcript._textbox
+            self.transcript.configure(state="normal")
+            if caption:
+                tb.insert("end", f"\n{caption}\n", "system")
+            else:
+                tb.insert("end", "\n")
+            tb.image_create("end", image=photo)
+            tb.insert("end", "\n")
+            self.transcript.configure(state="disabled")
+            self.transcript.see("end")
+        except Exception as e:
+            self.add_message("system", f"(couldn't show image {path}: {e})")
+
     def _stream_token(self, tok):
         """Backend calls this from the worker thread per token."""
         self._after(self._append_token, tok)
@@ -796,9 +1131,13 @@ class ChatPanel(ctk.CTkFrame):
     def _append_token(self, tok):
         # Runs on the Tk thread.  Opens the assistant bubble lazily so we
         # don't print an empty header when a turn is pure tool-calling.
+        tb = self.transcript._textbox
         if not self._assistant_open:
             self._write("\nAssistant\n", "assistant_name")
             self._assistant_open = True
+            self._assistant_buf = ""
+            self._assistant_start = tb.index("end-1c")
+        self._assistant_buf += tok
         self._write(tok, "assistant")
 
     def _end_assistant(self):
@@ -806,8 +1145,24 @@ class ChatPanel(ctk.CTkFrame):
 
     def _close_assistant(self):
         if self._assistant_open:
+            # Re-render the streamed text cleaned (LaTeX/markdown -> plain),
+            # since we couldn't clean it token-by-token while streaming.
+            buf = getattr(self, "_assistant_buf", "")
+            start = getattr(self, "_assistant_start", None)
+            cleaned = _clean_markup(buf)
+            if buf and start and cleaned != buf:
+                try:
+                    tb = self.transcript._textbox
+                    self.transcript.configure(state="normal")
+                    tb.delete(start, "end-1c")
+                    tb.insert(start, cleaned, "assistant")
+                    self.transcript.configure(state="disabled")
+                except Exception:
+                    pass
             self._write("\n", "assistant")
             self._assistant_open = False
+            self._assistant_buf = ""
+            self._assistant_start = None
 
     # ------------------------------------------------------------------
     # Busy / cancel UI state

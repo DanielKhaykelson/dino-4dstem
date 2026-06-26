@@ -29,7 +29,8 @@ matplotlib.use("Agg")
 import numpy as np
 
 from assistant_io import new_output_dir, save_fig, save_array_png, write_summary
-from gui_app.chat_backends import OllamaBackend, BackendError
+from gui_app.chat_backends import (OllamaBackend, GeminiBackend, BackendError,
+                                    GEMINI_MODELS, gemini_get_key, gemini_set_key)
 from gui_app import chat_tools as ct
 from gui_app.chat_tools import ToolSpec, ToolContext
 
@@ -354,13 +355,22 @@ def build_headless_registry():
         "get_state": _h_get_state,
         "answer_from_docs": _h_answer_from_docs,
         "list_runs": lambda ctx, a: ct._list_runs(ctx, a),
+        "recommend_params": lambda ctx, a: ct._recommend_params(ctx, a),
+        "suggest_next_step": lambda ctx, a: ct._suggest_next_step(ctx, a),
+        "troubleshoot": lambda ctx, a: ct._troubleshoot(ctx, a),
+        "explain_parameter": lambda ctx, a: ct._explain_parameter(ctx, a),
+        "assess_run": lambda ctx, a: ct._assess_run(ctx, a),
+        "help": lambda ctx, a: ct._capabilities(ctx, a),
+        "show_figure": lambda ctx, a: (
+            f"(headless) figure saved at: {a.get('path','?')}"),
     }
     reg = {}
     for name, fn in H.items():
         if name in P:
             sp = P[name]
             reg[name] = ToolSpec(sp.name, sp.description, sp.parameters,
-                                 fn, confirm=False, summary=sp.summary)
+                                 fn, confirm=False, summary=sp.summary,
+                                 display=getattr(sp, "display", False))
         else:
             reg[name] = ToolSpec(name, name, {"type": "object",
                                  "properties": {}, "required": []}, fn,
@@ -377,7 +387,14 @@ _SYS = (
     "data. There are no named samples — data is loaded by file path. Be "
     "concise. Tools: load_data, run_nmf, infer, class_average, "
     "run_interpretation, run_acom, score_run, get_state, list_runs, "
-    "answer_from_docs. For NMF, multiple methods: methods=['kmeans','aglo',"
+    "answer_from_docs, recommend_params, suggest_next_step, troubleshoot, "
+    "explain_parameter, assess_run. For method/parameter advice call "
+    "recommend_params; for a bad result call troubleshoot; to judge a run call "
+    "assess_run (reads real data). You are a 4D-STEM + ML expert, but NEVER "
+    "fabricate numbers/paths — if unsure, say so. Always reply in ENGLISH "
+    "unless the user writes in another language. In one turn either answer OR "
+    "call a tool, never both. "
+    "For NMF, multiple methods: methods=['kmeans','aglo',"
     "'hdbscan','fcm'] or 'all'. NMF is model-free; infer/interpretation/"
     "acom need a trained run_dir.")
 
@@ -425,7 +442,14 @@ def main():
     ap = argparse.ArgumentParser(description="Headless DINO-4DSTEM assistant")
     ap.add_argument("data", nargs="?", help="cube file to load on start")
     ap.add_argument("--task", help="run one task and exit")
-    ap.add_argument("--model", default="qwen2.5:7b")
+    ap.add_argument("--backend", choices=["ollama", "gemini"], default="ollama",
+                    help="LLM backend (default: ollama, local/free)")
+    ap.add_argument("--model", default=None,
+                    help="model name (default: qwen2.5:7b for ollama, "
+                         "gemini-2.0-flash for gemini)")
+    ap.add_argument("--gemini-key", default=None,
+                    help="Gemini API key (else uses saved key or "
+                         "GEMINI_API_KEY env)")
     args = ap.parse_args()
 
     app = _HeadlessApp()
@@ -436,8 +460,15 @@ def main():
                       status=lambda t: print("   …", t, flush=True),
                       cancel=lambda: cancel[0])
 
-    backend = OllamaBackend(model=args.model)
-    print("Preparing local model…", flush=True)
+    if args.backend == "gemini":
+        if args.gemini_key:
+            gemini_set_key(args.gemini_key)
+        backend = GeminiBackend(model=args.model or GEMINI_MODELS[0],
+                                api_key=gemini_get_key())
+        print("Using Gemini…", flush=True)
+    else:
+        backend = OllamaBackend(model=args.model or "qwen2.5:7b")
+        print("Preparing local model…", flush=True)
     ok, msg = backend.provision(on_progress=lambda t: print("   " + t,
                                                             flush=True))
     if not ok:
