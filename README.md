@@ -1,46 +1,53 @@
 # DINO-4DSTEM
 
-Self-supervised classification of 4D-STEM diffraction data, with a desktop GUI,
-a natural-language assistant, and an NMF / ACOM / interpretation pipeline.
-
-## Quick start (Windows)
-
-1. Install **Miniconda** (one time): https://docs.conda.io/projects/miniconda/
-2. Download this repo, then double-click **`install.bat`** (creates the env).
-3. Copy-paste this line in the project folder to make desktop icons:
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File make_desktop_shortcuts.ps1
-   ```
-4. Launch from the **DINO-4DSTEM GUI** / **Assistant** desktop icons.
-
-Full instructions: [INSTALL.md](INSTALL.md) · Project overview: [PROJECT_SUMMARY.md](PROJECT_SUMMARY.md)
+**Find the distinct regions in your 4D-STEM data — automatically.**
+Point it at a scan, and it groups the diffraction patterns into structurally
+distinct classes (phases, crystallinity, texture) and shows them on a map — no
+labels, no hand-tuning required. There's a desktop app and a plain-English
+assistant that can run the whole thing for you.
 
 ---
 
-## Project history (early workspace notes)
+## ⬇️ Get it (Windows)
 
-Originally a fresh-session workspace for the DINO-SR + Contrastive Head experiment.
+**1. Download** the latest bundle:
+👉 **[Download dino-4dstem.zip](https://github.com/DanielKhaykelson/dino-4dstem/releases/latest)**
+(then right-click → *Extract All*)
 
-## What's in here
+**2. Install** — double-click **`install.bat`** (one time; sets everything up).
 
-| file | purpose |
-|------|---------|
-| `SPEC.md` | Verbatim spec extracted from `dino sr contrastive prompt.pdf`. The source of truth for requirements. |
-| `NEW_SESSION_PROMPT.md` | Hand-off prompt for the fresh session. Contains the spec + Q&A clarifications + environment info + concrete task list. **Start here.** |
-| `dino sr contrastive prompt.pdf` | Original PDF spec (reference). |
-| `dino_sr_ablation.py` | Copy of the current DINO-SR L2/L1 trainer. Contains `AblationDINOModelSR`, `train_ablation()`, `PolarTransform`, `PolarMaskLeft`, `get_ablation_transforms()`. Edit in place. |
-| `dino_sr_fixed.py` | Copy of shared model components (`CenterMask`, `Prototypes`, `ProjectionHead`, aug transforms, helper metrics). Imported by `dino_sr_ablation.py`. Edit if needed; prefer not to. |
-| `eval_all.py` | Copy. Contains `LoadPRZ` dataset + `SAMPLES` registry with local paths. |
-| `elliptical_correction.py` | Copy. `EllipticalCorrection` + PACBED + `fit_ellipse_affine`. Contrastive spec doesn't require this — keep for optional reuse. |
-| `scorecard.py` | Copy. Existing scorecard metrics (`conf_score`, `effk_score`, etc.). Contrastive spec's eval metrics are different (NMI, KNN purity, intra/inter cosine, etc.) — build those fresh. Keep scorecard for optional reuse during debugging. |
-| `run_with_scorecard.py` | Copy. Existing CLI entry point. The new session should fork a new entry point (e.g. `run_contrastive.py`) rather than editing this. |
+**3. Make icons** — open the folder, type `powershell` in the address bar, and paste:
+```powershell
+powershell -ExecutionPolicy Bypass -File make_desktop_shortcuts.ps1
+```
 
-## Rules (from spec)
+**4. Run** — double-click the **DINO-4DSTEM** icon on your Desktop. 🎉
 
-- **Edit only the copies in this subfolder.** Do not touch the originals in `../`.
-- All edits stay here, keep `# %%` Jupytext cell structure if producing notebook-style files, `bbox_inches='tight'` on figure saves, tqdm-only progress.
-- `contrastive_lambda=0` + `theta_roll_aug=False` must bit-exactly reproduce a pure-DINO L1 run.
+> First time? The bundle includes **`GETTING_STARTED.docx`** — a picture-free,
+> click-by-click walkthrough. You need **Miniconda** installed first (free):
+> https://www.anaconda.com/download/success
 
-## Hand-off
+---
 
-Read `NEW_SESSION_PROMPT.md` first. Everything needed to execute is there or referenced from there.
+## What you get
+
+- **GUI app** — load data, preprocess, train, and view the class map + the average
+  diffraction pattern of each class.
+- **Assistant** — ask in plain English ("load this file, then train", "is my model
+  good?", "I think it over-clustered — how do I fix it?"). Runs locally and free
+  (or with a free Google Gemini key for speed without a GPU).
+- **Comparisons** — NMF and ACOM baselines, plus an interpretation report that
+  explains *why* the classes split.
+
+Bring your own data (`.prz` / `.npz` / `.h5` master / `.npy`). Nothing is uploaded.
+
+---
+
+## Learn more
+
+- 📘 **How to use it:** [`GETTING_STARTED.docx`](GETTING_STARTED.docx) · detailed [`INSTALL.md`](INSTALL.md)
+- 🧭 **What it does / results:** [`PROJECT_SUMMARY.md`](PROJECT_SUMMARY.md)
+- 🧠 **The methods explained (NMF, DINO, clustering, PCA):** [`docs/assistant/CONCEPTS.md`](docs/assistant/CONCEPTS.md)
+- 📕 **Full manual:** [`docs/USER_MANUAL.pdf`](docs/USER_MANUAL.pdf)
+
+Windows only. Companion code for ongoing 4D-STEM / electron-diffraction research.
