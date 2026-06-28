@@ -217,15 +217,10 @@ class PostHocPanel(ctk.CTkFrame):
         ctk.CTkButton(top, text="Load run dir…", width=110,
                        command=self._load_dir_dialog).pack(side="left",
                                                              padx=4)
-        ctk.CTkLabel(top, text="dataset:").pack(side="left", padx=(8, 1))
+        # The dataset comes from the Dataset tab at the top of the app —
+        # no dataset dropdown / cube browser here (that caused a run-vs-cube
+        # deadlock). Load the run dir; the cube follows the Dataset tab.
         self._sample_var = ctk.StringVar(value="")
-        self._sample_menu = ctk.CTkOptionMenu(top, variable=self._sample_var,
-                            values=sorted(SAMPLES.keys()),
-                            width=180,
-                            command=lambda _v: self._on_sample_change())
-        self._sample_menu.pack(side="left", padx=2)
-        ctk.CTkButton(top, text="Browse cube…", width=100,
-                       command=self._browse_dataset).pack(side="left", padx=2)
         self._info = ctk.CTkLabel(top, text="(no run linked)",
                                     font=("Consolas", 10), anchor="w",
                                     justify="left")
@@ -885,21 +880,24 @@ class PostHocPanel(ctk.CTkFrame):
             self.link_run(d, first, native_sample=None)
             self._info.configure(
                 text=f"linked run: {d}\nMULTI-dataset run ({len(multi_keys)} "
-                      f"cubes) — NOT auto-linked to one dataset.\n"
-                      f"Pick a dataset in the 'dataset' dropdown to analyze "
-                      f"it (showing «{first}»).")
+                      f"cubes) — analyzing «{first}».")
             return
         if sample_inferred and sample_inferred in SAMPLES:
             sample = sample_inferred
             self._sample_var.set(sample)
         if sample not in SAMPLES:
-            messagebox.showerror("sample",
-                "Pick a sample from the dropdown first; couldn't "
-                "infer it from the run dir. (Run dirs from the "
-                "current GUI session also include a "
-                "_train_kwargs.json with `_sample_config`; check that "
-                "this file exists and has a path field.)")
-            return
+            # Couldn't infer the run's dataset — use the cube loaded in the
+            # Dataset tab (top of the app).
+            pre = getattr(self.app, "pre", None)
+            k = pre.get_sample_key() if pre is not None else None
+            if k and k in SAMPLES:
+                sample = k
+                self._sample_var.set(sample)
+            else:
+                messagebox.showerror("No dataset",
+                    "Load a cube in the Dataset tab (top of the window) "
+                    "first, then load the run dir here.")
+                return
         self.link_run(d, sample)
 
     def _ensure_inference(self) -> bool:
