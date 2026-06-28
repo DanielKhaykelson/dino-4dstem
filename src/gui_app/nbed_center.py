@@ -126,11 +126,18 @@ def nbed_center_cube(cube_in,
     centers : (Ny, Nx, 2) float32 array
         Per-pattern (cy, cx) centres in raw-pattern pixel coordinates.
     """
-    cube_in = np.asanyarray(cube_in)
-    if cube_in.ndim != 4:
+    # Do NOT np.asanyarray(cube_in) the whole cube — lazy loaders (h5 master,
+    # zip-offset memmap) expose .shape + [y, x] indexing but materialize to a
+    # 0-d object array under np.asanyarray. Read the shape directly; the
+    # per-pattern loop below indexes cube_in[y, x] which all backends support.
+    shape = getattr(cube_in, "shape", None)
+    if shape is None:
+        cube_in = np.asanyarray(cube_in)
+        shape = cube_in.shape
+    if len(shape) != 4:
         raise ValueError(f"cube_in must be 4D (Ny, Nx, H, W); got "
-                          f"shape {cube_in.shape}")
-    Ny, Nx, H, W = cube_in.shape
+                          f"shape {tuple(shape)}")
+    Ny, Nx, H, W = (int(s) for s in shape)
     if not dest_path.lower().endswith(".npy"):
         raise ValueError("dest_path must end in .npy")
 
