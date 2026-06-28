@@ -4441,12 +4441,29 @@ class PostHocPanel(ctk.CTkFrame):
                           f"(N={N}, dim={embeds.shape[1]} → 2).")
 
     # ---- BF / HAADF ----
+    def _active_cube_path(self):
+        """Cube to analyze: the run-linked cube if present, else the cube
+        loaded in the Dataset tab (top of the app)."""
+        if self._cube_path:
+            return self._cube_path
+        pre = getattr(self.app, "pre", None)
+        try:
+            p = pre.get_loaded_path() if pre is not None else None
+        except Exception:
+            p = None
+        return p or None
+
     def _ensure_BF_HAADF(self):
         if self._BF is not None and self._HA is not None:
             return True
+        cube_path = self._active_cube_path()
+        if not cube_path:
+            messagebox.showinfo("No dataset",
+                "Load a cube in the Dataset tab (top) first.")
+            return False
         self._set_status("computing BF + HAADF (~10–30 s) …")
         try:
-            cube = _open_lazy(self._cube_path)
+            cube = _open_lazy(cube_path)
             Ny, Nx, H, W = cube.shape
             r_BF = 0.06 * H
             r_in = 0.18 * H; r_out = 0.45 * H
@@ -4507,9 +4524,9 @@ class PostHocPanel(ctk.CTkFrame):
         'Compute map' integrates that annulus at every probe position to give
         the virtual annular image on the right.
         """
-        if not getattr(self, "_cube_path", None):
+        if not self._active_cube_path():
             messagebox.showinfo("Annular detector",
-                "Load a run / cube first (Load run dir… or Browse cube…).")
+                "Load a cube in the Dataset tab (top) first.")
             return
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_tkagg import (
@@ -4562,7 +4579,7 @@ class PostHocPanel(ctk.CTkFrame):
         def _load_cube():
             if st["cube"] is None:
                 status.configure(text="opening cube…"); win.update_idletasks()
-                st["cube"] = _open_lazy(self._cube_path)
+                st["cube"] = _open_lazy(self._active_cube_path())
                 st["shape"] = tuple(st["cube"].shape)
                 H = st["shape"][2]
                 if not r_var.get():
