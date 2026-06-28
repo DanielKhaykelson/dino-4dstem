@@ -4564,6 +4564,17 @@ class PostHocPanel(ctk.CTkFrame):
         ctk.CTkButton(ctrl, text="Compute map", width=110,
                       fg_color=("#2D7A2D", "#1F7A1F"),
                       command=lambda: _compute_map()).pack(side="left", padx=2)
+        # Frame slider (single-frame background) — drag to scrub frames.
+        frame_row = ctk.CTkFrame(win, fg_color="transparent")
+        frame_row.pack(side="top", fill="x", padx=8, pady=(2, 0))
+        ctk.CTkLabel(frame_row, text="frame:").pack(side="left", padx=(2, 6))
+        frame_slider = ctk.CTkSlider(
+            frame_row, from_=0, to=1, number_of_steps=1,
+            command=lambda v: (idx_var.set(str(int(float(v)))),
+                               _update_view() if bg_var.get() == "single frame"
+                               else None))
+        frame_slider.pack(side="left", fill="x", expand=True, padx=4)
+        frame_slider.set(0)
         status = ctk.CTkLabel(win, text="", anchor="w")
         status.pack(side="bottom", fill="x", padx=8, pady=(0, 4))
 
@@ -4586,6 +4597,12 @@ class PostHocPanel(ctk.CTkFrame):
                     r_var.set(f"{0.25 * H:.0f}")
                 if not dr_var.get():
                     dr_var.set(f"{0.06 * H:.0f}")
+                N = int(st["shape"][0]) * int(st["shape"][1])
+                try:
+                    frame_slider.configure(to=max(1, N - 1),
+                                           number_of_steps=max(1, N - 1))
+                except Exception:
+                    pass
             return st["cube"]
 
         def _vals():
