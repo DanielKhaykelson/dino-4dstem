@@ -39,7 +39,7 @@ powershell -ExecutionPolicy Bypass -File make_desktop_shortcuts.ps1
 - **Comparisons** — NMF and ACOM baselines, plus an interpretation report that
   explains *why* the classes split.
 
-Bring your own data (`.prz` / `.npz` / `.h5` master / `.npy`). Nothing is uploaded.
+Bring your own data (`.prz` / `.npz` / `.h5` master / `.npy` / `.dm4`). Nothing is uploaded.
 
 ---
 

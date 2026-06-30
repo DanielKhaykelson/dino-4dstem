@@ -209,6 +209,9 @@ def peek_cube_info(path):
             return tuple(mm.shape), mm.dtype, True
         shape, dtype, stored = _npz_member_header(path, "data")
         return tuple(shape), dtype, stored
+    if pl.endswith((".dm4", ".dm3")):
+        arr = _open_dm4(path)            # memmap — cheap header peek
+        return tuple(arr.shape), arr.dtype, True
     raise ValueError("peek_cube_info: unsupported (use h5 peek for hdf5)")
 
 
@@ -295,6 +298,63 @@ def _npz_member_memmap(path, member="data"):
                      shape=shape, order="F" if fortran else "C")
 
 
+def _open_dm4(path, scan_shape=None):
+    """Lazy loader for Gatan .dm4 / .dm3 4D-STEM cubes via ncempy.
+
+    Returns a 4D array (Ny, Nx, H, W) — a memmap (zero-RAM) when the file
+    allows it, else a full read. 4D datasets are used directly; 3D
+    (N_frames, H, W) datasets are reshaped using `scan_shape` (or a square
+    scan if it divides evenly). Dataset 0 is often a thumbnail, so we pick
+    the largest >=3D dataset in the file.
+    """
+    from ncempy.io.dm import fileDM
+    dmf = fileDM(path, on_memory=False)
+    best, best_size = None, -1
+    for i in range(int(getattr(dmf, "numObjects", 1))):
+        try:
+            mm = dmf.getMemmap(i)
+        except Exception:
+            mm = None
+        if mm is None:
+            continue
+        if getattr(mm, "ndim", 0) >= 3 and int(getattr(mm, "size", 0) or 0) > best_size:
+            best, best_size = mm, int(mm.size)
+    if best is None:
+        from ncempy.io.dm import dmReader
+        for ds in range(int(getattr(dmf, "numObjects", 1))):
+            try:
+                a = np.asarray(dmReader(path, dSetNum=ds)["data"])
+            except Exception:
+                continue
+            if a.ndim >= 3:
+                best = a
+                break
+        if best is None:
+            raise ValueError(
+                f"{os.path.basename(path)}: no 3D/4D dataset found in the "
+                f"dm file.")
+    arr = best
+    if arr.ndim == 4:
+        return arr
+    if arr.ndim == 3:
+        N, H, W = arr.shape
+        if scan_shape is None:
+            s = int(round(N ** 0.5))
+            if s * s == N:
+                scan_shape = (s, s)
+            else:
+                raise ValueError(
+                    f"3D dm dataset of length {N}: scan_shape (Ny, Nx) is "
+                    f"required (could not infer a square scan).")
+        Ny, Nx = int(scan_shape[0]), int(scan_shape[1])
+        if Ny * Nx != N:
+            raise ValueError(
+                f"scan_shape {Ny}x{Nx} = {Ny * Nx} != {N} frames in dm file.")
+        return arr.reshape(Ny, Nx, H, W)
+    raise ValueError(
+        f"{os.path.basename(path)}: unexpected dm ndim={arr.ndim}.")
+
+
 def open_lazy_cube(path, scan_shape=None,
                      apply_dectris_corrections: bool = False):
     """Universal lazy 4D-cube loader.  Returns a numpy memmap
@@ -338,6 +398,8 @@ def open_lazy_cube(path, scan_shape=None,
                                 scan_shape=scan_shape, corrections=corr)
         f.close()
         raise ValueError(f"unexpected dataset ndim={ndim}")
+    if path.lower().endswith((".dm4", ".dm3")):
+        return _open_dm4(path, scan_shape=scan_shape)
     if path.lower().endswith((".prz", ".npz")):
         base, _ = os.path.splitext(path)
         cand = base + ".cube.npy"

@@ -730,10 +730,11 @@ class PrePanel(ctk.CTkFrame):
     def _browse(self):
         p = filedialog.askopenfilename(
             filetypes=[("Cube files",
-                          "*.prz *.npz *.npy *.h5 *.hdf5"),
+                          "*.prz *.npz *.npy *.h5 *.hdf5 *.dm4 *.dm3"),
                         ("PRZ/NPZ", "*.prz *.npz"),
                         ("Numpy", "*.npy"),
                         ("HDF5", "*.h5 *.hdf5"),
+                        ("Gatan DM", "*.dm4 *.dm3"),
                         ("All", "*.*")])
         if p:
             self._path_var.set(p); self._load()
