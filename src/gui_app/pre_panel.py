@@ -787,6 +787,28 @@ class PrePanel(ctk.CTkFrame):
         if not p or not os.path.exists(p):
             messagebox.showerror("Error", f"Not found: {p}")
             return
+        # Gatan .dm4/.dm3: confirm we detected a 4D-STEM cube (and surface any
+        # sanity warnings) before committing — these files can also hold EELS
+        # spectrum images, image stacks, etc.
+        if p.lower().endswith((".dm4", ".dm3")):
+            try:
+                from data import dm4_probe
+                info = dm4_probe(p)
+            except Exception as e:
+                messagebox.showerror(
+                    "DM file",
+                    f"Could not read {os.path.basename(p)} as a 4D-STEM cube:\n"
+                    f"{e}")
+                return
+            sh = info["shape4d"]
+            msg = (f"Detected a 4D-STEM cube in {os.path.basename(p)}:\n\n"
+                   f"   Ny × Nx × H × W = {sh[0]} × {sh[1]} × {sh[2]} × {sh[3]}\n"
+                   f"   dtype = {info['dtype']}  (raw {info['raw_ndim']}D)\n")
+            if info["warnings"]:
+                msg += "\n⚠ " + "\n⚠ ".join(info["warnings"]) + "\n"
+            msg += "\nLoad this as a 4D-STEM cube?"
+            if not messagebox.askyesno("Confirm DM load", msg):
+                return
         # For 3D HDF5 masters (Eiger / Dectris), peek the dataset shape
         # and pop a scan-shape dialog. For 4D HDF5 / .prz / .npy, no
         # prompt is needed.

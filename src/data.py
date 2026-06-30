@@ -298,19 +298,15 @@ def _npz_member_memmap(path, member="data"):
                      shape=shape, order="F" if fortran else "C")
 
 
-def _open_dm4(path, scan_shape=None):
-    """Lazy loader for Gatan .dm4 / .dm3 4D-STEM cubes via ncempy.
-
-    Returns a 4D array (Ny, Nx, H, W) — a memmap (zero-RAM) when the file
-    allows it, else a full read. 4D datasets are used directly; 3D
-    (N_frames, H, W) datasets are reshaped using `scan_shape` (or a square
-    scan if it divides evenly). Dataset 0 is often a thumbnail, so we pick
-    the largest >=3D dataset in the file.
-    """
+def _dm4_pick(path):
+    """Open a Gatan .dm4/.dm3 and return (array, index, is_eels) for the
+    largest >=3D dataset (skips the 2D thumbnail). `array` is a lazy memmap
+    when possible. `is_eels` is a best-effort flag from the dm metadata."""
     from ncempy.io.dm import fileDM
     dmf = fileDM(path, on_memory=False)
-    best, best_size = None, -1
-    for i in range(int(getattr(dmf, "numObjects", 1))):
+    n = int(getattr(dmf, "numObjects", 1))
+    best, best_size, best_i = None, -1, -1
+    for i in range(n):
         try:
             mm = dmf.getMemmap(i)
         except Exception:
@@ -318,22 +314,36 @@ def _open_dm4(path, scan_shape=None):
         if mm is None:
             continue
         if getattr(mm, "ndim", 0) >= 3 and int(getattr(mm, "size", 0) or 0) > best_size:
-            best, best_size = mm, int(mm.size)
+            best, best_size, best_i = mm, int(mm.size), i
     if best is None:
         from ncempy.io.dm import dmReader
-        for ds in range(int(getattr(dmf, "numObjects", 1))):
+        for ds in range(n):
             try:
                 a = np.asarray(dmReader(path, dSetNum=ds)["data"])
             except Exception:
                 continue
             if a.ndim >= 3:
-                best = a
+                best, best_i = a, ds
                 break
         if best is None:
             raise ValueError(
                 f"{os.path.basename(path)}: no 3D/4D dataset found in the "
                 f"dm file.")
-    arr = best
+    # Best-effort: detect EELS / spectrum datasets (energy axis) so we don't
+    # silently treat them as diffraction cubes.
+    is_eels = False
+    try:
+        meta = dmf.getMetadata(best_i)
+        blob = str(meta).lower()
+        is_eels = ("eels" in blob) or ("ev" in str(meta.get("EELS", "")).lower()
+                                       if isinstance(meta, dict) else False)
+    except Exception:
+        is_eels = False
+    return best, best_i, is_eels
+
+
+def _dm4_to_4d(arr, scan_shape=None, path=""):
+    """Coerce a dm 3D/4D dataset to (Ny, Nx, H, W) (memmap-preserving)."""
     if arr.ndim == 4:
         return arr
     if arr.ndim == 3:
@@ -353,6 +363,39 @@ def _open_dm4(path, scan_shape=None):
         return arr.reshape(Ny, Nx, H, W)
     raise ValueError(
         f"{os.path.basename(path)}: unexpected dm ndim={arr.ndim}.")
+
+
+def _dm4_shape_warnings(shape4d, is_eels):
+    """Sanity warnings for a candidate (Ny, Nx, H, W) dm dataset."""
+    w = []
+    H, W = int(shape4d[2]), int(shape4d[3])
+    if is_eels:
+        w.append("dm metadata mentions EELS — this may be a spectrum image, "
+                 "not a 4D-STEM diffraction cube.")
+    if min(H, W) < 16:
+        w.append(f"detector frame is small ({H}×{W}) — may not be diffraction.")
+    if max(H, W) > 4 * max(1, min(H, W)):
+        w.append(f"detector frame is very non-square ({H}×{W}) — unusual for "
+                 f"4D-STEM.")
+    return w
+
+
+def dm4_probe(path, scan_shape=None):
+    """Inspect a .dm4/.dm3 WITHOUT loading frame data. Returns
+    {shape4d, dtype, raw_ndim, warnings} so the GUI can confirm before load."""
+    arr, _idx, is_eels = _dm4_pick(path)
+    shape4d = tuple(_dm4_to_4d(arr, scan_shape=scan_shape, path=path).shape)
+    return {"shape4d": shape4d, "dtype": np.dtype(arr.dtype),
+            "raw_ndim": int(arr.ndim),
+            "warnings": _dm4_shape_warnings(shape4d, is_eels)}
+
+
+def _open_dm4(path, scan_shape=None):
+    """Lazy loader for Gatan .dm4/.dm3 4D-STEM cubes via ncempy. Returns a
+    4D array (Ny, Nx, H, W) — a memmap (zero-RAM) when possible. Picks the
+    largest >=3D dataset; reshapes 3D (N,H,W) by scan_shape (or square)."""
+    arr, _idx, _eels = _dm4_pick(path)
+    return _dm4_to_4d(arr, scan_shape=scan_shape, path=path)
 
 
 def open_lazy_cube(path, scan_shape=None,
