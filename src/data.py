@@ -838,6 +838,11 @@ class LoadPRZ:
             self.Nx = cube_view.Nx; self.Ny = cube_view.Ny
             self.H  = cube_view.H;  self.W  = cube_view.W
             self.flat = cube_view
+        elif used_path.lower().endswith((".dm4", ".dm3")):
+            # Gatan files can't be np.load'd — use the dm reader (lazy memmap).
+            cube = _open_dm4(used_path, scan_shape=scan_shape)
+            self.Nx, self.Ny, self.H, self.W = cube.shape
+            self.flat = cube.reshape(-1, self.H, self.W)
         else:
             if used_path.lower().endswith(".npy"):
                 cube = np.load(used_path, mmap_mode='r',
