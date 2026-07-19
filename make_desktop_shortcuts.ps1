@@ -8,8 +8,10 @@ $proj    = $PSScriptRoot
 $desktop = [Environment]::GetFolderPath("Desktop")
 $ws      = New-Object -ComObject WScript.Shell
 
-# Try to locate the env's python.exe for a recognizable icon (optional).
+# Icon: prefer our own pixel-dino, fall back to the env's python.exe.
 $icon    = $null
+$dinoIco = Join-Path $proj "assets\dino.ico"
+if (Test-Path $dinoIco) { $icon = $dinoIco }
 $envName = "dino4dstem"
 $roots = @(
   "$env:USERPROFILE\anaconda3", "$env:USERPROFILE\Anaconda3",
@@ -18,9 +20,11 @@ $roots = @(
   "$env:LOCALAPPDATA\miniforge3", "$env:PROGRAMDATA\anaconda3",
   "$env:PROGRAMDATA\miniconda3", "C:\Anaconda3", "C:\Miniconda3"
 )
-foreach ($r in $roots) {
-  $p = Join-Path $r "envs\$envName\python.exe"
-  if (Test-Path $p) { $icon = $p; break }
+if (-not $icon) {
+  foreach ($r in $roots) {
+    $p = Join-Path $r "envs\$envName\python.exe"
+    if (Test-Path $p) { $icon = $p; break }
+  }
 }
 
 function New-AppShortcut($name, $bat) {

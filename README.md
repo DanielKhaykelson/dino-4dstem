@@ -14,14 +14,15 @@ assistant that can run the whole thing for you.
 👉 **[Download dino-4dstem.zip](https://github.com/DanielKhaykelson/dino-4dstem/releases/latest)**
 (then right-click → *Extract All*)
 
-**2. Install** — double-click **`install.bat`** (one time; sets everything up).
+**2. Install the environment** — double-click **`install_1_environment.bat`**
+(one time, several minutes).
 
-**3. Make icons** — open the folder, type `powershell` in the address bar, and paste:
-```powershell
-powershell -ExecutionPolicy Bypass -File make_desktop_shortcuts.ps1
-```
+**3. Install DINO-4DSTEM** — double-click **`install_2_dino4dstem.bat`**
+(fast; makes the Desktop icons). Updating the code later? Just re-run this one.
 
-**4. Run** — double-click the **DINO-4DSTEM** icon on your Desktop. 🎉
+**4. Run** — double-click the **DINO-4DSTEM** icon on your Desktop. 🦕
+
+> In a hurry: `install.bat` runs steps 2 and 3 back-to-back.
 
 > First time? The bundle includes **`GETTING_STARTED.docx`** — a picture-free,
 > click-by-click walkthrough. You need **Miniconda** installed first (free):

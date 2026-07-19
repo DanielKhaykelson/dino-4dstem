@@ -63,6 +63,12 @@ MgNaPHI_paper/
 *.gif
 *.svg
 
+# EXCEPTION: assets/ holds the app's own icon (shipped with the app, not a
+# regenerated figure) -- keep it tracked despite the blanket rules above.
+!assets/
+!assets/*.png
+!assets/*.ico
+
 # --- Run outputs / logs / generated reports ---
 runs/
 logs/

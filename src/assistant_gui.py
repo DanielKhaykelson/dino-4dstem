@@ -51,6 +51,11 @@ def main():
         root = ctk.CTk()
         root.title("DINO-4DSTEM Assistant")
         root.geometry("920x700")
+        try:
+            from gui_dino4dstem import set_app_icon
+            set_app_icon(root)
+        except Exception:
+            pass
 
         app = _HeadlessApp()                      # session holder, no panels
         panel = ChatPanel(root, app=app,
