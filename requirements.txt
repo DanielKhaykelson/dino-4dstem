@@ -34,7 +34,10 @@ torch==2.7.1
 torchvision==0.22.1
 
 # --- 4D-STEM / microscopy ---
-py4DSTEM==0.14.19
+# NOTE: the reference dev machine has 0.14.19, but that build was never
+# published to PyPI (0.14.18 is the newest there), so pip installs fail on
+# ==0.14.19.  0.14.18 is the same 0.14 API and is what we install.
+py4DSTEM==0.14.18
 ase==3.28.0
 
 # --- GUI / reporting ---
