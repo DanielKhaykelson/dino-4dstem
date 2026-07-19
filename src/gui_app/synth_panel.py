@@ -38,6 +38,54 @@ from gui_app.tooltip import add_help_button
 
 
 # =========================================================================
+# 0. Built-in materials + crystallinity presets
+# =========================================================================
+# Common crystals buildable with ASE (no CIF file needed).  Each entry is
+# an ``ase_builder`` dict {fn, args, kwargs} passed to the same builder
+# dispatch used for user ASE rows.  TMDs (mx2) need a `vacuum` so the cell
+# has a c-axis; cubic metals/semiconductors need cubic=True for an
+# orthogonal conventional cell (abTEM refuses non-orthogonal cells).
+PREDEFINED_CRYSTALS: "dict[str, dict]" = {
+    # TMDs: mx2 builds one layer; vacuum=1.5 sets the c-axis so tiling in
+    # Z stacks layers at the realistic 2H van-der-Waals spacing (~6.15 Å)
+    # → a proper few-layer 3D film (Tile Z = number of layers), NOT an
+    # isolated monolayer.  (True 2H AB stacking needs a bulk CIF.)
+    "WS2 (2H layered)":  {"fn": "mx2", "args": [],
+        "kwargs": {"formula": "WS2", "kind": "2H", "a": 3.153,
+                    "thickness": 3.14, "vacuum": 1.5}},
+    "MoS2 (2H layered)": {"fn": "mx2", "args": [],
+        "kwargs": {"formula": "MoS2", "kind": "2H", "a": 3.16,
+                    "thickness": 3.17, "vacuum": 1.54}},
+    "Si (diamond)":   {"fn": "bulk", "args": ["Si"],
+        "kwargs": {"crystalstructure": "diamond", "a": 5.43, "cubic": True}},
+    "Cu (fcc)":       {"fn": "bulk", "args": ["Cu"],
+        "kwargs": {"crystalstructure": "fcc", "a": 3.61, "cubic": True}},
+    "Au (fcc)":       {"fn": "bulk", "args": ["Au"],
+        "kwargs": {"crystalstructure": "fcc", "a": 4.08, "cubic": True}},
+    "Al (fcc)":       {"fn": "bulk", "args": ["Al"],
+        "kwargs": {"crystalstructure": "fcc", "a": 4.05, "cubic": True}},
+    "Fe (bcc)":       {"fn": "bulk", "args": ["Fe"],
+        "kwargs": {"crystalstructure": "bcc", "a": 2.87, "cubic": True}},
+    "NaCl (rocksalt)": {"fn": "bulk", "args": ["NaCl"],
+        "kwargs": {"crystalstructure": "rocksalt", "a": 5.64, "cubic": True}},
+}
+
+# Crystallinity levels → (static/thermal displacement sigma in Å,
+# n frozen-phonon configs to average).  Averaging over configs turns
+# the sharp Bragg speckle into smooth diffuse scattering; larger sigma
+# damps the Bragg peaks (Debye-Waller) and raises the diffuse background.
+#   crystalline : sharp spots (no disorder averaging)
+#   partial     : weakened spots + mild diffuse (thermal-diffuse look)
+#   amorphous   : spots washed out, diffuse rings dominate
+CRYSTALLINITY_LEVELS: "dict[str, tuple[float, int]]" = {
+    "crystalline": (0.0,  1),
+    "partial":     (0.12, 4),
+    "amorphous":   (0.60, 8),
+}
+CRYSTALLINITY_ORDER = ("crystalline", "partial", "amorphous")
+
+
+# =========================================================================
 # 1. Structure description (one per grain "phase")
 # =========================================================================
 class _Structure:
@@ -62,6 +110,7 @@ class _Structure:
     __slots__ = ("kind", "cif_path", "ase_builder", "label",
                   "zone_axes", "tile_xyz", "thickness_crop_A",
                   "tilt_mrad_range", "in_plane_range_deg",
+                  "crystallinity",
                   # legacy slot kept so unpickled / old structures
                   # don't AttributeError; never read.
                   "tilt_range_deg")
@@ -72,8 +121,12 @@ class _Structure:
                   thickness_crop_A=0.0,
                   tilt_mrad_range=0.0,
                   in_plane_range_deg=(0.0, 360.0),
+                  crystallinity="crystalline",
                   tilt_range_deg=0.0):  # legacy kwarg — ignored
         self.kind = kind
+        # Crystallinity domain level (crystalline | partial | amorphous).
+        cl = str(crystallinity or "crystalline").lower()
+        self.crystallinity = cl if cl in CRYSTALLINITY_LEVELS else "crystalline"
         self.cif_path = cif_path
         self.ase_builder = ase_builder
         self.label = label or "?"
@@ -114,7 +167,8 @@ class _Structure:
                  else f"thickness = {nz}·c_unit (full)")
         tilt = (f" beam_tilt≤{self.tilt_mrad_range:g}mrad"
                   if self.tilt_mrad_range > 0 else "")
-        return f"{src}  ZA={zas}  tile=({nx},{ny},{nz})  {thk}{tilt}"
+        cry = f"  [{self.crystallinity}]"
+        return f"{src}  ZA={zas}  tile=({nx},{ny},{nz})  {thk}{tilt}{cry}"
 
 
 class _SimAborted(Exception):
@@ -187,14 +241,18 @@ class SynthPanel(ctk.CTkFrame):
         self.conv_mrad = ctk.DoubleVar(value=1.0)     # convergence semi-angle
         self.det_size = ctk.IntVar(value=256)         # detector pixel grid
         self.det_max_mrad = ctk.DoubleVar(value=80.0)
-        self.dose_e_A2 = ctk.DoubleVar(value=1e3)     # 0 → noise off
-        self.engine = ctk.StringVar(value="PRISM")    # PRISM | multislice
+        self.dose_e_A2 = ctk.DoubleVar(value=1e3)     # 0 → no scaling/noise
+        # Noise mode: "shot" = Poisson-sample at the dose (realistic shot
+        # noise, SNR ~ sqrt(counts)); "exact" = deterministic pattern
+        # scaled to the same electron count but with NO Poisson sampling.
+        self.noise_mode = ctk.StringVar(value="shot")
+        self.engine = ctk.StringVar(value="finite")   # finite | multislice | PRISM
         self.layout = ctk.StringVar(value="block")    # block | voronoi
         self.n_voronoi_seeds = ctk.IntVar(value=4)    # Phase 2: Voronoi grains (low default → safer)
         # Potential gpts — was 512 (fine, but each SMatrix ≈ 100s of MB).
         # 256 cuts memory ~4× with negligible visual difference for
         # validation cubes.  Exposed in the UI for paper-grade runs.
-        self.pot_gpts = ctk.IntVar(value=256)
+        self.pot_gpts = ctk.IntVar(value=512)   # 512 suits the finite engine
         # Vacuum padding around the rotated atom cluster (Å).  Used by
         # the NaPHI-style ``_build_atoms_vacuum_box``: any tilt/ZA is
         # handled by rotating the atoms inside an orthogonal box that
@@ -206,7 +264,8 @@ class SynthPanel(ctk.CTkFrame):
         self.out_basename = ctk.StringVar(value="phantom")
 
         # Validation state
-        self._val_classmap_choice = ctk.StringVar(value="A — phase only")
+        self._val_classmap_choice = ctk.StringVar(
+            value="main — phase + orientation + crystallinity")
         self._val_status = None
 
         self._build()
@@ -218,11 +277,16 @@ class SynthPanel(ctk.CTkFrame):
     # UI
     # ===================================================================
     def _build(self):
-        body = ctk.CTkFrame(self)
-        body.pack(fill="both", expand=True, padx=6, pady=6)
+        # Two sub-tabs: build the phantom (Simulate) vs score a model
+        # against it (Validate).  Validate gets its own full-height tab
+        # so the confusion-matrix figure isn't squeezed.
+        tabs = ctk.CTkTabview(self)
+        tabs.pack(fill="both", expand=True, padx=6, pady=6)
+        sim_tab = tabs.add("Simulate")
+        val_tab = tabs.add("Validate")
 
         # --- top: structure list -------------------------------------
-        top = ctk.CTkFrame(body)
+        top = ctk.CTkFrame(sim_tab)
         top.pack(side="top", fill="x", pady=(0, 6))
         head = ctk.CTkFrame(top, fg_color="transparent")
         head.pack(fill="x", padx=8, pady=(6, 2))
@@ -240,6 +304,10 @@ class SynthPanel(ctk.CTkFrame):
                        fg_color=("#2D7A2D", "#1F7A1F"),
                        command=self._add_from_cif).pack(side="left",
                                                             padx=2)
+        ctk.CTkButton(btn_row, text="+ built-in crystal…", width=155,
+                       fg_color=("#2D7A2D", "#1F7A1F"),
+                       command=self._add_from_builtin).pack(side="left",
+                                                               padx=2)
         ctk.CTkButton(btn_row, text="+ from ASE builder…", width=160,
                        fg_color=("#2D7A2D", "#1F7A1F"),
                        command=self._add_from_ase).pack(side="left",
@@ -250,6 +318,13 @@ class SynthPanel(ctk.CTkFrame):
         ctk.CTkButton(btn_row, text="Remove selected", width=140,
                        command=self._remove_selected).pack(side="left",
                                                                 padx=2)
+        ctk.CTkButton(btn_row, text="🔬 View 3D", width=95,
+                       command=self._view_structure).pack(side="left",
+                                                              padx=2)
+        ctk.CTkButton(btn_row, text="⚡ WS₂ example", width=140,
+                       fg_color=("#3A5380", "#2A3F63"),
+                       command=self._load_ws2_example).pack(side="right",
+                                                               padx=2)
 
         list_holder = ctk.CTkFrame(top)
         list_holder.pack(fill="x", padx=8, pady=(2, 6))
@@ -262,7 +337,7 @@ class SynthPanel(ctk.CTkFrame):
         self._listbox.config(yscrollcommand=sb.set)
 
         # --- middle: scan / abTEM params ----------------------------
-        mid = ctk.CTkFrame(body)
+        mid = ctk.CTkFrame(sim_tab)
         mid.pack(side="top", fill="x", pady=(0, 6))
         ctk.CTkLabel(mid, text="Scan & acquisition",
                        font=("Segoe UI", 12, "bold")).pack(
@@ -281,12 +356,44 @@ class SynthPanel(ctk.CTkFrame):
         self._row_pair(grid, 4, "Dose (e/Å²)", self.dose_e_A2,
                          "Out basename", self.out_basename)
 
+        noise_row = ctk.CTkFrame(mid, fg_color="transparent")
+        noise_row.pack(fill="x", padx=8, pady=(0, 4))
+        ctk.CTkLabel(noise_row, text="Electrons:").pack(side="left")
+        ctk.CTkSegmentedButton(
+            noise_row, values=["shot", "exact"],
+            variable=self.noise_mode, width=180).pack(side="left", padx=6)
+        add_help_button(noise_row,
+            "How the dose is applied to each diffraction pattern.  Each "
+            "pattern is scaled to  Dose × step²  electrons (electrons per "
+            "probe position), then:\n\n"
+            "  shot  — Poisson-SAMPLE at that count → realistic shot "
+            "noise.  Higher dose ⇒ cleaner (SNR ~ √counts).  Low dose or "
+            "weak Bragg peaks ⇒ visibly grainy.\n\n"
+            "  exact — use the EXACT expected counts with NO Poisson "
+            "sampling → a clean, noise-free pattern at the same "
+            "brightness.  Use this when you want the ideal pattern "
+            "regardless of dose.\n\n"
+            "Set Dose = 0 to skip scaling/noise entirely (raw normalized "
+            "intensity).").pack(side="left", padx=4)
+
         sel_row = ctk.CTkFrame(mid, fg_color="transparent")
         sel_row.pack(fill="x", padx=8, pady=(0, 6))
         ctk.CTkLabel(sel_row, text="Engine:").pack(side="left")
         ctk.CTkOptionMenu(sel_row, variable=self.engine,
-                            values=["PRISM", "multislice"],
-                            width=120).pack(side="left", padx=4)
+                            values=["PRISM", "multislice", "finite"],
+                            width=130).pack(side="left", padx=4)
+        add_help_button(sel_row,
+            "Simulation engine:\n\n"
+            "  multislice — scanned probe per pixel, projection='infinite' "
+            "(fast, but finite-crystal features smear into streaks/'diffuse' "
+            "between spots).\n\n"
+            "  finite — projection='finite' + ONE high-quality diffraction "
+            "pattern per grain, broadcast to that grain's pixels.  Removes "
+            "the inter-spot streaks (clean spots), and is often faster since "
+            "it's one sim per grain, not one per pixel.  Use gpts≥512 for "
+            "sharpest spots.\n\n"
+            "  PRISM — scattering-matrix scan (experimental here).").pack(
+            side="left", padx=4)
         ctk.CTkLabel(sel_row, text="Layout:").pack(side="left",
                                                         padx=(12, 4))
         ctk.CTkOptionMenu(sel_row, variable=self.layout,
@@ -320,7 +427,7 @@ class SynthPanel(ctk.CTkFrame):
             ).pack(side="left", padx=(12, 0))
 
         # --- Simulate row -------------------------------------------
-        sim_row = ctk.CTkFrame(body)
+        sim_row = ctk.CTkFrame(sim_tab)
         sim_row.pack(side="top", fill="x", pady=(0, 6))
         ctk.CTkButton(sim_row, text="Simulate ▶", width=130,
                        height=34,
@@ -349,8 +456,8 @@ class SynthPanel(ctk.CTkFrame):
         self._sim_status.pack(side="left", fill="x", expand=True,
                                   padx=8)
 
-        # --- Validate block (always visible; enabled after sim) ----
-        val = ctk.CTkFrame(body, border_width=1)
+        # --- Validate tab: score a trained model against the phantom --
+        val = ctk.CTkFrame(val_tab, border_width=1)
         val.pack(side="top", fill="both", expand=True, pady=(0, 4))
         vh = ctk.CTkFrame(val, fg_color="transparent")
         vh.pack(fill="x", padx=8, pady=(6, 2))
@@ -374,10 +481,12 @@ class SynthPanel(ctk.CTkFrame):
         ctk.CTkLabel(vrow, text="Labeling:").pack(side="left")
         ctk.CTkOptionMenu(vrow,
             variable=self._val_classmap_choice,
-            values=["A — phase only",
-                       "B — phase + zone axis",
-                       "C — phase + full orientation"],
-            width=240).pack(side="left", padx=4)
+            values=["main — phase + orientation + crystallinity",
+                       "A — phase only",
+                       "B — phase + orientation",
+                       "crys — phase + crystallinity",
+                       "C — full incl in-plane (control)"],
+            width=360).pack(side="left", padx=4)
         ctk.CTkButton(vrow, text="Score ▶", width=120,
                         fg_color=("#2D7A2D", "#1F7A1F"),
                         command=self._on_validate).pack(side="left",
@@ -461,6 +570,165 @@ class SynthPanel(ctk.CTkFrame):
         if s is not None:
             self._structures.append(s); self._refresh_list()
 
+    def _add_from_builtin(self):
+        """Pick one of the built-in ASE crystals (no CIF needed)."""
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Built-in crystal")
+        dlg.geometry("360x150")
+        try: dlg.transient(self.winfo_toplevel())
+        except Exception: pass
+        dlg.grab_set()
+        ctk.CTkLabel(dlg, text="Choose a built-in crystal:").pack(
+            anchor="w", padx=10, pady=(12, 4))
+        names = list(PREDEFINED_CRYSTALS.keys())
+        choice = ctk.StringVar(value=names[0])
+        ctk.CTkOptionMenu(dlg, variable=choice, values=names,
+                            width=320).pack(padx=10, pady=2)
+        picked = {"name": None}
+        def _ok():
+            picked["name"] = choice.get(); dlg.destroy()
+        bb = ctk.CTkFrame(dlg, fg_color="transparent")
+        bb.pack(side="bottom", fill="x", padx=10, pady=10)
+        ctk.CTkButton(bb, text="OK", width=80,
+                        fg_color=("#2D7A2D", "#1F7A1F"),
+                        command=_ok).pack(side="right", padx=2)
+        ctk.CTkButton(bb, text="Cancel", width=80,
+                        command=dlg.destroy).pack(side="right", padx=2)
+        self.wait_window(dlg)
+        name = picked["name"]
+        if not name:
+            return
+        import copy
+        s = _Structure(kind="ase",
+                          ase_builder=copy.deepcopy(PREDEFINED_CRYSTALS[name]),
+                          label=name.split(" ")[0])
+        s = self._edit_dialog(s, allow_kind_change=False)
+        if s is not None:
+            self._structures.append(s); self._refresh_list()
+
+    def _build_base_atoms(self, s: "_Structure"):
+        """Build the raw crystal (before ZA orientation / vacuum box) for
+        the given structure row — shared by the 3D viewer."""
+        if s.kind == "cif":
+            from ase.io import read as ase_read
+            if not s.cif_path or not os.path.exists(s.cif_path):
+                raise RuntimeError(f"CIF not found: {s.cif_path!r}")
+            return ase_read(s.cif_path)
+        from ase.build import bulk, surface, mx2, fcc100, fcc111  # noqa
+        b = s.ase_builder or {}
+        fn = {"bulk": bulk, "surface": surface, "mx2": mx2,
+              "fcc100": fcc100, "fcc111": fcc111}.get(b.get("fn", "bulk"))
+        if fn is None:
+            raise RuntimeError(f"unknown ASE builder: {b.get('fn')!r}")
+        return fn(*b.get("args", []), **b.get("kwargs", {}))
+
+    def _view_structure(self):
+        """Open the selected structure in ASE's interactive 3D viewer
+        (a separate window with live mouse rotation).  Shows the real
+        crystal repeated by Tile X,Y,Z so you can see the 3D packing /
+        thickness — press a number key (1/2/3) in the viewer to look
+        down x/y/z."""
+        sel = list(self._listbox.curselection())
+        if not sel:
+            messagebox.showinfo("View 3D",
+                "Select a structure row first."); return
+        s = self._structures[int(sel[0])]
+        try:
+            atoms = self._build_base_atoms(s)
+            nx, ny, nz = (max(1, min(int(t), 6)) for t in s.tile_xyz)
+            atoms = atoms * (nx, ny, nz)
+        except Exception as e:
+            messagebox.showerror("View 3D",
+                f"Could not build structure:\n{e}"); return
+        import tempfile, subprocess, sys
+        from ase.io import write
+        try:
+            d = tempfile.mkdtemp(prefix="dinosr_view_")
+            p = os.path.join(d, f"{s.label or 'structure'}.xyz")
+            write(p, atoms)
+            # Launch ASE's GUI in a SEPARATE process → live rotation
+            # without clashing with this app's Tk mainloop.
+            subprocess.Popen([sys.executable, "-m", "ase", "gui", p])
+        except Exception as e:
+            messagebox.showerror("View 3D",
+                f"Could not launch the ASE 3D viewer:\n{e!r}\n\n"
+                f"(Structure has {len(atoms)} atoms, formula "
+                f"{atoms.get_chemical_formula()}.)")
+
+    def _load_ws2_example(self):
+        """One-click demo: WS2 domains that vary by 3D orientation AND
+        crystallinity, with in-plane rotation as a within-class nuisance.
+        Doubles as the runnable example and the paper validation phantom."""
+        if self._structures and not messagebox.askyesno(
+                "WS₂ example",
+                "Replace the current structure list with the WS₂ example "
+                "(3 domains: 3 distinct 3-D orientations)?"):
+            return
+        import copy
+        ws2 = PREDEFINED_CRYSTALS["WS2 (2H layered)"]
+        # 3 domains: same material, differing by zone axis.  In-plane spun
+        # freely (0–360°) → must collapse to a single class per orientation.
+        specs = [
+            ("WS2 [001] cryst",  (0, 0, 1), "crystalline"),
+            ("WS2 [110] cryst",  (1, 1, 0), "crystalline"),
+            ("WS2 [100] cryst",  (1, 0, 0), "crystalline"),
+        ]
+        # tile_z=6 → a ~6-layer WS2 film.  BIG in-plane tiling (14×14) so
+        # the crystal patch nearly fills the box: a small patch in a large
+        # vacuum-padded box gives each Bragg spot a wide shape-function
+        # (sinc) → smeared spots with side-lobe "added spots".  A large
+        # patch → sharp, clean Bragg spots.  (Multislice cost is set by
+        # gpts, not atom count, so bigger patches are ~free.)
+        # View any row with "🔬 View 3D" to see the stacking.
+        self._structures = [
+            _Structure(kind="ase", ase_builder=copy.deepcopy(ws2),
+                        label=lab, zone_axes=[za], tile_xyz=(14, 14, 6),
+                        in_plane_range_deg=(0.0, 360.0),
+                        crystallinity=cry)
+            for (lab, za, cry) in specs
+        ]
+        # Larger + more DIVERSE defaults.  The dataset's real diversity =
+        # number of grains (each grain = one crystal at one in-plane
+        # rotation, so all its pixels are ~identical).  So we use MANY
+        # Voronoi seeds (64) — this is cheap because the expensive
+        # multislice is cached per (structure, ZA, crystallinity) and the
+        # per-grain in-plane rotation is just a 2-D image rotation.  A big
+        # 96×96 scan then gives plenty of patterns for self-supervised
+        # training.  det_max=40 mrad makes the WS2 diffraction fill the
+        # frame (first reflection ~9 mrad → ~29 px, disks ~5 px) instead
+        # of being crammed into the central ~14 px at 80 mrad.
+        self.scan_ny.set(96); self.scan_nx.set(96)
+        self.scan_step_A.set(3.0)
+        # conv 1.5 mrad → disks a few px wide (NOT sub-pixel) so in-plane
+        # rotation is smooth/alias-free; det_max 28 mrad → the WS2
+        # reflections (out to ~27 mrad) fill the frame instead of sitting
+        # in the central ~half with a blank outer ring.
+        self.beam_kV.set(200.0); self.conv_mrad.set(1.5)
+        self.det_size.set(256); self.det_max_mrad.set(28.0)
+        self.dose_e_A2.set(1e4)
+        self.engine.set("finite")          # clean spots, no inter-spot streaks
+        self.layout.set("voronoi"); self.n_voronoi_seeds.set(64)
+        self.pot_gpts.set(512); self.rng_seed.set(0)
+        # Small vacuum pad → the big crystal patch fills more of the box →
+        # sharper Bragg spots (fewer finite-size side-lobe "added spots").
+        self.vacuum_pad_A.set(6.0)
+        self.out_basename.set("WS2_example")
+        try: self._refresh_layout_visibility()
+        except Exception: pass
+        self._refresh_list()
+        messagebox.showinfo(
+            "WS₂ example",
+            "Loaded 3 WS₂ domains (3 distinct 3-D orientations), "
+            "96×96 scan, Voronoi with 64 grains, det_max=28 mrad "
+            "(diffraction fills the frame), conv=1.5 mrad (disks a few px, "
+            "so in-plane rotation stays alias-free), FINITE engine "
+            "(gpts=512, clean spots) @200 kV.\n\n"
+            "The 64 grains give the model ~64 distinct in-plane rotations "
+            "to learn from — the pixel count matters less than the grain "
+            "count.\n\n"
+            "The finite engine runs one high-quality pattern per grain "
+            "(~64 sims), so it stays in the minutes range at gpts=512.")
+
     def _edit_selected(self):
         sel = list(self._listbox.curselection())
         if not sel:
@@ -499,6 +767,7 @@ class SynthPanel(ctk.CTkFrame):
         tilt_mrad = ctk.DoubleVar(value=float(s.tilt_mrad_range))
         ip0, ip1 = s.in_plane_range_deg
         ip_str = ctk.StringVar(value=f"{ip0:g},{ip1:g}")
+        cryst_var = ctk.StringVar(value=s.crystallinity)
 
         # CIF path or ASE builder block (mutually exclusive).
         cif_var = ctk.StringVar(value=s.cif_path or "")
@@ -617,6 +886,29 @@ class SynthPanel(ctk.CTkFrame):
         ctk.CTkEntry(r2, textvariable=ip_str, width=110
                        ).pack(side="left", padx=2)
 
+        # ---- Crystallinity (click to set) --------------------------------
+        r3 = ctk.CTkFrame(dlg, fg_color="transparent")
+        r3.pack(fill="x", padx=8, pady=(8, 0))
+        ctk.CTkLabel(r3, text="Crystallinity").pack(side="left")
+        ctk.CTkSegmentedButton(
+            r3, values=list(CRYSTALLINITY_ORDER),
+            variable=cryst_var, width=280).pack(side="left", padx=6)
+        add_help_button(r3,
+            "Crystallinity of this domain — a separate GROUND-TRUTH class "
+            "axis (so crystalline vs amorphous grains of the same material "
+            "and orientation are different classes the model should "
+            "separate).\n\n"
+            "  crystalline — sharp Bragg spots (no disorder).\n"
+            "  partial     — weakened spots + mild diffuse (thermal-"
+            "diffuse look), via frozen-phonon averaging (σ≈0.12 Å).\n"
+            "  amorphous   — spots washed out, diffuse rings dominate "
+            "(σ≈0.6 Å, 8 configs).\n\n"
+            "Physically this is static/thermal displacement disorder "
+            "averaged over frozen-phonon configurations (Debye-Waller "
+            "damping of the peaks + rising diffuse background).  "
+            "Amorphous domains cost more (more configs → more "
+            "multislice passes).").pack(side="left", padx=4)
+
         result = {"out": None}
         def _ok():
             try:
@@ -665,7 +957,8 @@ class SynthPanel(ctk.CTkFrame):
                     tile_xyz=tile,
                     thickness_crop_A=crop,
                     tilt_mrad_range=float(tilt_mrad.get()),
-                    in_plane_range_deg=(ip_lo, ip_hi))
+                    in_plane_range_deg=(ip_lo, ip_hi),
+                    crystallinity=cryst_var.get())
                 result["out"] = new
                 dlg.destroy()
             except Exception as e:
@@ -746,12 +1039,16 @@ class SynthPanel(ctk.CTkFrame):
             print(f"[synth] dep check failed:\n{_env_diag()}\n"
                    f"{details}", flush=True)
             return
-        # Output dir = runs/synth/<basename>_<timestamp>/
+        # Output dir = <runs root>/synth/<basename>_<timestamp>/, where the
+        # runs root is the SAME one the rest of the app writes to (runs/_gui,
+        # etc.) — resolved relative to the launch/working directory via
+        # os.getcwd(), exactly like runner.py's os.path.join("runs","_gui").
+        # NOT relative to the src/ package dir, so synth lands next to the
+        # GUI's runs on any machine without hard-coding a path.
         base = self.out_basename.get().strip() or "phantom"
         ts = time.strftime("%Y%m%d_%H%M%S")
-        outdir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "runs", "synth", f"{base}_{ts}")
+        outdir = os.path.join(os.getcwd(), "runs", "synth",
+                                f"{base}_{ts}")
         os.makedirs(outdir, exist_ok=True)
         self._sim_busy = True
         self._sim_stop_requested = False
@@ -791,12 +1088,26 @@ class SynthPanel(ctk.CTkFrame):
             self._last_meta = meta
 
             def _done():
+                # Auto-flag the just-simulated phantom in the Dataset
+                # (Pre-processing) tab: pre-fill its path so it's one
+                # click from Load — no need to browse for it.
+                flagged = False
+                try:
+                    pre = getattr(self.app, "pre", None)
+                    if pre is not None and hasattr(pre, "_path_var"):
+                        pre._path_var.set(cube_path)
+                        flagged = True
+                except Exception:
+                    pass
                 self._sim_status.configure(
                     text=(f"sim done.  cube: {cube_path}\n"
-                          f"classmaps: A/B/C written.\n"
-                          f"registered as SAMPLES['{key}'].  "
-                          f"Switch to Pre-processing or Training "
-                          f"to use it."))
+                          f"classmaps written; registered as "
+                          f"SAMPLES['{key}'].\n"
+                          + ("→ path pre-filled in the Dataset tab — "
+                             "go there and click Load."
+                             if flagged else
+                             "Switch to Pre-processing or Training "
+                             "to use it.")))
                 # Auto-render the phantom preview (class-map +
                 # per-phase structure views) in the metric pane and
                 # save as phantom_preview.png next to the cube.
@@ -929,6 +1240,7 @@ class SynthPanel(ctk.CTkFrame):
                     "tilt_mag_mrad":   tilt_mag_q,
                     "tilt_az_deg":     tilt_az_q,
                     "in_plane_deg":    in_plane_deg,
+                    "crystallinity":   s.crystallinity,
                 }
 
         # ---- Define cache cap up front so the pre-flight warnings
@@ -1039,11 +1351,12 @@ class SynthPanel(ctk.CTkFrame):
             import gc; gc.collect()
 
         def _get_engine_obj(phase_id, za, tile_xyz, thickness_crop_A,
-                              tilt_mag_mrad, tilt_az_deg):
+                              tilt_mag_mrad, tilt_az_deg,
+                              crystallinity="crystalline"):
             key = (phase_id, za, tuple(tile_xyz),
                    round(thickness_crop_A, 3),
                    round(tilt_mag_mrad, 1), round(tilt_az_deg, 1),
-                   engine)
+                   crystallinity, engine)
             hit = _cache_get(key)
             if hit is not None:
                 return hit
@@ -1083,19 +1396,45 @@ class SynthPanel(ctk.CTkFrame):
                 raise RuntimeError(
                     f"atom build failed for {s.label!r}, ZA={za}, "
                     f"tilt={tilt_mag_mrad} mrad: {e!r}") from e
+            # ---- Crystallinity: wrap atoms in FrozenPhonons so the
+            #      multislice averages over displacement configs → smooth
+            #      diffuse scattering + Debye-Waller damping of the Bragg
+            #      peaks.  sigma=0 → sharp crystalline (plain atoms).
+            sigma_A, n_cfg = CRYSTALLINITY_LEVELS.get(
+                str(crystallinity), (0.0, 1))
+            if sigma_A > 0 and n_cfg > 1:
+                from abtem import FrozenPhonons
+                # Seed per-combo so the disorder is reproducible but
+                # differs between grains/levels.
+                fp_seed = (abs(hash((phase_id, za, crystallinity)))
+                             % (2 ** 31))
+                pot_src = FrozenPhonons(atoms, num_configs=int(n_cfg),
+                                          sigmas=float(sigma_A),
+                                          seed=int(fp_seed))
+            else:
+                pot_src = atoms
             print(f"[synth] feeding Potential (phase={phase_id}, "
-                  f"za={za}, tilt={tilt_mag_mrad} mrad):\n"
+                  f"za={za}, tilt={tilt_mag_mrad} mrad, "
+                  f"crystallinity={crystallinity} σ={sigma_A}Å×{n_cfg}):\n"
                   f"{_cell_diag(atoms)}", flush=True)
             # NaPHI pattern: abTEM auto-periodic in xy; z_periodic is
             # True by default in 1.0.0beta33.  Vacuum padding ensures
             # the periodic wrap-around lands in zero-potential space,
             # so this works for non-periodic clusters as well as the
             # original periodic crystal supercells.
-            pot = PotentialCls(atoms, gpts=int(self.pot_gpts.get()),
-                                  slice_thickness=2.0,
+            # The 'finite' engine uses the accurate finite-projection
+            # potential with fine slices — this is what removes the
+            # inter-spot streak/'diffuse' artifacts of the fast infinite
+            # projection.  The scanned engines keep 'infinite' for speed.
+            _proj = "finite" if engine == "finite" else "infinite"
+            _slth = 1.0 if engine == "finite" else 2.0
+            pot = PotentialCls(pot_src, gpts=int(self.pot_gpts.get()),
+                                  slice_thickness=_slth,
                                   parametrization="kirkland",
-                                  projection="infinite")
-            if engine == "PRISM":
+                                  projection=_proj)
+            if engine == "finite":
+                _cache_put(key, ("finite", pot))
+            elif engine == "PRISM":
                 # abTEM 1.0.0beta33 PRISM workflow:
                 #   sm = SMatrix(energy, expansion_cutoff, interp)
                 #   sm.match_grid(potential)
@@ -1137,10 +1476,14 @@ class SynthPanel(ctk.CTkFrame):
         except Exception:
             _cv2 = None
         cube = np.zeros((Ny, Nx, det_size, det_size), dtype=np.float32)
-        cm_A = np.zeros((Ny, Nx), dtype=np.int32)
-        cm_B = np.zeros((Ny, Nx), dtype=np.int32)
-        cm_C = np.zeros((Ny, Nx), dtype=np.int32)
+        cm_A = np.zeros((Ny, Nx), dtype=np.int32)   # phase
+        cm_B = np.zeros((Ny, Nx), dtype=np.int32)   # phase + orientation
+        cm_crys = np.zeros((Ny, Nx), dtype=np.int32)  # phase + crystallinity
+        cm_main = np.zeros((Ny, Nx), dtype=np.int32)  # phase+orient+cryst (in-plane inv.)
+        cm_C = np.zeros((Ny, Nx), dtype=np.int32)   # full incl in-plane (control)
         b_keys: dict[tuple, int] = {}
+        d_keys: dict[tuple, int] = {}
+        m_keys: dict[tuple, int] = {}
         c_keys: dict[tuple, int] = {}
 
         # Bucket pixels by grain id.
@@ -1166,12 +1509,13 @@ class SynthPanel(ctk.CTkFrame):
                 gp.get("tile_xyz", (1, 1, 1)),
                 gp.get("thickness_crop_A", 0.0),
                 gp.get("tilt_mag_mrad", 0.0),
-                gp.get("tilt_az_deg", 0.0))
+                gp.get("tilt_az_deg", 0.0),
+                gp.get("crystallinity", "crystalline"))
             # Tilt is in the atoms now (NaPHI pattern); the probe is
             # along +z for every grain.  Match_grid is required so the
             # probe's FFT grid matches whatever vacuum-padded cell the
             # potential ended up with — that varies grain-by-grain.
-            if kind == "ms":
+            if kind in ("ms", "finite"):
                 try:
                     probe.match_grid(obj)
                 except Exception:
@@ -1184,6 +1528,19 @@ class SynthPanel(ctk.CTkFrame):
                     # arbitrary probe positions.  Cached `obj` is
                     # already the SMatrixArray.
                     waves = obj.collapse(positions=positions)
+                elif kind == "finite":
+                    # ONE high-quality pattern for the whole grain: a
+                    # single probe at the (square) box centre.  It is
+                    # broadcast to every pixel of the grain below — each
+                    # pixel then gets independent shot noise (and the
+                    # per-grain in-plane rotation) downstream.
+                    try:
+                        ext = obj.extent
+                        cen = (float(ext[0]) / 2.0, float(ext[1]) / 2.0)
+                    except Exception:
+                        cen = positions[len(positions) // 2]
+                    waves = probe.multislice(positions=[cen],
+                                                 potential=obj, pbar=False)
                 else:
                     waves = probe.multislice(positions=positions,
                                                  potential=obj,
@@ -1200,6 +1557,11 @@ class SynthPanel(ctk.CTkFrame):
             # for single position — collapse to a 3-D array.
             if arr.ndim == 2:
                 arr = arr[None]
+            # 'finite' produced ONE pattern — replicate it to every pixel
+            # of the grain so the downstream per-pixel noise/rotation loop
+            # works unchanged.
+            if kind == "finite" and arr.shape[0] == 1 and len(pixels) > 1:
+                arr = np.repeat(arr, len(pixels), axis=0)
             # Resample each pattern to the user's detector grid.
             # IMPORTANT: pad to square FIRST so the angular geometry
             # of kx vs ky is preserved.  abTEM emits patterns whose
@@ -1236,27 +1598,24 @@ class SynthPanel(ctk.CTkFrame):
                     arr = np.stack([_zoom(a.astype(np.float32),
                                               (fy, fx), order=1)
                                        for a in arr], axis=0)
-            # Per-pixel in-plane rotation + Poisson noise via abTEM's
-            # canonical noise function.  Wrap the batched (N, h, w)
-            # array as a Measurement and call abtem.noise.poisson_noise
-            # with pixel_area=step² (real-space probe-position area in
-            # Å²).  This is exactly the formula abTEM uses internally;
-            # going through the official path also handles negative-
-            # value clipping uniformly.
+            # ---- Dose scaling + (optional) shot noise ------------------
+            # Both "shot" and "exact" scale each pattern to the SAME
+            # electron count — total_e = dose × step² electrons per probe
+            # position — so the only difference between the two modes is
+            # whether we Poisson-SAMPLE.  Per-pattern normalisation makes
+            # the electron count well-defined regardless of how abTEM
+            # normalises the raw detected intensity, so higher dose is
+            # correctly correlated with a cleaner pattern in "shot" mode.
             if dose > 0:
-                try:
-                    from abtem import Measurement as _Meas
-                    from abtem.noise import poisson_noise as _pnoise
-                    meas = _Meas(arr.astype(np.float32))
-                    meas = _pnoise(meas, dose=float(dose),
-                                      pixel_area=float(step) ** 2)
-                    arr = np.asarray(meas.array, dtype=np.float32)
-                except Exception as e:
-                    # Fallback to manual Poisson if abTEM API shifts.
-                    print(f"[synth] abtem.noise.poisson_noise "
-                          f"failed: {e!r}; using manual Poisson",
-                          flush=True)
-                    expected = arr * (float(dose) * (float(step) ** 2))
+                total_e = float(dose) * (float(step) ** 2)
+                flat_sum = arr.reshape(arr.shape[0], -1).sum(axis=1)
+                scale = np.where(flat_sum > 0,
+                                    total_e / np.maximum(flat_sum, 1e-30),
+                                    0.0).astype(np.float32)
+                expected = (arr * scale[:, None, None]).astype(np.float32)
+                if self.noise_mode.get() == "exact":
+                    arr = np.clip(expected, 0, None)
+                else:  # "shot" — Poisson sample at that electron count
                     arr = rng.poisson(np.clip(expected, 0, None)
                                           ).astype(np.float32)
             ipd = gp["in_plane_deg"]
@@ -1264,16 +1623,36 @@ class SynthPanel(ctk.CTkFrame):
                 pat = arr[i]
                 if abs(ipd) > 1e-3:
                     from scipy.ndimage import rotate as _rotate
+                    # order=3 (cubic) NOT order=1: the Bragg spots are
+                    # near sub-pixel sharp, and bilinear rotation aliases
+                    # them differently at each angle (~28% round-trip
+                    # error) — which breaks the in-plane-rotation
+                    # invariance the model relies on and makes it split
+                    # one orientation into several classes.  Cubic cuts
+                    # that to ~4%.  Clip the small spline undershoot back
+                    # to >=0 (diffraction intensity can't be negative).
                     pat = _rotate(pat, ipd, reshape=False,
-                                     order=1, mode="constant",
+                                     order=3, mode="constant",
                                      cval=0.0)
+                    np.clip(pat, 0.0, None, out=pat)
                 cube[yy, xx] = pat.astype(np.float32)
+                cry = gp.get("crystallinity", "crystalline")
                 cm_A[yy, xx] = phase_id
                 bk = (phase_id, gp["za"])
                 if bk not in b_keys: b_keys[bk] = len(b_keys)
                 cm_B[yy, xx] = b_keys[bk]
+                # phase + crystallinity
+                dk = (phase_id, cry)
+                if dk not in d_keys: d_keys[dk] = len(d_keys)
+                cm_crys[yy, xx] = d_keys[dk]
+                # PRIMARY: phase + orientation + crystallinity, in-plane
+                # rotation deliberately EXCLUDED (nuisance → one class).
+                mk = (phase_id, gp["za"], cry)
+                if mk not in m_keys: m_keys[mk] = len(m_keys)
+                cm_main[yy, xx] = m_keys[mk]
+                # CONTROL: everything incl in-plane rotation bin.
                 rot_bin = int(ipd // 30) % 12
-                ck = (phase_id, gp["za"], rot_bin)
+                ck = (phase_id, gp["za"], cry, rot_bin)
                 if ck not in c_keys: c_keys[ck] = len(c_keys)
                 cm_C[yy, xx] = c_keys[ck]
             done += len(pixels)
@@ -1287,7 +1666,8 @@ class SynthPanel(ctk.CTkFrame):
                 self._sim_status.configure(text=m))
             print(f"[synth] {msg}", flush=True)
 
-        classmaps = {"A": cm_A, "B": cm_B, "C": cm_C}
+        classmaps = {"A": cm_A, "B": cm_B, "crys": cm_crys,
+                     "main": cm_main, "C": cm_C}
         meta = {
             "engine": engine,
             "beam_kV": kV,
@@ -1295,6 +1675,7 @@ class SynthPanel(ctk.CTkFrame):
             "det_size": det_size,
             "det_max_mrad": det_max,
             "dose_e_A2": dose,
+            "noise_mode": self.noise_mode.get(),
             "scan_shape": [Ny, Nx],
             "scan_step_A": step,
             "layout": self.layout.get(),
@@ -1310,12 +1691,15 @@ class SynthPanel(ctk.CTkFrame):
                  "tile_xyz": list(s.tile_xyz),
                  "thickness_crop_A": s.thickness_crop_A,
                  "tilt_mrad_range": s.tilt_mrad_range,
-                 "in_plane_range_deg": list(s.in_plane_range_deg)}
+                 "in_plane_range_deg": list(s.in_plane_range_deg),
+                 "crystallinity": s.crystallinity}
                 for s in self._structures
             ],
             "grain_props": {str(k): v for k, v in grain_props.items()},
             "n_classes_A": int(cm_A.max()) + 1,
             "n_classes_B": int(cm_B.max()) + 1,
+            "n_classes_crys": int(cm_crys.max()) + 1,
+            "n_classes_main": int(cm_main.max()) + 1,
             "n_classes_C": int(cm_C.max()) + 1,
             "n_unique_smatrix_entries": len(sm_cache),
             "recommended_vmax": float(np.percentile(cube, 99.5)),
@@ -1360,10 +1744,10 @@ class SynthPanel(ctk.CTkFrame):
                 f"Shape mismatch:  GT {gt.shape}  vs assigns "
                 f"size={assigns.size}"); return
         pred = assigns.reshape(Ny, Nx)
-        self._score_and_render(gt, pred, choice_key)
+        self._score_and_render(gt, pred, choice_key, infz=infz)
 
     def _score_and_render(self, gt: np.ndarray, pred: np.ndarray,
-                            choice_key: str):
+                            choice_key: str, infz: "str | None" = None):
         from scipy.optimize import linear_sum_assignment
         K_true = int(gt.max()) + 1
         K_pred = int(pred.max()) + 1
@@ -1409,48 +1793,132 @@ class SynthPanel(ctk.CTkFrame):
         pb = np.clip(p_bar, 1e-12, 1.0)
         k_eff = float(np.exp(-(pb * np.log(pb)).sum()))
 
-        # ---- text dump ----
-        self._metrics_text.config(state="normal")
-        self._metrics_text.delete("1.0", "end")
-        self._metrics_text.insert("end",
-            f"Labeling: {choice_key}\n"
-            f"K_true = {K_true}     K_pred = {K_pred}\n"
-            f"K_eff  = {k_eff:.2f}\n\n"
-            f"Pixel accuracy (Hungarian-aligned) = {acc*100:.2f}%\n"
-            f"ARI = {ari:.4f}     NMI = {nmi:.4f}\n\n"
-            f"Per-class (gt-id, N, P, R, F1):\n")
-        for k, n, P, R, F in per:
-            self._metrics_text.insert("end",
-                f"  {k:>2d}  N={n:>6d}  P={P:.3f}  R={R:.3f}  F1={F:.3f}\n")
-        self._metrics_text.config(state="disabled")
-
-        # ---- confusion-matrix heatmap ----
-        self._ax.clear()
-        # Re-shuffle columns by Hungarian perm so diagonal pops.
+        # Column order that puts each Hungarian-matched pred cluster on
+        # the diagonal (so a good result shows a bright diagonal).
         C2 = C[:K_true, :K_pred].copy()
-        # Apply col perm to put the matched-pred on the diagonal.
-        col_order = []
-        # For each gt row, prefer the matched col first; remaining cols
-        # appended in original order.
-        used = set()
+        col_order, used = [], set()
         for r in range(K_true):
-            # find col c that was matched to this r (perm[c] == r)
-            matches = [c for c in range(K_pred) if perm[c] == r]
-            for c in matches:
+            for c in [c for c in range(K_pred) if perm[c] == r]:
                 if c not in used:
                     col_order.append(c); used.add(c)
         for c in range(K_pred):
             if c not in used: col_order.append(c); used.add(c)
         C2 = C2[:, col_order]
-        self._ax.imshow(C2, cmap="viridis", aspect="auto")
-        self._ax.set_xlabel(f"pred (Hungarian-permuted), K_pred={K_pred}")
-        self._ax.set_ylabel(f"ground truth ({choice_key}), K_true={K_true}")
-        self._ax.set_title(
-            f"Confusion matrix  —  acc={acc*100:.1f}%  "
-            f"ARI={ari:.3f}  NMI={nmi:.3f}",
-            fontsize=10)
-        self._fig.tight_layout()
-        self._canvas.draw_idle()
+
+        # ---- human-readable report ----
+        label_full = self._val_classmap_choice.get()
+        lines = ["=== Synthetic-phantom validation report ===", ""]
+        lines.append(f"phantom : {self._last_cube_path}")
+        if infz:
+            lines.append(f"model   : {infz}")
+        lines.append(f"labeling: {label_full}")
+        lines.append("")
+        lines.append(f"K_true = {K_true}    K_pred = {K_pred}    "
+                     f"K_eff = {k_eff:.2f}")
+        lines.append(f"Pixel accuracy (Hungarian-aligned) = {acc*100:.2f}%")
+        lines.append(f"ARI = {ari:.4f}    NMI = {nmi:.4f}")
+        lines.append("")
+        lines.append("Per-class (after alignment):")
+        lines.append(f"  {'gt':>3} {'N':>7} {'P':>6} {'R':>6} {'F1':>6}")
+        for k, n, P, R, F in per:
+            lines.append(f"  {k:>3} {n:>7} {P:>6.3f} {R:>6.3f} {F:>6.3f}")
+        report_txt = "\n".join(lines)
+
+        # ---- inline text (quick glance) ----
+        self._metrics_text.config(state="normal")
+        self._metrics_text.delete("1.0", "end")
+        self._metrics_text.insert("end", report_txt + "\n")
+        self._metrics_text.config(state="disabled")
+
+        # ---- structured + text report files next to the phantom ----
+        saved_to = None
+        try:
+            folder = os.path.dirname(self._last_cube_path)
+            # tag by the model run so scoring several models doesn't
+            # overwrite (run dir = parent of .../eval/inference.npz).
+            tag = "model"
+            if infz:
+                parts = os.path.normpath(infz).split(os.sep)
+                tag = (parts[parts.index("eval") - 1]
+                       if "eval" in parts and parts.index("eval") > 0
+                       else os.path.basename(os.path.dirname(infz)) or "model")
+            base = os.path.join(folder, f"validation_{tag}_{choice_key}")
+            report = {
+                "phantom_cube": self._last_cube_path, "inference": infz,
+                "labeling": choice_key, "labeling_full": label_full,
+                "K_true": K_true, "K_pred": K_pred, "K_eff": k_eff,
+                "pixel_accuracy": acc, "ARI": ari, "NMI": nmi,
+                "per_class": [{"gt": k, "N": n, "precision": P,
+                                 "recall": R, "f1": F}
+                                for k, n, P, R, F in per],
+                "confusion_matrix_gt_x_pred": C[:K_true, :K_pred].tolist(),
+            }
+            with open(base + ".txt", "w", encoding="utf-8") as f:
+                f.write(report_txt + "\n")
+            with open(base + ".json", "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+            saved_to = base + ".png"
+        except Exception as e:
+            print(f"[synth] report save failed: {e!r}", flush=True)
+            base = None
+
+        # ---- a proper, readable figure: confusion matrix + metrics ----
+        from matplotlib.figure import Figure as _Fig
+        fig = _Fig(figsize=(12.5, max(5.0, 0.45 * K_true + 4.0)),
+                     dpi=120, facecolor="white")
+        axm = fig.add_subplot(1, 2, 1)
+        im = axm.imshow(C2, cmap="viridis", aspect="auto")
+        axm.set_xlabel(f"predicted cluster (Hungarian-permuted), "
+                        f"K_pred={K_pred}")
+        axm.set_ylabel(f"ground truth ({choice_key}), K_true={K_true}")
+        axm.set_title("Confusion matrix (bright diagonal = good)",
+                        fontsize=11)
+        fig.colorbar(im, ax=axm, fraction=0.046, pad=0.03)
+        # annotate counts when the matrix is small enough to read
+        if K_true <= 12 and K_pred <= 12:
+            thr = C2.max() * 0.5 if C2.max() > 0 else 1
+            for r in range(C2.shape[0]):
+                for c in range(C2.shape[1]):
+                    v = int(C2[r, c])
+                    if v:
+                        axm.text(c, r, str(v), ha="center", va="center",
+                                   fontsize=8,
+                                   color="black" if C2[r, c] > thr else "white")
+        axt = fig.add_subplot(1, 2, 2); axt.axis("off")
+        axt.text(0.0, 1.0, report_txt, family="monospace", fontsize=11,
+                   va="top", ha="left", transform=axt.transAxes)
+        fig.suptitle(f"Validation — acc={acc*100:.1f}%  ARI={ari:.3f}  "
+                      f"NMI={nmi:.3f}", fontsize=13)
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
+
+        if base is not None:
+            try:
+                fig.savefig(saved_to, dpi=120, facecolor="white",
+                              bbox_inches="tight")
+            except Exception as e:
+                print(f"[synth] report png failed: {e!r}", flush=True)
+                saved_to = None
+
+        # ---- compact inline confusion matrix + open the big window ----
+        try:
+            self._ax.clear()
+            self._ax.imshow(C2, cmap="viridis", aspect="auto")
+            self._ax.set_title(f"acc={acc*100:.1f}%  ARI={ari:.3f}",
+                                 fontsize=9)
+            self._ax.set_xticks([]); self._ax.set_yticks([])
+            self._fig.tight_layout(); self._canvas.draw_idle()
+        except Exception:
+            pass
+        if base is not None:
+            # Note where the report was saved (inline, no extra dialog).
+            self._metrics_text.config(state="normal")
+            self._metrics_text.insert(
+                "end", f"\nsaved report → {os.path.basename(base)}"
+                       f".png / .txt / .json\n")
+            self._metrics_text.config(state="disabled")
+        if saved_to and os.path.exists(saved_to):
+            self._open_image_window(
+                saved_to, title=f"Validation — {choice_key}")
 
     # ===================================================================
     # Phase 2: layout-visibility, load existing
@@ -1470,20 +1938,21 @@ class SynthPanel(ctk.CTkFrame):
         a new inference.npz without re-simulating."""
         d = filedialog.askdirectory(
             title="Pick a previous sim folder (contains "
-                  "phantom.cube.npy + phantom.classmap_*.npy)")
+                  "phantom.cube.npy + phantom.classmap_*.npy)",
+            initialdir=os.path.join(os.getcwd(), "runs", "synth"))
         if not d: return
         cube_path = os.path.join(d, "phantom.cube.npy")
         if not os.path.exists(cube_path):
             messagebox.showerror("Load",
                 f"No phantom.cube.npy in:\n{d}"); return
         cmaps = {}
-        for k in ("A", "B", "C"):
+        for k in ("A", "B", "crys", "main", "C"):
             p = os.path.join(d, f"phantom.classmap_{k}.npy")
             if os.path.exists(p):
                 cmaps[k] = p
         if not cmaps:
             messagebox.showerror("Load",
-                f"No classmap_A/B/C.npy in:\n{d}"); return
+                f"No phantom.classmap_*.npy in:\n{d}"); return
         meta_path = os.path.join(d, "phantom.sim_meta.json")
         meta = None
         if os.path.exists(meta_path):
@@ -1659,170 +2128,160 @@ class SynthPanel(ctk.CTkFrame):
             messagebox.showinfo("Preview",
                 "No sim loaded — Simulate or Load existing first.")
             return
+        png = os.path.join(os.path.dirname(self._last_cube_path),
+                             "phantom_preview.png")
         try:
+            # (Re)render to a full-size PNG, then open it BIG in its own
+            # scrollable window — the inline canvas is height-starved.
             self._render_phantom_preview(
                 cube_path=self._last_cube_path,
                 classmap_B_path=self._last_classmaps.get("B"),
                 meta=self._last_meta or {},
-                save_path=os.path.join(
-                    os.path.dirname(self._last_cube_path),
-                    "phantom_preview.png"))
+                save_path=png)
         except Exception as e:
-            messagebox.showerror("Preview", repr(e))
+            messagebox.showerror("Preview", repr(e)); return
+        self._open_image_window(png, title="Phantom preview")
+
+    def _open_image_window(self, png_path, title="Image"):
+        """Show a PNG at full size in a resizable window with horizontal
+        and vertical scrollbars + mouse-wheel scrolling."""
+        if not (png_path and os.path.exists(png_path)):
+            messagebox.showinfo("Preview", "No preview image found.")
+            return
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.geometry("1150x720")
+        try:
+            win.lift(); win.focus_force()
+        except Exception:
+            pass
+        cv = tk.Canvas(win, background="white", highlightthickness=0)
+        hbar = tk.Scrollbar(win, orient="horizontal", command=cv.xview)
+        vbar = tk.Scrollbar(win, orient="vertical", command=cv.yview)
+        cv.configure(xscrollcommand=hbar.set, yscrollcommand=vbar.set)
+        vbar.pack(side="right", fill="y")
+        hbar.pack(side="bottom", fill="x")
+        cv.pack(side="left", fill="both", expand=True)
+        try:
+            img = tk.PhotoImage(file=png_path)
+        except Exception as e:
+            win.destroy()
+            messagebox.showerror("Preview",
+                f"Could not load image:\n{e!r}"); return
+        # Keep a reference on the window so it isn't garbage-collected
+        # (which would blank the canvas).
+        win._img_ref = img
+        cv.create_image(0, 0, anchor="nw", image=img)
+        cv.configure(scrollregion=(0, 0, img.width(), img.height()))
+        def _wheel(e):
+            cv.yview_scroll(-1 if e.delta > 0 else 1, "units")
+        def _wheel_h(e):
+            cv.xview_scroll(-1 if e.delta > 0 else 1, "units")
+        cv.bind("<MouseWheel>", _wheel)
+        cv.bind("<Shift-MouseWheel>", _wheel_h)
 
     def _render_phantom_preview(self, cube_path, classmap_B_path,
                                   meta, save_path=None):
-        """Render the post-sim diagnostic figure into self._fig.
-
-        Layout:  classmap-B (full width top)  +  one row per phase:
-                 [XY view][XZ view][YZ view] of one representative
-                 atomic model per phase (using that phase's first
-                 zone axis, no tilt, no in-plane rotation).
-
-        Save_path: also write the figure as a PNG next to the cube.
+        """Clean phantom quick-look: the ground-truth class map plus one
+        class-average diffraction pattern per class (up to 8).  Written to
+        phantom_preview.png (properly sized) and shown compactly on the
+        GUI validation canvas.  Prefers the primary 'main' classmap.
         """
         import matplotlib.pyplot as _plt
         from matplotlib.colors import ListedColormap, BoundaryNorm
-        from ase.io import read as ase_read
 
-        if not classmap_B_path or not os.path.exists(classmap_B_path):
-            raise RuntimeError("classmap_B.npy not present")
-        cm_B = np.load(classmap_B_path)
-        K_B = int(cm_B.max()) + 1
+        # Prefer the primary in-plane-invariant map ('main'); fall back
+        # to B.  Both live next to the cube.
+        folder = os.path.dirname(cube_path)
+        cm_path = None
+        for cand in (os.path.join(folder, "phantom.classmap_main.npy"),
+                       classmap_B_path,
+                       os.path.join(folder, "phantom.classmap_B.npy")):
+            if cand and os.path.exists(cand):
+                cm_path = cand; break
+        if cm_path is None:
+            raise RuntimeError("no phantom.classmap_*.npy for preview")
+        which = "main" if cm_path.endswith("_main.npy") else "B"
+        cm = np.load(cm_path)
+        Kc = int(cm.max()) + 1
+        cube = np.load(cube_path, mmap_mode="r")
+        Ny, Nx, Hh, Ww = cube.shape
 
-        structures_meta = (meta or {}).get("structures", [])
-        n_phases = max(1, len(structures_meta))
+        # Class-average diffraction for up to 8 largest classes.
+        ids, counts = np.unique(cm, return_counts=True)
+        cnt = dict(zip(ids.tolist(), counts.tolist()))
+        show_ids = [int(k) for k in ids[np.argsort(counts)[::-1]][:8]]
+        vmax = float((meta or {}).get("recommended_vmax") or 0.0)
+        avgs = []
+        for k in show_ids:
+            ys, xs = np.where(cm == k)
+            sel = (np.linspace(0, len(ys) - 1, 64).astype(int)
+                     if len(ys) > 64 else np.arange(len(ys)))
+            acc = np.zeros((Hh, Ww), np.float64)
+            for i in sel:
+                acc += np.asarray(cube[ys[i], xs[i]], dtype=np.float64)
+            avgs.append((k, cnt.get(k, len(ys)), acc / max(len(sel), 1)))
 
-        # Build a representative atoms object per phase: first ZA,
-        # no tilt, no rotation, full requested tile.
-        from ase import Atoms
-        try:
-            from ase.build import (bulk, surface, mx2,
-                                       fcc100, fcc111)
-        except Exception:
-            bulk = surface = mx2 = fcc100 = fcc111 = None
-        phase_atoms_list = []
-        for sm in structures_meta:
-            try:
-                if sm.get("kind") == "cif":
-                    atoms = ase_read(sm["cif_path"])
-                else:
-                    fn = (sm.get("ase_builder") or {}).get("fn",
-                                                                "bulk")
-                    args = (sm.get("ase_builder") or {}).get("args",
-                                                                  [])
-                    kwargs = (sm.get("ase_builder") or {}).get(
-                        "kwargs", {})
-                    builder_fn = {
-                        "bulk": bulk, "surface": surface, "mx2": mx2,
-                        "fcc100": fcc100, "fcc111": fcc111,
-                    }.get(fn)
-                    if builder_fn is None:
-                        raise RuntimeError(f"bad fn: {fn!r}")
-                    atoms = builder_fn(*args, **kwargs)
-                za = tuple(sm["zone_axes"][0])
-                # Use the SAME atom-build path as the actual sim
-                # (`_build_atoms_vacuum_box` — NaPHI vacuum-AABB
-                # pattern).  The legacy `_orient_to_zone_axis` +
-                # `_autotile_inplane_to_square` chain that lived
-                # here previously goes through `ase.build.surface`
-                # and could produce a different structure than the
-                # cube the user just saved — the preview must
-                # match the data.
-                tile = sm.get("tile_xyz", [1, 1, 1])
-                crop = float(sm.get("thickness_crop_A", 0.0) or 0.0)
-                try:
-                    vac = float(self.vacuum_pad_A.get())
-                except Exception:
-                    vac = 15.0
-                atoms = _build_atoms_vacuum_box(
-                    atoms,
-                    zone_axis=za,
-                    tile_xyz=tuple(int(x) for x in tile),
-                    tilt_mag_mrad=0.0,  # preview uses canonical view
-                    tilt_az_deg=0.0,
-                    vacuum_pad_A=vac,
-                    thickness_crop_A=crop)
-                phase_atoms_list.append((sm.get("label", "?"),
-                                            za, atoms))
-            except Exception as e:
-                print(f"[synth] preview build failed for phase "
-                      f"{sm.get('label')!r}: {e!r}", flush=True)
-                phase_atoms_list.append((sm.get("label", "?"),
-                                            None, None))
+        # ---- Build a properly-sized standalone figure for the PNG ----
+        from matplotlib.figure import Figure as _Figure
+        n_show = max(1, len(avgs))
+        ncols = min(4, n_show)
+        nrows_p = int(np.ceil(n_show / ncols))
+        base = _plt.get_cmap("tab20" if Kc <= 20 else "viridis", max(Kc, 1))
+        cmap = ListedColormap(base(np.arange(max(Kc, 1))))
+        norm = BoundaryNorm(np.arange(Kc + 1) - 0.5, Kc)
 
-        # ---- Figure: classmap row + (n_phases) × 3 views grid ------
-        self._fig.clear()
-        n_struct_rows = max(1, len(phase_atoms_list))
-        nrows = 1 + n_struct_rows
-        gs = self._fig.add_gridspec(
-            nrows, 3,
-            height_ratios=[1.6] + [1.0] * n_struct_rows,
-            hspace=0.45, wspace=0.20)
-
-        # Top: class-map B
-        ax_cm = self._fig.add_subplot(gs[0, :])
-        # Discrete colormap — K_B distinct classes
-        base = _plt.get_cmap("tab20" if K_B <= 20 else "viridis", K_B)
-        cmap = ListedColormap(base(np.arange(K_B)))
-        norm = BoundaryNorm(np.arange(K_B + 1) - 0.5, K_B)
-        im = ax_cm.imshow(cm_B, cmap=cmap, norm=norm,
-                            aspect="equal", interpolation="nearest")
-        ax_cm.set_title(
-            f"ground-truth class-map B (K_B = {K_B})  — each (phase, "
-            f"zone-axis) is one class; in-plane rotations within a "
-            f"class are NOT separated", fontsize=10)
-        ax_cm.set_xticks([]); ax_cm.set_yticks([])
-        cbar = self._fig.colorbar(im, ax=ax_cm, fraction=0.04,
-                                       pad=0.02,
-                                       ticks=np.arange(K_B))
-        cbar.ax.tick_params(labelsize=8)
-
-        # Bottom: per-phase XY / XZ / YZ atomic-structure views
-        for ph_idx, (lab, za, atoms) in enumerate(phase_atoms_list):
-            row = 1 + ph_idx
-            for col, (i_ax, j_ax, plane_name) in enumerate(
-                    [(0, 1, "XY (top, beam ∥ Z)"),
-                     (0, 2, "XZ (side, beam ∥ Z)"),
-                     (1, 2, "YZ (side, beam ∥ Z)")]):
-                ax = self._fig.add_subplot(gs[row, col])
-                if atoms is None or len(atoms) == 0:
-                    ax.text(0.5, 0.5, "(failed)", ha="center",
-                              va="center", transform=ax.transAxes)
+        def _draw(fig, with_patterns):
+            fig.clear()
+            if with_patterns:
+                gs = fig.add_gridspec(max(nrows_p, 1), ncols + 2,
+                                        wspace=0.3, hspace=0.35)
+                axm = fig.add_subplot(gs[:, :2])
+            else:
+                axm = fig.add_subplot(111)
+            im = axm.imshow(cm, cmap=cmap, norm=norm,
+                              interpolation="nearest", aspect="equal")
+            axm.set_title(f"ground-truth class map ({which}) — K={Kc}",
+                            fontsize=11)
+            axm.set_xticks([]); axm.set_yticks([])
+            fig.colorbar(im, ax=axm, fraction=0.045, pad=0.02,
+                           ticks=np.arange(Kc))
+            if with_patterns:
+                for idx, (k, n, av) in enumerate(avgs):
+                    ax = fig.add_subplot(gs[idx // ncols, 2 + idx % ncols])
+                    # Per-pattern 99.5th-percentile stretch: the central
+                    # (unscattered) beam is orders brighter than the Bragg
+                    # disks, so scaling by av.max() would crush everything
+                    # to black.  The percentile saturates the beam and
+                    # reveals the disks / diffuse rings.
+                    ref = (float(np.percentile(av, 99.5))
+                             or float(av.max()) or 1.0)
+                    disp = np.log1p(np.clip(av / ref, 0, None) * 50.0)
+                    ax.imshow(disp, cmap="inferno", interpolation="nearest")
+                    ax.set_title(f"class {k}  ({n}px)", fontsize=9)
                     ax.set_xticks([]); ax.set_yticks([])
-                    continue
-                pos = atoms.get_positions()
-                Z = atoms.get_atomic_numbers()
-                # Color by element (atomic number)
-                sc = ax.scatter(pos[:, i_ax], pos[:, j_ax],
-                                  c=Z, cmap="tab10",
-                                  s=12, alpha=0.85,
-                                  edgecolors="black", linewidths=0.2)
-                ax.set_aspect("equal")
-                ax.set_xlabel(f"{'XYZ'[i_ax]} (Å)", fontsize=8)
-                ax.set_ylabel(f"{'XYZ'[j_ax]} (Å)", fontsize=8)
-                ax.tick_params(labelsize=7)
-                if col == 0:
-                    ax.set_ylabel(
-                        f"phase '{lab}'  ZA={za}\n"
-                        f"{'XYZ'[j_ax]} (Å)", fontsize=8)
-                ax.set_title(plane_name, fontsize=9)
-        self._fig.suptitle(
-            f"Phantom preview — {n_phases} phase(s), "
-            f"K_B = {K_B} classes", fontsize=11, y=0.99)
-        self._fig.tight_layout(rect=[0, 0, 1, 0.97])
-        self._canvas.draw_idle()
+                fig.suptitle(
+                    f"Phantom preview — {Ny}×{Nx} scan, {Kc} classes, "
+                    f"class-average diffraction", fontsize=12)
 
         if save_path:
             try:
-                self._fig.savefig(save_path, dpi=150,
-                                       facecolor="white",
-                                       bbox_inches="tight")
-                print(f"[synth] preview PNG → {save_path}",
-                      flush=True)
+                png = _Figure(figsize=(4 + 3 * ncols, max(4.0, 3.2 * nrows_p)),
+                                dpi=130, facecolor="white")
+                _draw(png, with_patterns=True)
+                png.savefig(save_path, dpi=130, facecolor="white",
+                              bbox_inches="tight")
+                print(f"[synth] preview PNG → {save_path}", flush=True)
             except Exception as e:
-                print(f"[synth] preview save failed: {e!r}",
-                      flush=True)
+                print(f"[synth] preview save failed: {e!r}", flush=True)
+
+        # Compact class map on the GUI validation canvas.
+        try:
+            _draw(self._fig, with_patterns=False)
+            self._fig.tight_layout()
+            self._canvas.draw_idle()
+        except Exception:
+            pass
 
     def _open_last_outdir(self):
         if not self._last_cube_path:
@@ -2197,6 +2656,24 @@ def _build_atoms_vacuum_box(atoms_base, *, zone_axis, tile_xyz,
         atoms = atoms[keep]
         if len(atoms) > 0:
             atoms.center(vacuum=float(vacuum_pad_A))
+
+    # ---- Step 5: SQUARE the in-plane box -----------------------------
+    # A non-square (Lx != Ly) cell makes abTEM sample reciprocal space
+    # anisotropically with square gpts → ELLIPTICAL diffraction rings,
+    # and it breaks in-plane-rotation invariance (the ellipse axes stay
+    # fixed while the crystal rotates).  Pad the shorter in-plane axis
+    # with vacuum so Lx == Ly → isotropic sampling → circular rings.
+    cell = _np.array(atoms.get_cell(), dtype=float)
+    Lx, Ly = float(cell[0, 0]), float(cell[1, 1])
+    if Lx > 0 and Ly > 0 and abs(Lx - Ly) > 1e-6:
+        L = max(Lx, Ly)
+        pos = atoms.get_positions()
+        pos[:, 0] += (L - Lx) / 2.0
+        pos[:, 1] += (L - Ly) / 2.0
+        atoms.set_positions(pos)
+        cell[0, 0] = L
+        cell[1, 1] = L
+        atoms.set_cell(cell)
     return atoms
 
 

@@ -217,15 +217,10 @@ class PostHocPanel(ctk.CTkFrame):
         ctk.CTkButton(top, text="Load run dir…", width=110,
                        command=self._load_dir_dialog).pack(side="left",
                                                              padx=4)
-        ctk.CTkLabel(top, text="dataset:").pack(side="left", padx=(8, 1))
+        # The dataset comes from the Dataset tab at the top of the app —
+        # no dataset dropdown / cube browser here (that caused a run-vs-cube
+        # deadlock). Load the run dir; the cube follows the Dataset tab.
         self._sample_var = ctk.StringVar(value="")
-        self._sample_menu = ctk.CTkOptionMenu(top, variable=self._sample_var,
-                            values=sorted(SAMPLES.keys()),
-                            width=180,
-                            command=lambda _v: self._on_sample_change())
-        self._sample_menu.pack(side="left", padx=2)
-        ctk.CTkButton(top, text="Browse cube…", width=100,
-                       command=self._browse_dataset).pack(side="left", padx=2)
         self._info = ctk.CTkLabel(top, text="(no run linked)",
                                     font=("Consolas", 10), anchor="w",
                                     justify="left")
@@ -885,21 +880,24 @@ class PostHocPanel(ctk.CTkFrame):
             self.link_run(d, first, native_sample=None)
             self._info.configure(
                 text=f"linked run: {d}\nMULTI-dataset run ({len(multi_keys)} "
-                      f"cubes) — NOT auto-linked to one dataset.\n"
-                      f"Pick a dataset in the 'dataset' dropdown to analyze "
-                      f"it (showing «{first}»).")
+                      f"cubes) — analyzing «{first}».")
             return
         if sample_inferred and sample_inferred in SAMPLES:
             sample = sample_inferred
             self._sample_var.set(sample)
         if sample not in SAMPLES:
-            messagebox.showerror("sample",
-                "Pick a sample from the dropdown first; couldn't "
-                "infer it from the run dir. (Run dirs from the "
-                "current GUI session also include a "
-                "_train_kwargs.json with `_sample_config`; check that "
-                "this file exists and has a path field.)")
-            return
+            # Couldn't infer the run's dataset — use the cube loaded in the
+            # Dataset tab (top of the app).
+            pre = getattr(self.app, "pre", None)
+            k = pre.get_sample_key() if pre is not None else None
+            if k and k in SAMPLES:
+                sample = k
+                self._sample_var.set(sample)
+            else:
+                messagebox.showerror("No dataset",
+                    "Load a cube in the Dataset tab (top of the window) "
+                    "first, then load the run dir here.")
+                return
         self.link_run(d, sample)
 
     def _ensure_inference(self) -> bool:
@@ -960,9 +958,13 @@ class PostHocPanel(ctk.CTkFrame):
         os.makedirs(eval_dir, exist_ok=True)
         np.savez(self._inference_cache_path(),
                   soft_probs=inf["soft_probs"], assigns=inf["assigns"],
-                  embeds=inf["embeds"])
+                  embeds=inf["embeds"],
+                  K_original_ids=np.asarray(inf.get("K_original_ids", []),
+                                            dtype=np.int64),
+                  K_original=np.int64(inf.get("K_original", 0)))
         return dict(soft_probs=inf["soft_probs"],
-                    assigns=inf["assigns"], embeds=inf["embeds"])
+                    assigns=inf["assigns"], embeds=inf["embeds"],
+                    K_original_ids=inf.get("K_original_ids", []))
 
     def _refresh_class_dropdown(self):
         """After inference, populate class dropdown + multi-select +
@@ -4443,12 +4445,29 @@ class PostHocPanel(ctk.CTkFrame):
                           f"(N={N}, dim={embeds.shape[1]} → 2).")
 
     # ---- BF / HAADF ----
+    def _active_cube_path(self):
+        """Cube to analyze: the run-linked cube if present, else the cube
+        loaded in the Dataset tab (top of the app)."""
+        if self._cube_path:
+            return self._cube_path
+        pre = getattr(self.app, "pre", None)
+        try:
+            p = pre.get_loaded_path() if pre is not None else None
+        except Exception:
+            p = None
+        return p or None
+
     def _ensure_BF_HAADF(self):
         if self._BF is not None and self._HA is not None:
             return True
+        cube_path = self._active_cube_path()
+        if not cube_path:
+            messagebox.showinfo("No dataset",
+                "Load a cube in the Dataset tab (top) first.")
+            return False
         self._set_status("computing BF + HAADF (~10–30 s) …")
         try:
-            cube = _open_lazy(self._cube_path)
+            cube = _open_lazy(cube_path)
             Ny, Nx, H, W = cube.shape
             r_BF = 0.06 * H
             r_in = 0.18 * H; r_out = 0.45 * H
@@ -4509,9 +4528,9 @@ class PostHocPanel(ctk.CTkFrame):
         'Compute map' integrates that annulus at every probe position to give
         the virtual annular image on the right.
         """
-        if not getattr(self, "_cube_path", None):
+        if not self._active_cube_path():
             messagebox.showinfo("Annular detector",
-                "Load a run / cube first (Load run dir… or Browse cube…).")
+                "Load a cube in the Dataset tab (top) first.")
             return
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_tkagg import (
@@ -4549,6 +4568,17 @@ class PostHocPanel(ctk.CTkFrame):
         ctk.CTkButton(ctrl, text="Compute map", width=110,
                       fg_color=("#2D7A2D", "#1F7A1F"),
                       command=lambda: _compute_map()).pack(side="left", padx=2)
+        # Frame slider (single-frame background) — drag to scrub frames.
+        frame_row = ctk.CTkFrame(win, fg_color="transparent")
+        frame_row.pack(side="top", fill="x", padx=8, pady=(2, 0))
+        ctk.CTkLabel(frame_row, text="frame:").pack(side="left", padx=(2, 6))
+        frame_slider = ctk.CTkSlider(
+            frame_row, from_=0, to=1, number_of_steps=1,
+            command=lambda v: (idx_var.set(str(int(float(v)))),
+                               _update_view() if bg_var.get() == "single frame"
+                               else None))
+        frame_slider.pack(side="left", fill="x", expand=True, padx=4)
+        frame_slider.set(0)
         status = ctk.CTkLabel(win, text="", anchor="w")
         status.pack(side="bottom", fill="x", padx=8, pady=(0, 4))
 
@@ -4564,13 +4594,19 @@ class PostHocPanel(ctk.CTkFrame):
         def _load_cube():
             if st["cube"] is None:
                 status.configure(text="opening cube…"); win.update_idletasks()
-                st["cube"] = _open_lazy(self._cube_path)
+                st["cube"] = _open_lazy(self._active_cube_path())
                 st["shape"] = tuple(st["cube"].shape)
                 H = st["shape"][2]
                 if not r_var.get():
                     r_var.set(f"{0.25 * H:.0f}")
                 if not dr_var.get():
                     dr_var.set(f"{0.06 * H:.0f}")
+                N = int(st["shape"][0]) * int(st["shape"][1])
+                try:
+                    frame_slider.configure(to=max(1, N - 1),
+                                           number_of_steps=max(1, N - 1))
+                except Exception:
+                    pass
             return st["cube"]
 
         def _vals():
@@ -4859,6 +4895,37 @@ class PostHocPanel(ctk.CTkFrame):
                 f"(was the run trained with n_layers ≥ {ln}?)")
         raise ValueError(f"unknown cam layer {name!r}")
 
+    def _dense_to_proto_ids(self, model, cfg, polar_pre, device):
+        """dense class id -> original prototype index for the loaded run.
+        GradCAM/IG target the 60-way prototype head, so a dense id (0..K-1)
+        must be mapped to the actual prototype index or the attribution points
+        at an inactive/wrong prototype. Cached per run dir; recovers + caches
+        into inference.npz for runs that predate K_original_ids being saved."""
+        from viz_gradcam import (load_original_prototype_ids,
+                                  resolve_prototype_ids)
+        run_dir = self.outdir
+        cache = getattr(self, "_proto_ids_cache", None)
+        if cache is None:
+            cache = self._proto_ids_cache = {}
+        if run_dir in cache:
+            return cache[run_dir]
+        ids = load_original_prototype_ids(run_dir)
+        if ids is None:
+            inf = getattr(self, "_inf", None)
+            ki = inf.get("K_original_ids") if isinstance(inf, dict) else None
+            if ki is not None and len(ki):
+                ids = [int(x) for x in np.asarray(ki).ravel().tolist()]
+        if ids is None:
+            try:
+                from data import LoadPRZ
+                ds_full = LoadPRZ(cfg["path"], resize=192, vmax=cfg["vmax"])
+                ids = resolve_prototype_ids(run_dir, model, ds_full, device,
+                                            polar_pre=polar_pre)
+            except Exception as e:
+                print(f"[gradcam] prototype-id resolve failed: {e!r}")
+        cache[run_dir] = ids
+        return ids
+
     def _compute_gradcam_and_ig_from_raw(
             self, ckpt_path: str, c: int,
             raw_pattern_2d: np.ndarray
@@ -4872,7 +4939,7 @@ class PostHocPanel(ctk.CTkFrame):
         from scipy.ndimage import gaussian_filter
         from dino_sr_contrastive_model import load_contrastive_checkpoint
         from viz_gradcam import (GradCAM, integrated_gradients,
-                                   polar_cam_to_cartesian)
+                                   polar_cam_to_cartesian, dense_target)
         from viz_paper_attribution import (build_polar_preproc,
                                               build_cart_preproc)
         device = torch.device("cuda" if torch.cuda.is_available()
@@ -4909,16 +4976,17 @@ class PostHocPanel(ctk.CTkFrame):
         last_mod = self._resolve_cam_target(model.student_encoder,
                                                 cam_layer_name)
         cam_tool = GradCAM(model, last_mod)
+        c_t = dense_target(self._dense_to_proto_ids(model, cfg, polar_pre, device), c)
         with torch.enable_grad():
             xp_cam = x_polar.detach().requires_grad_(True)
-            cam_p  = cam_tool(xp_cam, target_class=c)
+            cam_p  = cam_tool(xp_cam, target_class=c_t)
         cam_cart = polar_cam_to_cartesian(cam_p).detach().cpu().numpy()
         cam_cart = gaussian_filter(np.abs(cam_cart), sigma=2.0)
         # IG (uses a fresh input tensor so the GradCAM autograd graph
         # doesn't interfere with the IG accumulation).
         with torch.enable_grad():
             ig_p = integrated_gradients(model, x_polar.detach(),
-                                          target_class=c, n_steps=50)
+                                          target_class=c_t, n_steps=50)
         ig_cart = polar_cam_to_cartesian(ig_p).detach().cpu().numpy()
         ig_cart = gaussian_filter(np.abs(ig_cart), sigma=2.0)
         avg_cart = x_cart[0, 0].detach().cpu().numpy()
@@ -4933,7 +5001,7 @@ class PostHocPanel(ctk.CTkFrame):
         import torch.nn.functional as F
         from scipy.ndimage import gaussian_filter
         from dino_sr_contrastive_model import load_contrastive_checkpoint
-        from viz_gradcam import GradCAM, polar_cam_to_cartesian
+        from viz_gradcam import GradCAM, polar_cam_to_cartesian, dense_target
         from viz_paper_attribution import (build_polar_preproc,
                                               build_cart_preproc)
         device = torch.device("cuda" if torch.cuda.is_available()
@@ -4971,9 +5039,10 @@ class PostHocPanel(ctk.CTkFrame):
         last_mod = self._resolve_cam_target(model.student_encoder,
                                                 cam_layer_name)
         cam_tool = GradCAM(model, last_mod)
+        c_t = dense_target(self._dense_to_proto_ids(model, cfg, polar_pre, device), c)
         with torch.enable_grad():
             xp_cam = x_polar.detach().requires_grad_(True)
-            cam_p  = cam_tool(xp_cam, target_class=c)
+            cam_p  = cam_tool(xp_cam, target_class=c_t)
         cam_cart = polar_cam_to_cartesian(cam_p).detach().cpu().numpy()
         cam_cart = gaussian_filter(np.abs(cam_cart), sigma=2.0)
         avg_cart = x_cart[0, 0].detach().cpu().numpy()
@@ -4993,7 +5062,7 @@ class PostHocPanel(ctk.CTkFrame):
         from scipy.ndimage import gaussian_filter
         from dino_sr_contrastive_model import load_contrastive_checkpoint
         from viz_gradcam import (GradCAM, integrated_gradients,
-                                   polar_cam_to_cartesian)
+                                   polar_cam_to_cartesian, dense_target)
         from viz_paper_attribution import (build_polar_preproc,
                                              build_cart_preproc)
 
@@ -5047,17 +5116,18 @@ class PostHocPanel(ctk.CTkFrame):
         last_mod = self._resolve_cam_target(model.student_encoder,
                                                 cam_layer_name)
         cam_tool = GradCAM(model, last_mod)
+        c_t = dense_target(self._dense_to_proto_ids(model, cfg, polar_pre, device), c)
 
         with torch.enable_grad():
             xp_cam = x_polar.detach().requires_grad_(True)
-            cam_p  = cam_tool(xp_cam, target_class=c)
+            cam_p  = cam_tool(xp_cam, target_class=c_t)
         cam_cart = polar_cam_to_cartesian(cam_p).detach().cpu().numpy()
         cam_cart = gaussian_filter(np.abs(cam_cart), sigma=2.0)
 
         # IG uses its own clean input tensor
         with torch.enable_grad():
             ig_p = integrated_gradients(model, x_polar.detach(),
-                                          target_class=c, n_steps=50)
+                                          target_class=c_t, n_steps=50)
         ig_cart = polar_cam_to_cartesian(ig_p).detach().cpu().numpy()
         ig_cart = gaussian_filter(np.abs(ig_cart), sigma=2.0)
 

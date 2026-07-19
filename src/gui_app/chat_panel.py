@@ -549,7 +549,8 @@ class ChatPanel(ctk.CTkFrame):
         from tkinter import filedialog
         path = filedialog.askopenfilename(
             title="Choose a 4D-STEM cube",
-            filetypes=[("4D-STEM cubes", "*.npy *.npz *.prz *.h5 *.hdf5"),
+            filetypes=[("4D-STEM cubes",
+                        "*.npy *.npz *.prz *.h5 *.hdf5 *.dm4 *.dm3"),
                        ("All files", "*.*")])
         if not path:
             return

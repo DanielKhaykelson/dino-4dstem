@@ -209,6 +209,9 @@ def peek_cube_info(path):
             return tuple(mm.shape), mm.dtype, True
         shape, dtype, stored = _npz_member_header(path, "data")
         return tuple(shape), dtype, stored
+    if pl.endswith((".dm4", ".dm3")):
+        arr = _open_dm4(path)            # memmap — cheap header peek
+        return tuple(arr.shape), arr.dtype, True
     raise ValueError("peek_cube_info: unsupported (use h5 peek for hdf5)")
 
 
@@ -295,6 +298,234 @@ def _npz_member_memmap(path, member="data"):
                      shape=shape, order="F" if fortran else "C")
 
 
+def _dm4_pick(path):
+    """Open a Gatan .dm4/.dm3 and return (array, index, is_eels) for the
+    largest >=3D dataset (skips the 2D thumbnail). `array` is a lazy memmap
+    when possible. `is_eels` is a best-effort flag from the dm metadata."""
+    from ncempy.io.dm import fileDM
+    dmf = fileDM(path, on_memory=False)
+    n = int(getattr(dmf, "numObjects", 1))
+    best, best_size, best_i = None, -1, -1
+    for i in range(n):
+        try:
+            mm = dmf.getMemmap(i)
+        except Exception:
+            mm = None
+        if mm is None:
+            continue
+        if getattr(mm, "ndim", 0) >= 3 and int(getattr(mm, "size", 0) or 0) > best_size:
+            best, best_size, best_i = mm, int(mm.size), i
+    if best is None:
+        from ncempy.io.dm import dmReader
+        for ds in range(n):
+            try:
+                a = np.asarray(dmReader(path, dSetNum=ds)["data"])
+            except Exception:
+                continue
+            if a.ndim >= 3:
+                best, best_i = a, ds
+                break
+        if best is None:
+            raise ValueError(
+                f"{os.path.basename(path)}: no 3D/4D dataset found in the "
+                f"dm file.")
+    # Best-effort: detect EELS / spectrum datasets (energy axis) so we don't
+    # silently treat them as diffraction cubes.
+    is_eels = False
+    try:
+        meta = dmf.getMetadata(best_i)
+        blob = str(meta).lower()
+        is_eels = ("eels" in blob) or ("ev" in str(meta.get("EELS", "")).lower()
+                                       if isinstance(meta, dict) else False)
+    except Exception:
+        is_eels = False
+    return best, best_i, is_eels
+
+
+def _dm4_to_4d(arr, scan_shape=None, path=""):
+    """Coerce a dm 3D/4D dataset to (Ny, Nx, H, W) (memmap-preserving)."""
+    if arr.ndim == 4:
+        return arr
+    if arr.ndim == 3:
+        N, H, W = arr.shape
+        if scan_shape is None:
+            s = int(round(N ** 0.5))
+            if s * s == N:
+                scan_shape = (s, s)
+            else:
+                raise ValueError(
+                    f"3D dm dataset of length {N}: scan_shape (Ny, Nx) is "
+                    f"required (could not infer a square scan).")
+        Ny, Nx = int(scan_shape[0]), int(scan_shape[1])
+        if Ny * Nx != N:
+            raise ValueError(
+                f"scan_shape {Ny}x{Nx} = {Ny * Nx} != {N} frames in dm file.")
+        return arr.reshape(Ny, Nx, H, W)
+    raise ValueError(
+        f"{os.path.basename(path)}: unexpected dm ndim={arr.ndim}.")
+
+
+def _dm4_shape_warnings(shape4d, is_eels):
+    """Sanity warnings for a candidate (Ny, Nx, H, W) dm dataset."""
+    w = []
+    H, W = int(shape4d[2]), int(shape4d[3])
+    if is_eels:
+        w.append("dm metadata mentions EELS — this may be a spectrum image, "
+                 "not a 4D-STEM diffraction cube.")
+    if min(H, W) < 16:
+        w.append(f"detector frame is small ({H}×{W}) — may not be diffraction.")
+    if max(H, W) > 4 * max(1, min(H, W)):
+        w.append(f"detector frame is very non-square ({H}×{W}) — unusual for "
+                 f"4D-STEM.")
+    return w
+
+
+def dm4_probe(path, scan_shape=None):
+    """Inspect a .dm4/.dm3 WITHOUT loading frame data. Returns
+    {shape4d, dtype, raw_ndim, warnings} so the GUI can confirm before load."""
+    arr, _idx, is_eels = _dm4_pick(path)
+    shape4d = tuple(_dm4_to_4d(arr, scan_shape=scan_shape, path=path).shape)
+    return {"shape4d": shape4d, "dtype": np.dtype(arr.dtype),
+            "raw_ndim": int(arr.ndim),
+            "warnings": _dm4_shape_warnings(shape4d, is_eels)}
+
+
+def _open_dm4(path, scan_shape=None):
+    """Lazy loader for Gatan .dm4/.dm3 4D-STEM cubes via ncempy. Returns a
+    4D array (Ny, Nx, H, W) — a memmap (zero-RAM) when possible. Picks the
+    largest >=3D dataset; reshapes 3D (N,H,W) by scan_shape (or square)."""
+    arr, _idx, _eels = _dm4_pick(path)
+    return _dm4_to_4d(arr, scan_shape=scan_shape, path=path)
+
+
+def _electron_wavelength_nm(voltage_volts):
+    """Relativistic electron wavelength (nm) for an accelerating voltage (V)."""
+    try:
+        V = float(voltage_volts)
+    except Exception:
+        return None
+    if V <= 0:
+        return None
+    h = 6.62607015e-34; m = 9.1093837015e-31
+    e = 1.602176634e-19; c = 299792458.0
+    lam_m = h / np.sqrt(2.0 * m * e * V * (1.0 + e * V / (2.0 * m * c * c)))
+    return lam_m * 1e9
+
+
+def _length_to_nm(value, unit):
+    """Convert a length `value` in `unit` to nanometres; None if not a length."""
+    u = (unit or "").strip().lower().replace("µ", "u").replace("å", "a")
+    factor = {"nm": 1.0, "um": 1e3, "a": 0.1, "ang": 0.1, "angstrom": 0.1,
+              "pm": 1e-3, "mm": 1e6, "m": 1e9}.get(u)
+    return value * factor if factor is not None else None
+
+
+def dm4_calibration(path):
+    """Best-effort calibration from a Gatan .dm4/.dm3 4D-STEM file, read from
+    METADATA ONLY (no frame data loaded — getMetadata is ~0.1 s even for
+    multi-GB files).  Classifies each calibrated dimension by its UNIT (not
+    position, since dm dimension order is reversed vs numpy axes):
+      - mrad / rad / 1/nm / 1/A  -> reciprocal (detector) axis
+      - nm / um / A / pm / mm    -> real-space (scan) axis
+    mrad/rad are converted to nm^-1 via q = theta / lambda using the
+    accelerating voltage from the metadata.
+
+    Returns a dict (any field may be None):
+      real_nm_per_px, recip_nm_per_px, voltage_kV,
+      detector_unit, detector_scale, note
+    """
+    out = {"real_nm_per_px": None, "recip_nm_per_px": None,
+           "voltage_kV": None, "detector_unit": None,
+           "detector_scale": None, "note": ""}
+    try:
+        from ncempy.io.dm import fileDM
+        f = fileDM(path, on_memory=False)
+        best_i, best_size = -1, -1
+        for i in range(int(getattr(f, "numObjects", 1))):
+            try: mm = f.getMemmap(i)
+            except Exception: mm = None
+            if (mm is not None and getattr(mm, "ndim", 0) >= 3
+                    and int(getattr(mm, "size", 0) or 0) > best_size):
+                best_i, best_size = i, int(mm.size)
+        md = f.getMetadata(best_i if best_i >= 0 else 0)
+    except Exception:
+        return out
+
+    # Accelerating voltage (volts).  "Microscope Info Voltage" is in volts;
+    # the "Formatted" one is a string like "300kV".
+    V = None
+    try:
+        if "Microscope Info Voltage" in md:
+            V = float(md["Microscope Info Voltage"])
+        elif "Microscope Info Formatted Voltage" in md:
+            s = str(md["Microscope Info Formatted Voltage"]).lower()
+            s = s.replace("kv", "").replace("v", "").strip()
+            V = float(s) * 1000.0
+    except Exception:
+        V = None
+    if V:
+        out["voltage_kV"] = V / 1000.0
+    lam = _electron_wavelength_nm(V) if V else None
+
+    # Gather "Calibrations Dimension N Scale / Units".
+    import re
+    dims = {}
+    for k, v in md.items():
+        m = re.match(r"Calibrations Dimension (\d+) (Scale|Units)$", str(k))
+        if m:
+            dims.setdefault(int(m.group(1)), {})[m.group(2)] = v
+
+    saw_mrad_no_volt = False
+    for _i, d in sorted(dims.items()):
+        unit = str(d.get("Units", "")).strip()
+        try:
+            scale = float(d.get("Scale"))
+        except Exception:
+            continue
+        if scale <= 0:
+            continue
+        ul = unit.lower().replace("å", "a")
+        if out["recip_nm_per_px"] is None:
+            if ul == "mrad":
+                if lam:
+                    out["recip_nm_per_px"] = scale * 1e-3 / lam
+                    out["detector_unit"], out["detector_scale"] = unit, scale
+                else:
+                    saw_mrad_no_volt = True
+            elif ul == "rad":
+                if lam:
+                    out["recip_nm_per_px"] = scale / lam
+                    out["detector_unit"], out["detector_scale"] = unit, scale
+                else:
+                    saw_mrad_no_volt = True
+            elif ul in ("1/nm", "nm-1", "nm^-1"):
+                out["recip_nm_per_px"] = scale
+                out["detector_unit"], out["detector_scale"] = unit, scale
+            elif ul in ("1/a", "a-1", "a^-1", "1/ang"):
+                out["recip_nm_per_px"] = scale * 10.0
+                out["detector_unit"], out["detector_scale"] = unit, scale
+        if out["real_nm_per_px"] is None:
+            rn = _length_to_nm(scale, unit)
+            if rn is not None:
+                out["real_nm_per_px"] = rn
+
+    bits = []
+    if out["real_nm_per_px"]:
+        bits.append(f"real {out['real_nm_per_px']:.4g} nm/px")
+    if out["recip_nm_per_px"]:
+        extra = ""
+        if out["detector_unit"] and out["detector_unit"].lower() in ("mrad", "rad"):
+            extra = (f" (from {out['detector_scale']:.4g} {out['detector_unit']}"
+                     f" @ {out['voltage_kV']:.0f} kV)")
+        bits.append(f"reciprocal {out['recip_nm_per_px']:.4g} nm⁻¹/px{extra}")
+    if not out["recip_nm_per_px"] and saw_mrad_no_volt:
+        out["note"] = ("detector calibrated in mrad but no voltage found "
+                       "— reciprocal not derived")
+    else:
+        out["note"] = "; ".join(bits) if bits else "no calibration found in dm metadata"
+    return out
+
+
 def open_lazy_cube(path, scan_shape=None,
                      apply_dectris_corrections: bool = False):
     """Universal lazy 4D-cube loader.  Returns a numpy memmap
@@ -338,6 +569,8 @@ def open_lazy_cube(path, scan_shape=None,
                                 scan_shape=scan_shape, corrections=corr)
         f.close()
         raise ValueError(f"unexpected dataset ndim={ndim}")
+    if path.lower().endswith((".dm4", ".dm3")):
+        return _open_dm4(path, scan_shape=scan_shape)
     if path.lower().endswith((".prz", ".npz")):
         base, _ = os.path.splitext(path)
         cand = base + ".cube.npy"
@@ -733,6 +966,11 @@ class LoadPRZ:
             self.Nx = cube_view.Nx; self.Ny = cube_view.Ny
             self.H  = cube_view.H;  self.W  = cube_view.W
             self.flat = cube_view
+        elif used_path.lower().endswith((".dm4", ".dm3")):
+            # Gatan files can't be np.load'd — use the dm reader (lazy memmap).
+            cube = _open_dm4(used_path, scan_shape=scan_shape)
+            self.Nx, self.Ny, self.H, self.W = cube.shape
+            self.flat = cube.reshape(-1, self.H, self.W)
         else:
             if used_path.lower().endswith(".npy"):
                 cube = np.load(used_path, mmap_mode='r',

@@ -423,12 +423,24 @@ class NMFPanel(ctk.CTkFrame):
         self._render_idle()
 
     def on_runtime_sample_added(self, key):
-        # Keep the sample dropdown in sync.
+        # A cube was loaded in the Data tab -> make it THIS panel's dataset.
         try:
-            from data import SAMPLES
-            self._sample_menu.configure(values=sorted(SAMPLES.keys()))
+            self._vars["sample"].set(key)
+            self._on_sample_change()
         except Exception:
             pass
+
+    def _sync_from_pre(self):
+        """Adopt the cube currently loaded in the Data tab (app.pre)."""
+        pre = getattr(self.app, "pre", None)
+        try:
+            k = pre.get_sample_key() if pre is not None else None
+        except Exception:
+            k = None
+        if k and k != self.sample:
+            self._vars["sample"].set(k)
+            self._on_sample_change()
+        return self.sample
 
     def _refresh_scan_shape(self):
         try:
@@ -439,6 +451,15 @@ class NMFPanel(ctk.CTkFrame):
                                   or None) if cfg else None
         except Exception:
             self._scan_shape = None
+
+    def _recip_per_px(self):
+        """Reciprocal calibration (nm⁻¹ per raw detector px) from the
+        app topbar — used by the interactive cluster-map for q readouts.
+        Returns 0.0 if unavailable (the map still works, just no q)."""
+        try:
+            return float(self.app.recip_res.get()) if self.app else 0.0
+        except Exception:
+            return 0.0
 
     # ----- variant citation --------------------------------------------
     def _on_variant_change(self):
@@ -490,15 +511,12 @@ class NMFPanel(ctk.CTkFrame):
             sample_values = sorted(SAMPLES.keys())
         except Exception:
             sample_values = [""]
-        ctk.CTkLabel(top, text="sample:").pack(side="left", padx=(8, 4))
-        self._sample_menu = ctk.CTkOptionMenu(
-            top, variable=self._vars["sample"], values=sample_values,
-            width=180, command=lambda _v: self._on_sample_change())
-        self._sample_menu.pack(side="left", padx=4)
-        ctk.CTkButton(top, text="Load .prz / .npy …",
-                       width=160,
-                       command=self._load_cube_from_disk
-                       ).pack(side="left", padx=4)
+        # Dataset follows the Data tab (top of the app) — no per-panel sample
+        # dropdown / loader (avoids defaulting to the wrong sample).
+        ctk.CTkLabel(top, text="dataset:").pack(side="left", padx=(8, 4))
+        self._ds_lbl = ctk.CTkLabel(top, text="(load a cube in the Data tab)",
+                                     font=("Consolas", 10, "bold"))
+        self._ds_lbl.pack(side="left", padx=4)
         self._info_lbl = ctk.CTkLabel(top, text="(no sample yet)",
                                         font=("Consolas", 10))
         self._info_lbl.pack(side="left", padx=8)
@@ -633,9 +651,15 @@ class NMFPanel(ctk.CTkFrame):
         ctk.CTkButton(sb, text="Show class averages…",
                        command=self._open_class_averages_popup
                        ).pack(fill="x", padx=8, pady=(2, 2))
-        ctk.CTkButton(sb, text="Save snapshot",
+        _sl_row = ctk.CTkFrame(sb, fg_color="transparent")
+        _sl_row.pack(fill="x", padx=8, pady=(2, 4))
+        ctk.CTkButton(_sl_row, text="Save snapshot",
                        command=self._save_snapshot
-                       ).pack(fill="x", padx=8, pady=(2, 4))
+                       ).pack(side="left", fill="x", expand=True, padx=(0, 2))
+        ctk.CTkButton(_sl_row, text="Load snapshot…",
+                       fg_color=("#4D6FB0", "#3A5380"),
+                       command=self._load_snapshot
+                       ).pack(side="left", fill="x", expand=True, padx=(2, 0))
 
         self._status_lbl = ctk.CTkLabel(sb,
             text="", font=("Consolas", 9), justify="left",
@@ -645,7 +669,7 @@ class NMFPanel(ctk.CTkFrame):
         # canvas
         canv = ctk.CTkFrame(body)
         canv.pack(side="left", fill="both", expand=True, padx=(6, 0))
-        self._fig = Figure(figsize=(13, 8))
+        self._fig = Figure(figsize=(14, 9))
         self._canvas = FigureCanvasTkAgg(self._fig, master=canv)
         self._canvas.get_tk_widget().pack(fill="both", expand=True)
         NavigationToolbar2Tk(self._canvas, canv)
@@ -657,9 +681,9 @@ class NMFPanel(ctk.CTkFrame):
         self._render_idle()
 
         # Populate sample default once.
-        if sample_values:
-            self._vars["sample"].set(sample_values[0])
-            self._on_sample_change()
+        # Bind to whatever is loaded in the Data tab (kept in sync via
+        # on_runtime_sample_added); no default sample selection.
+        self.after(200, self._sync_from_pre)
         # If post-hoc has a run linked, adopt its sample automatically.
         try:
             self.after(150, self._try_auto_link_from_loaded_run)
@@ -669,6 +693,11 @@ class NMFPanel(ctk.CTkFrame):
     def _on_sample_change(self):
         s = self._vars["sample"].get()
         self.sample = s if s else None
+        try:
+            self._ds_lbl.configure(
+                text=self.sample or "(load a cube in the Data tab)")
+        except Exception:
+            pass
         self._refresh_scan_shape()
         # When the user changes sample and 'use sample default' is on,
         # snap vmax to the sample's training vmax.
@@ -831,8 +860,10 @@ class NMFPanel(ctk.CTkFrame):
     def _kickoff_run(self):
         if self._compute_running:
             messagebox.showinfo("NMF", "compute already running"); return
+        self._sync_from_pre()
         if not self.sample:
-            messagebox.showinfo("NMF", "pick a sample first"); return
+            messagebox.showinfo("NMF",
+                "Load a cube in the Data tab (top) first."); return
         self._compute_running = True
         self._stop_requested = False
         self._run_btn.configure(state="disabled")
@@ -1060,22 +1091,27 @@ class NMFPanel(ctk.CTkFrame):
 
         self._fig.clear()
         n_methods = max(1, len(labels))
-        # Layout: row 0 = NMF components, row 1 (optional) = diagnostics
-        # (recon-err vs n_comp + silhouette vs K), last row = class maps.
+        ncomp_cols = max(n_comp, 2)
+        # Components (+ optional diagnostics) get a top gridspec; the class
+        # maps get their OWN bottom gridspec with one column PER METHOD, so
+        # they render large instead of squeezed into n_comp columns.
         if diag:
-            gs = self._fig.add_gridspec(
-                3, max(n_comp, n_methods, 2),
-                height_ratios=[1.0, 0.55, 1.0])
-            map_row = 2
+            gs_top = self._fig.add_gridspec(
+                2, ncomp_cols, left=0.04, right=0.98, top=0.94, bottom=0.52,
+                height_ratios=[1.0, 0.6], hspace=0.55, wspace=0.12)
+            map_top, map_bot = 0.44, 0.06
         else:
-            gs = self._fig.add_gridspec(
-                2, max(n_comp, n_methods),
-                height_ratios=[1.0, 1.0])
-            map_row = 1
+            gs_top = self._fig.add_gridspec(
+                1, ncomp_cols, left=0.04, right=0.98, top=0.94, bottom=0.55,
+                wspace=0.12)
+            map_top, map_bot = 0.48, 0.06
+        gs_map = self._fig.add_gridspec(
+            1, n_methods, left=0.04, right=0.98, top=map_top, bottom=map_bot,
+            wspace=0.40)
 
         # ---- NMF components ----
         for k in range(n_comp):
-            ax = self._fig.add_subplot(gs[0, k])
+            ax = self._fig.add_subplot(gs_top[0, k])
             comp = H[k].reshape(comp_shape)
             if comp.shape[0] == 1:                   # 1D radial
                 ax.plot(comp[0], color="black", lw=1.0)
@@ -1087,11 +1123,11 @@ class NMFPanel(ctk.CTkFrame):
 
         # ---- diagnostic curves (only when auto modes were used) ----
         if diag:
-            n_cols = max(n_comp, n_methods, 2)
+            n_cols = ncomp_cols
             # Use first half for recon-err, second half for silhouette.
             half = max(1, n_cols // 2)
             if errs is not None:
-                ax_e = self._fig.add_subplot(gs[1, 0:half])
+                ax_e = self._fig.add_subplot(gs_top[1, 0:half])
                 xs = np.arange(2, 2 + len(errs))
                 ax_e.plot(xs, errs, marker="o", lw=1.4, color="#1f77b4")
                 ax_e.axvline(n_comp, color="orange", ls="--", lw=1.2,
@@ -1108,7 +1144,7 @@ class NMFPanel(ctk.CTkFrame):
                 ax_e.legend(fontsize=7, loc="upper right")
                 ax_e.grid(alpha=0.3)
             if sil is not None:
-                ax_s = self._fig.add_subplot(gs[1, half:n_cols])
+                ax_s = self._fig.add_subplot(gs_top[1, half:n_cols])
                 xs = np.arange(2, 2 + len(sil))
                 ax_s.plot(xs, sil, marker="o", lw=1.4, color="#d62728")
                 ax_s.axvline(K, color="orange", ls="--", lw=1.2,
@@ -1127,7 +1163,7 @@ class NMFPanel(ctk.CTkFrame):
         # ---- Class maps per clustering method ----
         self._map_axes = {}
         for col, (method, lbl) in enumerate(labels.items()):
-            ax = self._fig.add_subplot(gs[map_row, col])
+            ax = self._fig.add_subplot(gs_map[0, col])
             self._map_axes[ax] = method
             n_classes = int(lbl.max()) + 1
             # Match DINO class-map style: tab10/tab20 ListedColormap.
@@ -1162,7 +1198,8 @@ class NMFPanel(ctk.CTkFrame):
                  f"vmax={vmax:g}   n_comp={n_comp}   K={K}   "
                  f"recon-err={d['err_final']:.3f}")
         self._fig.suptitle(title, fontsize=11)
-        self._fig.tight_layout()
+        # NOTE: no tight_layout here — the manual gridspec (left/right/top/
+        # bottom) already positions the components row + the larger maps row.
         self._canvas.draw_idle()
         # Auto-save a copy of the result figure next to the loaded data.
         try:
@@ -1239,10 +1276,124 @@ class NMFPanel(ctk.CTkFrame):
                     "K": int(self._last["K"]),
                     "err_final": float(self._last["err_final"]),
                     "methods": list(self._last["labels"].keys()),
+                    # comp_shape is required to re-render on reload.
+                    "comp_shape": [int(x) for x in
+                                     self._last["comp_shape"]],
+                    "scan_shape": ([int(x) for x in self._scan_shape]
+                                     if self._scan_shape else None),
                 }, fh, indent=2)
+            ny, nx = (self._scan_shape if self._scan_shape else (1, -1))
+            self._save_items_pngs(out_dir, self._last["H"],
+                                  self._last["comp_shape"],
+                                  self._last["labels"], ny, nx)
         except Exception as e:
             messagebox.showerror("save", repr(e)); return
-        self._status_lbl.configure(text=f"saved → {out_dir}")
+        self._status_lbl.configure(text=f"saved → {out_dir}  (+ per-item pngs)")
+
+    def _load_snapshot(self):
+        """Reload a previously-saved NMF+clustering snapshot (W/H/labels +
+        summary.json) so results can be viewed without recomputing."""
+        from tkinter import filedialog
+        d = filedialog.askdirectory(
+            title="Pick a saved NMF snapshot folder "
+                  "(contains W.npy, H.npy, summary.json)",
+            initialdir=(os.path.join(self.outdir, "nmf")
+                          if self.outdir else "."))
+        if not d:
+            return
+        try:
+            with open(os.path.join(d, "summary.json")) as fh:
+                meta = json.load(fh)
+            W = np.load(os.path.join(d, "W.npy"))
+            H = np.load(os.path.join(d, "H.npy"))
+            labels = {}
+            for m in meta.get("methods", []):
+                p = os.path.join(d, f"labels_{m}.npy")
+                if os.path.exists(p):
+                    labels[m] = np.load(p)
+            if not labels:
+                # fall back: any labels_*.npy present
+                for fn in os.listdir(d):
+                    if fn.startswith("labels_") and fn.endswith(".npy"):
+                        labels[fn[7:-4]] = np.load(os.path.join(d, fn))
+            if not labels:
+                raise RuntimeError("no labels_*.npy in the folder")
+            comp_shape = tuple(meta.get("comp_shape")
+                                 or (1, H.shape[1]))
+        except Exception as e:
+            messagebox.showerror("load", f"Could not load snapshot:\n{e!r}")
+            return
+        # Adopt the saved scan shape if we don't already have one.
+        if not self._scan_shape and meta.get("scan_shape"):
+            self._scan_shape = tuple(meta["scan_shape"])
+        # Rebuild the _last dict the renderer / interactive map expect.
+        self._last = dict(
+            variant=meta.get("variant", "(loaded)"), cfg={},
+            X_shape=(W.shape[0], H.shape[1]), comp_shape=comp_shape,
+            W=W, H=H, n_comp=int(meta.get("n_comp", H.shape[0])),
+            K=int(meta.get("K", 0)), labels=labels,
+            errs=None, sil=None,
+            err_final=float(meta.get("err_final", 0.0)),
+            polar_full=None,
+        )
+        self.last_cluster_labels = dict(labels)
+        try:
+            self._render_last()
+        except Exception as e:
+            print(f"[nmf] render after load failed: {e!r}", flush=True)
+        self._status_lbl.configure(
+            text=f"loaded snapshot ← {d}\n"
+                 f"variant={self._last['variant']}  K={self._last['K']}  "
+                 f"methods={', '.join(labels)}")
+
+    def _save_items_pngs(self, out_dir, H, comp_shape, labels, Ny, Nx):
+        """Save EACH NMF component H[k] and EACH cluster map as its own PNG
+        (out_dir/components/H_kk.png, out_dir/maps/map_<method>.png).
+        Thread-safe — uses Agg Figures, not pyplot."""
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.colors import ListedColormap
+        from matplotlib import colormaps
+        comp_dir = os.path.join(out_dir, "components")
+        map_dir = os.path.join(out_dir, "maps")
+        os.makedirs(comp_dir, exist_ok=True)
+        os.makedirs(map_dir, exist_ok=True)
+        n = 0
+        for k in range(int(H.shape[0])):
+            comp = H[k].reshape(comp_shape)
+            tall = comp.shape[0] > 1
+            fig = Figure(figsize=(3.2, 6.4) if tall else (6.4, 2.2))
+            FigureCanvasAgg(fig)
+            ax = fig.add_subplot(111)
+            if comp.shape[0] == 1:
+                ax.plot(comp[0], color="black", lw=1.0)
+            else:
+                ax.imshow(comp, cmap="inferno", aspect="auto")
+            ax.set_xticks([]); ax.set_yticks([]); ax.set_title(f"H[{k}]")
+            fig.savefig(os.path.join(comp_dir, f"H_{k:02d}.png"),
+                        dpi=150, bbox_inches="tight")
+            n += 1
+        for method, lbl in labels.items():
+            lbl = np.asarray(lbl)
+            nC = int(lbl.max()) + 1
+            cmap = colormaps["tab20" if nC > 10 else "tab10"]
+            palette = ListedColormap([cmap(i % cmap.N) for i in range(nC)])
+            grid = lbl.reshape(Ny, Nx) if lbl.size == Ny * Nx \
+                else lbl.reshape(1, -1)
+            fig = Figure(figsize=(8, 4))
+            FigureCanvasAgg(fig)
+            ax = fig.add_subplot(111)
+            im = ax.imshow(grid, cmap=palette, vmin=-0.5, vmax=nC - 0.5,
+                           interpolation="nearest", aspect="equal")
+            ax.set_title(f"{self.sample}  {method}  K={nC}", fontsize=10)
+            ax.set_axis_off()
+            cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04,
+                              ticks=list(range(nC)))
+            cb.set_label("class id", fontsize=8)
+            fig.savefig(os.path.join(map_dir, f"map_{_safe_name(method)}.png"),
+                        dpi=150, bbox_inches="tight")
+            n += 1
+        return n
 
     # ----- class-averages popup ----------------------------------------
     def _open_class_averages_popup(self):
@@ -1396,8 +1547,10 @@ class NMFPanel(ctk.CTkFrame):
         if self._compute_running:
             messagebox.showinfo("Report", "compute already running")
             return
+        self._sync_from_pre()
         if not self.sample:
-            messagebox.showinfo("Report", "pick a sample first"); return
+            messagebox.showinfo("Report",
+                "Load a cube in the Data tab (top) first."); return
         out_root = filedialog.askdirectory(
             initialdir=self.outdir or os.getcwd(),
             title="Pick output folder for NMF report  "
@@ -1491,6 +1644,15 @@ class NMFPanel(ctk.CTkFrame):
                     H=H, W=W, n_comp=n_comp, K=K,
                     err=err, labels=method_labels)
                 png_paths.append((png_name, p))
+                # Also export each component + each cluster map as its own PNG.
+                try:
+                    ny, nx = (self._scan_shape if self._scan_shape
+                              else (1, -1))
+                    self._save_items_pngs(
+                        os.path.join(png_dir, f"{png_name}_items"),
+                        H, comp_shape, method_labels, ny, nx)
+                except Exception as e:
+                    print(f"[report] per-item pngs failed: {e!r}", flush=True)
 
             # Build PPTX.
             pptx_path = None

@@ -83,6 +83,8 @@ def collect(sample, run_dir, device, ig_steps=50):
             p.requires_grad_(True)
     model.eval()
     cam_tool = vpa.GradCAM(model, list(model.student_encoder.children())[-1])
+    orig_ids = vpa.resolve_prototype_ids(run_dir, model, dataset, device,
+                                         polar_pre=polar_pre)
     counts = np.bincount(assigns, minlength=K)
     out = []
     print(f"[si-attr] {sample}: K={K}", flush=True)
@@ -100,9 +102,10 @@ def collect(sample, run_dir, device, ig_steps=50):
         x_cart = cart_pre(x_full); x_polar = polar_pre(x_full)
         with torch.enable_grad():
             xp = x_polar.detach().requires_grad_(True)
-            cam_p = cam_tool(xp, target_class=c)
+            _ct = vpa.dense_target(orig_ids, c)
+            cam_p = cam_tool(xp, target_class=_ct)
             ig_p = vpa.integrated_gradients(model, x_polar.detach(),
-                                            target_class=c, n_steps=ig_steps)
+                                            target_class=_ct, n_steps=ig_steps)
         avg = x_cart[0, 0].detach().cpu().numpy()
         cam = vpa._gaussian_blur(vpa.polar_cam_to_cartesian(cam_p).detach().cpu().numpy(), ATTR_SIGMA)
         ig = vpa._gaussian_blur(vpa.polar_cam_to_cartesian(ig_p).detach().cpu().numpy(), ATTR_SIGMA)

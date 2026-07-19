@@ -25,7 +25,7 @@ except Exception:
         m1 = np.cumsum(h*c)/np.clip(w1, 1, None); m2 = (np.cumsum((h*c)[::-1])/np.clip(w2[::-1], 1, None))[::-1]
         v = w1[:-1]*w2[1:]*(m1[:-1]-m2[1:])**2; return c[:-1][np.argmax(v)]
 
-OUT = "docs/paper/draft_v2/figs"; VMAX = 2.0; BLUR = 2.0; INV_ANG = 0.00185; KMAX = 0.35
+OUT = "docs/paper/draft_v2/figs"; VMAX = 50.0; BLUR = 2.0; INV_ANG = 0.00185; KMAX = 0.35  # was 2.0 -> over-clipped ring-band spots (reach ~12), under-measured crystallinity; central beam masked out of band, high clip safe
 DET = dict(threshold=0.05, min_sigma=2.0, max_sigma=8.0, num_sigma=6, overlap=0.4)
 CIF = r"D:/DINOSR/data/231228-IMC150nm-0p2apersec-anneal-70c-60min/cifs/alpha.cif"
 MINPIX = 30; BAND = 3; MIN_PEAKS = 4

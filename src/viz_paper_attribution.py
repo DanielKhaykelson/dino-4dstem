@@ -46,6 +46,7 @@ from dino_sr_contrastive_model import (
 from viz_gradcam import (
     GradCAM, integrated_gradients, polar_cam_to_cartesian,
     build_polar_preproc, build_cart_preproc,
+    resolve_prototype_ids, dense_target,
 )
 
 
@@ -136,6 +137,11 @@ def run(run_dir: str, sample: str, n_samples_per_proto: int = 3,
     model.eval()
     last_mod = list(model.student_encoder.children())[-1]
     cam_tool = GradCAM(model, last_mod)
+    # Map dense class ids (0..K-1) -> original prototype indices so GradCAM/IG
+    # attribute the *actual* trained prototype, not an inactive one.
+    orig_ids = resolve_prototype_ids(run_dir, model, dataset, device,
+                                     polar_pre=polar_pre)
+    print(f"[paper-attr] dense->prototype mapping: {orig_ids}", flush=True)
 
     # confidence-weighted class means + their attribution
     avg_cart = {}
@@ -162,9 +168,9 @@ def run(run_dir: str, sample: str, n_samples_per_proto: int = 3,
         x_cart = cart_pre(x_full); x_polar = polar_pre(x_full)
         with torch.enable_grad():
             xp = x_polar.detach().requires_grad_(True)
-            cam_p = cam_tool(xp, target_class=c)
+            cam_p = cam_tool(xp, target_class=dense_target(orig_ids, c))
             ig_p = integrated_gradients(model, x_polar.detach(),
-                                         target_class=c, n_steps=ig_steps)
+                                         target_class=dense_target(orig_ids, c), n_steps=ig_steps)
         avg_cart[c] = x_cart[0, 0].detach().cpu().numpy()
         cam_cart[c] = polar_cam_to_cartesian(cam_p).detach().cpu().numpy()
         ig_cart[c] = polar_cam_to_cartesian(ig_p).detach().cpu().numpy()
@@ -197,7 +203,7 @@ def run(run_dir: str, sample: str, n_samples_per_proto: int = 3,
         x_polar_s = polar_pre(x_full)
         with torch.enable_grad():
             xp = x_polar_s.detach().requires_grad_(True)
-            cam_ps = cam_tool(xp, target_class=c).detach().cpu().numpy()
+            cam_ps = cam_tool(xp, target_class=dense_target(orig_ids, c)).detach().cpu().numpy()
         cam_cs = polar_cam_to_cartesian(
             torch.from_numpy(cam_ps).to(device)).cpu().numpy()
         sample_for_proto[c] = (
@@ -272,9 +278,9 @@ def run(run_dir: str, sample: str, n_samples_per_proto: int = 3,
             x_polar_s = polar_pre(x_full)
             with torch.enable_grad():
                 xp = x_polar_s.detach().requires_grad_(True)
-                cam_ps = cam_tool(xp, target_class=c).detach().cpu().numpy()
+                cam_ps = cam_tool(xp, target_class=dense_target(orig_ids, c)).detach().cpu().numpy()
                 ig_ps = integrated_gradients(model, x_polar_s.detach(),
-                                              target_class=c,
+                                              target_class=dense_target(orig_ids, c),
                                               n_steps=ig_steps).detach().cpu().numpy()
             cam_cs = _gaussian_blur(polar_cam_to_cartesian(
                 torch.from_numpy(cam_ps).to(device)).cpu().numpy(),

@@ -377,11 +377,24 @@ class DINOClusterPanel(ctk.CTkFrame):
         self._render_idle()
 
     def on_runtime_sample_added(self, key):
+        # A cube was loaded in the Data tab -> make it THIS panel's dataset.
         try:
-            from data import SAMPLES
-            self._sample_menu.configure(values=sorted(SAMPLES.keys()))
+            self._vars["sample"].set(key)
+            self._on_sample_change()
         except Exception:
             pass
+
+    def _sync_from_pre(self):
+        """Adopt the cube currently loaded in the Data tab (app.pre)."""
+        pre = getattr(self.app, "pre", None)
+        try:
+            k = pre.get_sample_key() if pre is not None else None
+        except Exception:
+            k = None
+        if k and k != self.sample:
+            self._vars["sample"].set(k)
+            self._on_sample_change()
+        return self.sample
 
     def _refresh_scan_shape(self):
         try:
@@ -432,15 +445,12 @@ class DINOClusterPanel(ctk.CTkFrame):
             sample_values = sorted(SAMPLES.keys())
         except Exception:
             sample_values = [""]
-        ctk.CTkLabel(top, text="sample:").pack(side="left", padx=(8, 4))
-        self._sample_menu = ctk.CTkOptionMenu(top,
-            variable=self._vars["sample"], values=sample_values,
-            width=180, command=lambda _v: self._on_sample_change())
-        self._sample_menu.pack(side="left", padx=4)
-        ctk.CTkButton(top, text="Load .prz / .npy / .h5 …",
-                       width=180,
-                       command=self._load_cube_from_disk
-                       ).pack(side="left", padx=4)
+        # Dataset follows the Data tab (top of the app) — no per-panel sample
+        # dropdown / loader.
+        ctk.CTkLabel(top, text="dataset:").pack(side="left", padx=(8, 4))
+        self._ds_lbl = ctk.CTkLabel(top, text="(load a cube in the Data tab)",
+                                     font=("Consolas", 10, "bold"))
+        self._ds_lbl.pack(side="left", padx=4)
         self._info_lbl = ctk.CTkLabel(top, text="(no sample yet)",
                                         font=("Consolas", 10))
         self._info_lbl.pack(side="left", padx=8)
@@ -603,9 +613,8 @@ class DINOClusterPanel(ctk.CTkFrame):
         self._canvas.get_tk_widget().pack(fill="both", expand=True)
         NavigationToolbar2Tk(self._canvas, canv)
 
-        if sample_values:
-            self._vars["sample"].set(sample_values[0])
-            self._on_sample_change()
+        # Bind to whatever is loaded in the Data tab (no default selection).
+        self.after(200, self._sync_from_pre)
         # Auto-link to whatever Post-hoc / NMF have already loaded.
         try:
             self.after(150, self._try_auto_link)
@@ -616,6 +625,11 @@ class DINOClusterPanel(ctk.CTkFrame):
     def _on_sample_change(self):
         s = self._vars["sample"].get()
         self.sample = s if s else None
+        try:
+            self._ds_lbl.configure(
+                text=self.sample or "(load a cube in the Data tab)")
+        except Exception:
+            pass
         self._refresh_scan_shape()
         if self._vars["use_sample_vmax"].get():
             self._snap_vmax_to_sample()
@@ -752,9 +766,10 @@ class DINOClusterPanel(ctk.CTkFrame):
         if self._compute_running:
             messagebox.showinfo("DINO+cluster",
                 "compute already running"); return
+        self._sync_from_pre()
         if not self.sample:
             messagebox.showinfo("DINO+cluster",
-                "pick a sample first"); return
+                "Load a cube in the Data tab (top) first."); return
         self._compute_running = True
         self._stop_requested = False
         self._run_btn.configure(state="disabled")

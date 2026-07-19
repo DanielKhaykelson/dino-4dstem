@@ -52,6 +52,100 @@ from dino_sr_contrastive_model import (
 
 
 # =========================================================================
+# 0. Dense-class -> original prototype index resolver
+# =========================================================================
+# GradCAM / IG back-propagate from the model's 60-way prototype head
+# (`logits = model.prototypes(proj); score = logits[0, target_class]`), so
+# `target_class` MUST be the ORIGINAL prototype index. Post-processing renumbers
+# the *active* prototypes to dense ids 0..K-1 (sorted by usage) via
+# `dense_remap_by_usage`, and those dense ids do NOT equal the prototype
+# indices. Passing a dense id as target_class silently attributes an inactive /
+# wrong prototype. This resolver maps dense id -> original prototype index.
+
+def load_original_prototype_ids(run_dir):
+    """dense class id -> original prototype index, from eval/inference.npz's
+    'K_original_ids'. Returns None if the file or key is absent/empty."""
+    npz = os.path.join(run_dir, "eval", "inference.npz")
+    if not os.path.exists(npz):
+        return None
+    try:
+        d = np.load(npz, allow_pickle=True)
+        if "K_original_ids" in d.files:
+            ids = [int(x) for x in np.asarray(d["K_original_ids"]).ravel().tolist()]
+            return ids or None
+    except Exception:
+        pass
+    return None
+
+
+def recover_original_prototype_ids(run_dir, model, dataset, device, polar_pre,
+                                    *, batch_size=256, write_back=True):
+    """Recover dense id -> original prototype index by cross-tabulating a fresh
+    60-way argmax (student path, centred, as in infer_scan) against the SAVED
+    dense `assigns`, taking the modal prototype per dense class. Robust to
+    preprocessing drift. Caches the result back into eval/inference.npz."""
+    npz_path = os.path.join(run_dir, "eval", "inference.npz")
+    d = np.load(npz_path, allow_pickle=True)
+    assigns = np.asarray(d["assigns"]).ravel()
+    K = int(assigns.max()) + 1
+    center = model.center.detach().to(device)
+    N = len(dataset)
+    arg60 = np.empty(N, dtype=np.int64)
+    model.eval()
+    with torch.no_grad():
+        for s in range(0, N, batch_size):
+            xb = torch.stack([dataset[i] for i in range(s, min(s + batch_size, N))]
+                             ).to(device).float()
+            lg = (model.prototypes(model.student_projector(
+                    model.student_encoder(polar_pre(xb)))) - center)
+            arg60[s:s + xb.shape[0]] = lg.argmax(1).cpu().numpy()
+    ids = []
+    for c in range(K):
+        sub = arg60[assigns == c]
+        if len(sub) == 0:
+            ids.append(c); continue
+        v, cnt = np.unique(sub, return_counts=True)
+        ids.append(int(v[cnt.argmax()]))
+    if write_back:
+        try:
+            kw = {k: d[k] for k in d.files}
+            kw["K_original_ids"] = np.asarray(ids, dtype=np.int64)
+            np.savez(npz_path, **kw)
+        except Exception as e:
+            print(f"[gradcam] could not cache K_original_ids: {e!r}")
+    return ids
+
+
+def resolve_prototype_ids(run_dir, model=None, dataset=None, device=None,
+                          polar_pre=None):
+    """dense id -> original prototype index. Loads from inference.npz; if absent
+    and (model, dataset, polar_pre) are supplied, recovers and caches; otherwise
+    returns None so the caller can fall back (with a warning)."""
+    ids = load_original_prototype_ids(run_dir)
+    if ids is not None:
+        return ids
+    if model is not None and dataset is not None and polar_pre is not None:
+        try:
+            return recover_original_prototype_ids(run_dir, model, dataset,
+                                                   device, polar_pre)
+        except Exception as e:
+            print(f"[gradcam] prototype-id recovery failed: {e!r}")
+    return None
+
+
+def dense_target(orig_ids, c):
+    """Map a dense class id `c` to its original prototype index via `orig_ids`;
+    fall back to `c` (with a one-time warning) if the mapping is unavailable."""
+    if orig_ids and 0 <= c < len(orig_ids):
+        return int(orig_ids[c])
+    if not getattr(dense_target, "_warned", False):
+        print("[gradcam] WARNING: no K_original_ids mapping; targeting dense id "
+              "directly -- attribution may point at the wrong prototype.")
+        dense_target._warned = True
+    return int(c)
+
+
+# =========================================================================
 # 1. Eval preprocessing (matches infer_scan)
 # =========================================================================
 
@@ -223,7 +317,10 @@ def polar_cam_to_cartesian(cam_polar: torch.Tensor,
     yy, xx = torch.meshgrid(y, x, indexing="ij")
     r = torch.sqrt(xx ** 2 + yy ** 2)
     theta = torch.atan2(yy, xx)                        # [-pi, pi]
-    theta_norm = (theta + math.pi) / (2 * math.pi)     # [0, 1]
+    # Forward PolarTransform uses theta = linspace(0, 2*pi) -> row 0 is theta=0.
+    # Wrap atan2 into [0, 2*pi) to match. Using (theta + pi) would put theta=0 at
+    # the MIDDLE row and rotate the inverse 180 deg about the center.
+    theta_norm = torch.remainder(theta, 2 * math.pi) / (2 * math.pi)   # [0, 1)
     # grid_sample convention: grid[..., 0] is the input's x-axis (cols=r),
     # grid[..., 1] is the input's y-axis (rows=theta). Both in [-1, 1] when
     # align_corners=True.
@@ -365,6 +462,11 @@ def run(sample: str, config: str, n_samples_per_proto: int = 10,
     cart_pre = build_cart_preproc(polar_size=train_polar_size,
                                     center_crop_size=train_center_crop)
 
+    # dense class id -> original prototype index (target the actual prototype).
+    orig_ids = resolve_prototype_ids(run_dir, model, dataset, device,
+                                     polar_pre=polar_pre)
+    print(f"[gradcam] dense->prototype mapping: {orig_ids}", flush=True)
+
     # Output dir.
     out_dir = os.path.join(run_dir, "eval", "gradcam")
     os.makedirs(out_dir, exist_ok=True)
@@ -403,9 +505,9 @@ def run(sample: str, config: str, n_samples_per_proto: int = 10,
         # GradCAM + Integrated Gradients on the class average.
         with torch.enable_grad():
             x_p = x_polar.detach().requires_grad_(True)
-            cam_p = cam_tool(x_p, target_class=c)       # (192, 192)
+            cam_p = cam_tool(x_p, target_class=dense_target(orig_ids, c))       # (192, 192)
             ig_p = integrated_gradients(model, x_polar.detach(),
-                                         target_class=c, n_steps=50)
+                                         target_class=dense_target(orig_ids, c), n_steps=50)
         cam_c = polar_cam_to_cartesian(cam_p).detach().cpu().numpy()
         ig_c = polar_cam_to_cartesian(ig_p).detach().cpu().numpy()
         avg_polar_by_c[c] = x_polar[0, 0].detach().cpu().numpy()
@@ -489,9 +591,9 @@ def run(sample: str, config: str, n_samples_per_proto: int = 10,
             x_polar = polar_pre(x_full)
             with torch.enable_grad():
                 x_p = x_polar.detach().requires_grad_(True)
-                cam_p_sample = cam_tool(x_p, target_class=c).detach().cpu().numpy()
+                cam_p_sample = cam_tool(x_p, target_class=dense_target(orig_ids, c)).detach().cpu().numpy()
                 ig_p_sample = integrated_gradients(
-                    model, x_polar.detach(), target_class=c, n_steps=50
+                    model, x_polar.detach(), target_class=dense_target(orig_ids, c), n_steps=50
                 ).detach().cpu().numpy()
             cam_c_sample = polar_cam_to_cartesian(
                 torch.from_numpy(cam_p_sample).to(device)).cpu().numpy()

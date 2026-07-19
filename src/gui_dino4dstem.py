@@ -103,6 +103,19 @@ from gui_app.acom_tab import ACOMTabPanel
 from gui_app.chat_panel import ChatPanel
 
 
+def _ellipsize(s: str, n: int = 32) -> str:
+    """Shorten a label to <= n chars with a middle ellipsis, keeping the
+    head and (distinguishing) tail — e.g. 'loaded__Diffraction…611_1'."""
+    s = str(s)
+    if len(s) <= n:
+        return s
+    if n <= 1:
+        return "…"
+    head = (n - 1) * 2 // 3
+    tail = (n - 1) - head
+    return s[:head] + "…" + (s[-tail:] if tail > 0 else "")
+
+
 class App(ctk.CTk):
 
     def __init__(self):
@@ -194,13 +207,13 @@ class App(ctk.CTk):
         ds = sess.sample or "(none)"
         try:
             self._badge_dataset.configure(
-                text=f"● dataset:  {ds}")
+                text=f"● dataset:  {_ellipsize(ds, 32)}")
         except Exception: pass
         run = "(none)"
         if sess.run_dir:
             run = sess.run_dir.replace("\\", "/").split("/")[-1]
         try:
-            self._badge_run.configure(text=f"● run:  {run}")
+            self._badge_run.configure(text=f"● run:  {_ellipsize(run, 28)}")
         except Exception: pass
         try:
             if sess.has_inference():
@@ -218,7 +231,9 @@ class App(ctk.CTk):
         from tkinter import filedialog, messagebox
         path = filedialog.askopenfilename(
             title="Choose a 4D-STEM cube",
-            filetypes=[("4D-STEM cubes", "*.npy *.npz *.prz *.h5 *.hdf5"),
+            filetypes=[("4D-STEM cubes",
+                        "*.npy *.npz *.prz *.h5 *.hdf5 *.dm4 *.dm3"),
+                       ("Gatan DM", "*.dm4 *.dm3"),
                        ("All files", "*.*")])
         if not path:
             return
@@ -728,6 +743,25 @@ class App(ctk.CTk):
         if kind == "loaded":
             sk = kwargs.get("sample_key")
             path = kwargs.get("path", "")
+            # Auto-apply calibration read from the file's metadata (dm4).
+            cal = kwargs.get("calib")
+            if cal:
+                applied = []
+                try:
+                    if cal.get("real_nm_per_px"):
+                        self.real_res.set(round(float(cal["real_nm_per_px"]), 6))
+                        applied.append(f"real {cal['real_nm_per_px']:.4g} nm/px")
+                    if cal.get("recip_nm_per_px"):
+                        self.recip_res.set(round(float(cal["recip_nm_per_px"]), 6))
+                        applied.append(
+                            f"reciprocal {cal['recip_nm_per_px']:.4g} nm⁻¹/px")
+                except Exception as e:
+                    print(f"[app] applying dm calibration failed: {e!r}",
+                          flush=True)
+                if applied:
+                    self._sb.configure(
+                        text="calibration from file metadata applied: "
+                             + ", ".join(applied))
             if sk:
                 self._sb.configure(
                     text=f"loaded cube: {path}    (sample key: {sk})")

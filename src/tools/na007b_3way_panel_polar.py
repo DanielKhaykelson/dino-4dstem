@@ -118,17 +118,22 @@ rows = [("SAM", sam_line, flake & ~sam_line, "SAM_line", "SAM_rest"),
         ("DINO", dino_line, flake & ~dino_line, "DINO_line", "DINO_rest")]
 fig = Figure(figsize=(9.5, 9.6), facecolor="white")
 col1_title = ["SAM Line overlaid on HAADF", "NMF class map (Line = blue)", "DINO class map (Line = blue)"]
+_LET = "abcdefghi"
+def _pl(ax, idx):
+    ax.text(0.05, 0.96, _LET[idx], transform=ax.transAxes, fontsize=16, fontweight="bold",
+            va="top", ha="left", color="white",
+            bbox=dict(boxstyle="round,pad=0.16", fc="black", alpha=0.55, ec="none"), zorder=20)
 for ri, (name, lm, rm, lk, rk) in enumerate(rows):
     ax = fig.add_subplot(3, 3, 3 * ri + 1)
     if ri == 0:   overlay(ax, lm, rm)                       # SAM = overlay on HAADF
     elif ri == 1: classmap(ax, nmf, {nmf_line_c})           # NMF = full class map
     else:         classmap(ax, asg, {1, 8})                 # DINO = full class map
-    ax.set_ylabel(name, fontsize=12, fontweight="bold")
+    ax.set_ylabel(name, fontsize=12, fontweight="bold"); _pl(ax, 3 * ri + 0)
     ax.set_title(col1_title[ri], fontsize=9)
-    ax = fig.add_subplot(3, 3, 3 * ri + 2); diff(ax, means[lk])
-    if ri == 0: ax.set_title("Line — avg diffraction", fontsize=10)
-    ax = fig.add_subplot(3, 3, 3 * ri + 3); diff(ax, means[rk])
-    if ri == 0: ax.set_title("non-Line (rest) — avg diffraction", fontsize=10)
+    ax = fig.add_subplot(3, 3, 3 * ri + 2); diff(ax, means[lk]); _pl(ax, 3 * ri + 1)
+    if ri == 0: ax.set_title("Line: average diffraction", fontsize=10)
+    ax = fig.add_subplot(3, 3, 3 * ri + 3); diff(ax, means[rk]); _pl(ax, 3 * ri + 2)
+    if ri == 0: ax.set_title("non-Line: average diffraction", fontsize=10)
 cap = (f"Na007b — SAM vs NMF (polar+θ-shift, K={KNMF}) vs DINO.  Line px: "
        f"SAM={M['SAM']['n']}, NMF={M['NMF']['n']}, DINO={M['DINO']['n']}.  "
        f"vs SAM Line:  DINO IoU={M['DINO']['IoU']:.2f}/Dice={M['DINO']['Dice']:.2f}  |  "
@@ -136,9 +141,8 @@ cap = (f"Na007b — SAM vs NMF (polar+θ-shift, K={KNMF}) vs DINO.  Line px: "
        f"Beam-masked Pearson r(Line avg, SAM Line avg): DINO={r_line_vs_sam['DINO']:.3f}, "
        f"NMF={r_line_vs_sam['NMF']:.3f};  r(Line,rest): SAM={r_line_vs_rest['SAM']:.2f}, "
        f"NMF={r_line_vs_rest['NMF']:.2f}, DINO={r_line_vs_rest['DINO']:.2f}.")
-fig.suptitle("Na007b: SAM / NMF / DINO — Line vs non-Line regions and their average diffraction", fontsize=12)
-fig.text(0.5, 0.012, cap, ha="center", va="bottom", fontsize=7.5, wrap=True)
-fig.tight_layout(rect=[0, 0.06, 1, 0.96]); FigureCanvasAgg(fig)
+print("FIG2 metrics:", cap, flush=True)   # numbers go in the manuscript caption, not on the figure
+fig.tight_layout(rect=[0, 0, 1, 1]); FigureCanvasAgg(fig)
 fig.savefig(f"{F}/na007b_3way_panel_polar.png", dpi=160, facecolor="white")
 np.save(f"{F}/na007b_avg_NMFpolar_line.npy", means["NMF_line"])
 np.save(f"{F}/na007b_avg_NMFpolar_rest.npy", means["NMF_rest"])

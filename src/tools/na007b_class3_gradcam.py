@@ -9,7 +9,7 @@ import numpy as np, torch, torch.nn.functional as F
 from scipy.ndimage import distance_transform_edt, gaussian_filter
 from data import register_runtime_sample, LoadPRZ, SAMPLES
 from dino_sr_contrastive_model import load_contrastive_checkpoint
-from viz_gradcam import GradCAM, integrated_gradients, polar_cam_to_cartesian, build_polar_preproc, build_cart_preproc
+from viz_gradcam import GradCAM, integrated_gradients, polar_cam_to_cartesian, build_polar_preproc, build_cart_preproc, resolve_prototype_ids, dense_target
 from viz_paper_attribution import _read_train_cfg
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -28,6 +28,7 @@ cart_pre = build_cart_preproc(polar_size=tc["polar_size"], center_crop_size=tc["
 model, _, _, _ = load_contrastive_checkpoint(os.path.join(RUN, "best.pth"), device=dev)
 for p in model.parameters(): p.requires_grad_(True)
 model.eval(); cam_tool = GradCAM(model, list(model.student_encoder.children())[-1])
+orig_ids = resolve_prototype_ids(RUN, model, ds, dev, polar_pre=polar_pre)  # dense id -> real prototype
 
 # pick frames: 2 class-3 edge (dist<=1.5, high prob3), 1 class-3 interior (dist>=4), 1 Line
 c3 = np.where(asg == 3)[0]
@@ -47,7 +48,7 @@ def cam(xp, c):
 rows = []
 for tag, i in frames:
     xc, xp = prep(i)
-    rows.append((tag, i, xc[0, 0].detach().cpu().numpy(), cam(xp, 3), cam(xp, LINE_T), sp[i, 3], sp[i, 1], sp[i, 8]))
+    rows.append((tag, i, xc[0, 0].detach().cpu().numpy(), cam(xp, dense_target(orig_ids, 3)), cam(xp, dense_target(orig_ids, LINE_T)), sp[i, 3], sp[i, 1], sp[i, 8]))
     print(f"{tag} frame {i}: dist={dist[i]:.1f}px  prob3={sp[i,3]:.2f} prob1={sp[i,1]:.2f} prob8={sp[i,8]:.2f}  assigned={asg[i]}", flush=True)
 
 fig = Figure(figsize=(10, 3.0 * len(rows)), facecolor="white")

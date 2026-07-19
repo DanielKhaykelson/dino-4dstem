@@ -90,9 +90,9 @@ def draw_scheme(ax):
         ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0,rounding_size=8", fill=False, ec=col, lw=2.2, ls=(0, (6, 4)), zorder=5))
         ax.add_patch(FancyBboxPatch((x + 6, y - 19), 10 * len(tag) + 8, 22, boxstyle="round,pad=0,rounding_size=5", fc=col, ec="none", zorder=6))
         ax.text(x + 11, y - 8, tag, ha="left", va="center", fontsize=10, color="white", fontweight="700", zorder=7)
-    roi(96, 120, 470, 235, "#27AE60", "SI3: overview")
+    roi(96, 120, 470, 235, "#27AE60", "SI3: interface")
     roi(470, 150, 300, 170, "#2E86C1", "SI4: needles")
-    roi(300, 168, 150, 150, "#CA6F1E", "SI5: interface")
+    roi(300, 168, 150, 150, "#CA6F1E", "SI5: interface (mag.)")
     cmap = LinearSegmentedColormap.from_list("ord", ["#c4ccd4", SLATE])
     ax.imshow(np.linspace(0, 1, 256)[None, :], cmap=cmap, aspect="auto", extent=[160, 780, 432, 420], zorder=2)
     ax.add_patch(Polygon([(780, 414), (812, 426), (780, 438)], closed=True, fc=SLATE, ec="none", zorder=3))
@@ -109,11 +109,15 @@ print("stage spottiness:", [(s[0].split(chr(10))[0], round(s[1]["spot"], 2), "g%
 
 fig = Figure(figsize=(12.5, 9.6), facecolor="white")
 gs = fig.add_gridspec(3, 3, height_ratios=[1.45, 1.5, 0.32], hspace=0.3, wspace=0.12)
-draw_scheme(fig.add_subplot(gs[0, :]))
+_axsch = fig.add_subplot(gs[0, :]); draw_scheme(_axsch)
+_axsch.text(0.008, 0.96, "a", transform=_axsch.transAxes, fontsize=16, fontweight="bold", va="top",
+            ha="left", color="black", bbox=dict(boxstyle="round,pad=0.16", fc="white", alpha=0.65, ec="none"), zorder=30)
 for ci, (label, mm, plain) in enumerate(STAGES):
     cyx = mm["cyx"]; cr = slice(int(cyx) - 145, int(cyx) + 145)
     d, pc = disp(mm["avg"], cyx, mm["beam"], cr)
     ax = fig.add_subplot(gs[1, ci]); ax.imshow(d, cmap="inferno"); ax.set_xticks([]); ax.set_yticks([])
+    ax.text(0.04, 0.95, "bcd"[ci], transform=ax.transAxes, fontsize=16, fontweight="bold", va="top",
+            ha="left", color="white", bbox=dict(boxstyle="round,pad=0.16", fc="black", alpha=0.55, ec="none"), zorder=30)
     ax.add_patch(Circle((pc, pc), mm["rstar"], fill=False, ec="#39FF14", lw=1.1, ls=(0, (5, 3))))
     ax.set_title(label, fontsize=10.5, fontweight="bold", color=NAVY)
     ax.set_xlabel(f"{plain}  (spottiness {mm['spot']:.1f})", fontsize=8.5)
@@ -138,3 +142,43 @@ fig.tight_layout(rect=[0, 0, 1, 0.94]); FigureCanvasAgg(fig)
 p = os.path.join(OUT, "imc_crystallization_schematic.png"); fig.savefig(p, dpi=170, facecolor="white")
 import shutil; os.makedirs(REVIEW, exist_ok=True); shutil.copy(p, os.path.join(REVIEW, "imc_crystallization_schematic.png"))
 print("wrote imc_crystallization_schematic.png", flush=True)
+
+
+# ===== AM-Communication split: scheme alone (-> main Fig 4) and the diffraction
+# order-axis example alone (-> Supporting Information) =====
+def _save(fig_, name):
+    FigureCanvasAgg(fig_)
+    fig_.savefig(os.path.join(OUT, name), dpi=170, facecolor="white")
+    shutil.copy(os.path.join(OUT, name), os.path.join(REVIEW, name))
+    print(f"wrote {name}", flush=True)
+
+# (1) scheme only
+figS = Figure(figsize=(10.5, 5.0), facecolor="white")
+axS = figS.add_subplot(111); draw_scheme(axS)
+figS.tight_layout(rect=[0, 0, 1, 1]); _save(figS, "imc_scheme_only.png")
+
+# (2) diffraction order-axis example only (matrix -> front -> needle), labelled a/b/c
+figE = Figure(figsize=(11.5, 4.7), facecolor="white")
+gsE = figE.add_gridspec(2, 3, height_ratios=[1.5, 0.34], hspace=0.32, wspace=0.12)
+for ci, (label, mm, plain) in enumerate(STAGES):
+    cyx = mm["cyx"]; cr = slice(int(cyx) - 145, int(cyx) + 145)
+    d, pc = disp(mm["avg"], cyx, mm["beam"], cr)
+    ax = figE.add_subplot(gsE[0, ci]); ax.imshow(d, cmap="inferno"); ax.set_xticks([]); ax.set_yticks([])
+    ax.text(0.04, 0.95, "abc"[ci], transform=ax.transAxes, fontsize=16, fontweight="bold", va="top",
+            ha="left", color="white", bbox=dict(boxstyle="round,pad=0.16", fc="black", alpha=0.55, ec="none"), zorder=30)
+    ax.add_patch(Circle((pc, pc), mm["rstar"], fill=False, ec="#39FF14", lw=1.1, ls=(0, (5, 3))))
+    ax.set_title(label, fontsize=10.5, fontweight="bold", color=NAVY)
+    ax.set_xlabel(f"{plain}  (spottiness {mm['spot']:.1f})", fontsize=8.5)
+    if ci == 0:
+        ax.annotate("central beam\n(blocked)", xy=(pc, pc), xytext=(pc, pc - 95), ha="center", fontsize=7,
+                    color="white", arrowprops=dict(arrowstyle="->", color="white", lw=0.8))
+        ax.annotate(f"α ring d≈{1.0/(mm['rstar']*INV):.1f}Å", xy=(pc + mm["rstar"] * 0.7, pc - mm["rstar"] * 0.7),
+                    xytext=(pc + 95, pc - 122), ha="center", fontsize=7, color="#39FF14",
+                    arrowprops=dict(arrowstyle="->", color="#39FF14", lw=0.8))
+    if ci == 2:
+        ax.annotate("discrete\nα spots", xy=(pc + mm["rstar"] * 0.6, pc + mm["rstar"] * 0.55), xytext=(pc + 58, pc + 122),
+                    ha="center", fontsize=7, color="#FFD24D", arrowprops=dict(arrowstyle="->", color="#FFD24D", lw=0.9))
+    axs = figE.add_subplot(gsE[1, ci])
+    axs.imshow(unroll(mm["avg"], cyx, mm["rstar"]), cmap="inferno", aspect="auto", vmin=0, vmax=2.5, extent=[0, 360, 0, 1])
+    axs.set_yticks([]); axs.tick_params(labelsize=6); axs.set_xlabel("intensity around the α ring (azimuth, deg)", fontsize=7)
+figE.tight_layout(rect=[0, 0, 1, 1]); _save(figE, "imc_order_axis_example.png")
