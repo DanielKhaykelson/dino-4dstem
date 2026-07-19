@@ -43,6 +43,11 @@ dist/
 *.doc
 *.pptx
 *.ppt
+# Archives: distributables are built on demand / attached to Releases,
+# never committed (keeps this a code-only repo).
+*.zip
+*.7z
+*.tar.gz
 MANUSCRIPT_DRAFT.md
 FULL_REPORT.md
 Chapter*.docx

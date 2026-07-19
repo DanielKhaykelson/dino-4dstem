@@ -170,6 +170,9 @@ TAB_ROUTES = {
         app._group_tabs["Diffraction"].set("ACOM")),
     "transfer": lambda app: (app._tabs.set("Model"),
         app._group_tabs["Model"].set("Transfer"), app._on_tab_change()),
+    "synthetic": lambda app: (app._tabs.set("Data"),
+        app._group_tabs["Data"].set("Pre-processing"),
+        app._group_tabs["Pre-processing"].set("Synthetic")),
 }
 
 
@@ -233,6 +236,9 @@ _TAB_ALIASES = {
     "dino cluster": "dino-cluster", "nmf cluster": "nmf",
     "nmf + cluster": "nmf", "model": "training", "train": "training",
     "class map": "eval", "evaluation": "eval", "diffraction": "acom",
+    "synth": "synthetic", "simulate": "synthetic", "simulation": "synthetic",
+    "phantom": "synthetic", "abtem": "synthetic",
+    "synthetic data": "synthetic", "validate synthetic": "synthetic",
 }
 
 
@@ -1030,6 +1036,9 @@ _TAB_KEYWORDS = [
     (("umap", "virtual bf", "virtual haadf", "fine-tune", "finetune",
       "centroid", "radial", "distribution", "occupancy", "overlay",
       "post-hoc", "posthoc"), "post-hoc"),
+    (("synth", "synthetic", "simulate", "simulation", "phantom", "abtem",
+      "ws2", "ground truth", "voronoi", "multislice", "finite engine",
+      "diffraction simulation", "validate model", "score run"), "synthetic"),
     (("vmax", "crop", "mask", "beam", "com", "blur", "binning", "index",
       "pattern", "ellip", "load", "browse", "preprocess", "pre-process",
       "contrast", "slider"), "pre-processing"),
@@ -1044,6 +1053,7 @@ _TAB_PANEL = {
     "interpretation": lambda app: getattr(app, "interpret", None),
     "post-hoc": lambda app: getattr(app, "posthoc", None),
     "acom": lambda app: getattr(app, "acom2", None),
+    "synthetic": lambda app: getattr(app, "synth", None),
 }
 
 _INTERACTIVE = ("CTkButton", "CTkOptionMenu", "CTkCheckBox", "CTkSwitch",
@@ -1623,9 +1633,46 @@ def _troubleshoot(ctx, args) -> str:
             "MODEL: fix the seed; train longer; raise EMA/center_momentum; add a "
             "consolidation loss. Large run-to-run change usually means the classes "
             "aren't well separated — also revisit preprocessing/K."]))
+    if has("added spot", "extra spot", "extra reflection", "spurious spot",
+           "mesh", "side lobe", "sidelobe", "streak between", "finite box",
+           "box size"):
+        blocks.append(("SYNTH: extra / 'added' spots between the real Bragg spots "
+            "(finite-box shape-function side-lobes)", [
+            "Increase the per-structure in-plane tiling (Tile X,Y, e.g. 4 -> 14) so "
+            "the crystal patch nearly fills the box -> sharper spots.",
+            "Reduce the vacuum pad (A). Bigger crystal is ~free (multislice cost is "
+            "set by gpts, not atom count)."]))
+    if has("elliptic", "ellipse", "not circular", "stretched ring", "oval",
+           "lens shape"):
+        blocks.append(("SYNTH: elliptical instead of circular rings", [
+            "The builder now squares the in-plane box automatically, so re-simulate. "
+            "(Cause: a non-square cell -> anisotropic reciprocal sampling.)"]))
+    if has("diffuse", "streak", "smear", "structure feature", "fuzzy spot",
+           "haze between"):
+        blocks.append(("SYNTH: diffuse streaks connecting the spots "
+            "(infinite-projection artifact)", [
+            "Switch Engine -> 'finite' (projection='finite'), which gives one clean "
+            "pattern per grain and removes the streaks.",
+            "Set potential gpts >= 512 for the sharpest spots."]))
+    if has("blank", "only central beam", "only direct beam", "doesn't fill",
+           "empty frame", "mostly black", "tiny pattern"):
+        blocks.append(("SYNTH: diffraction doesn't fill the frame / only the beam "
+            "shows", [
+            "Lower Det alpha_max (mrad) so the reflections reach the frame edge.",
+            "Keep the viewer's log-stretch ON so weak disks are visible (the central "
+            "beam is orders brighter)."]))
+    if has("in-plane", "in plane", "rotation split", "rotated grain", "same "
+           "orientation different class", "invarian"):
+        blocks.append(("SYNTH/MODEL: grains that differ only by in-plane rotation "
+            "get different classes", [
+            "SIM: use the 'finite' engine (clean square patterns) and enough Voronoi "
+            "seeds (many in-plane angles to learn from); keep convergence ~1-2 mrad.",
+            "MODEL: this is the rotation-invariance test — polar pipeline + "
+            "theta-roll aug must be active; a small K helps."]))
     if not blocks:
         blocks.append(("Describe the symptom (overclustered, collapsed, "
-            "salt-and-pepper, tracks-thickness, unstable)", [
+            "salt-and-pepper, tracks-thickness, unstable, or a SYNTH issue: added "
+            "spots, elliptical rings, diffuse streaks, blank frame)", [
             "Run score_run + open Interpretation to diagnose; see METHOD_GUIDE "
             "validity section. Then adjust preprocessing (mask/crop/COM/blur) "
             "and/or K and retrain, or merge / re-cluster post-hoc."]))
@@ -1671,6 +1718,33 @@ _PARAM_GLOSSARY = {
             "heuristic, then re-cluster to explore K.",
     "blur_sigma": "Display/augmentation Gaussian blur (px); mild blur suppresses "
             "shot-noise-driven spurious classes.",
+    # --- Synthetic-data (Simulate tab) parameters ---
+    "conv_mrad": "SYNTH: probe convergence semi-angle (mrad). Sets disk size: ~0.2 "
+            "= sharp point-like (SAED) reflections, ~1.5 = few-px NBED disks. Keep "
+            "~1-2 mrad; sub-pixel disks alias under in-plane rotation.",
+    "det_max_mrad": "SYNTH: detector maximum angle (mrad). Set so the diffraction "
+            "fills the frame — too large leaves a blank ring, too small clips "
+            "high-q reflections (WS2 ~28 mrad).",
+    "dose_e_a2": "SYNTH: dose (e/A^2). Each pattern is scaled to Dose x step^2 "
+            "electrons. Pair with the 'shot' (Poisson noise) or 'exact' (noiseless) "
+            "mode. Higher dose = cleaner in shot mode.",
+    "noise_mode": "SYNTH: 'shot' Poisson-samples at the dose (realistic shot noise); "
+            "'exact' uses the exact expected counts with NO noise (ideal pattern).",
+    "engine": "SYNTH: 'multislice' (fast scan, projection=infinite, can show streaks) "
+            "vs 'finite' (projection=finite, one clean pattern per grain, removes "
+            "inter-spot streaks; use gpts>=512) vs 'PRISM' (experimental).",
+    "pot_gpts": "SYNTH: potential reciprocal-space resolution. Higher = sharper "
+            "spots. Use >=512 with the finite engine.",
+    "vacuum_pad_a": "SYNTH: vacuum padding (A) around the atom box. Small pad + big "
+            "crystal = sharper spots (fewer finite-size 'added spots').",
+    "n_voronoi_seeds": "SYNTH: number of Voronoi grains. Diversity for training comes "
+            "from the grain count (not pixels) — raise this to give the model more "
+            "distinct in-plane rotations to learn from. Cheap (sim cached per phase).",
+    "tile_xyz": "SYNTH: per-structure supercell repeats (X,Y,Z). Bigger in-plane "
+            "(X,Y) = sharper Bragg spots + fewer added spots; Z = thickness/layers.",
+    "crystallinity": "SYNTH: domain crystallinity class — crystalline (sharp spots), "
+            "partial (weak spots + mild diffuse), or amorphous (diffuse rings), via "
+            "frozen-phonon disorder. A separate ground-truth class axis.",
 }
 
 def _explain_parameter(ctx, args) -> str:

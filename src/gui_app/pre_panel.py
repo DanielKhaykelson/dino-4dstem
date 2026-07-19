@@ -790,9 +790,10 @@ class PrePanel(ctk.CTkFrame):
         # Gatan .dm4/.dm3: confirm we detected a 4D-STEM cube (and surface any
         # sanity warnings) before committing — these files can also hold EELS
         # spectrum images, image stacks, etc.
+        self._dm4_calib = None
         if p.lower().endswith((".dm4", ".dm3")):
             try:
-                from data import dm4_probe
+                from data import dm4_probe, dm4_calibration
                 info = dm4_probe(p)
             except Exception as e:
                 messagebox.showerror(
@@ -804,6 +805,17 @@ class PrePanel(ctk.CTkFrame):
             msg = (f"Detected a 4D-STEM cube in {os.path.basename(p)}:\n\n"
                    f"   Ny × Nx × H × W = {sh[0]} × {sh[1]} × {sh[2]} × {sh[3]}\n"
                    f"   dtype = {info['dtype']}  (raw {info['raw_ndim']}D)\n")
+            # Best-effort calibration straight from the dm metadata.
+            try:
+                cal = dm4_calibration(p)
+            except Exception:
+                cal = None
+            if cal and (cal.get("real_nm_per_px") or cal.get("recip_nm_per_px")):
+                self._dm4_calib = cal
+                msg += f"\nCalibration (from dm metadata):\n   {cal['note']}\n"
+                msg += "   → will be applied to the real/reciprocal fields.\n"
+            elif cal and cal.get("note"):
+                msg += f"\nCalibration: {cal['note']}\n"
             if info["warnings"]:
                 msg += "\n⚠ " + "\n⚠ ".join(info["warnings"]) + "\n"
             msg += "\nLoad this as a 4D-STEM cube?"
@@ -990,7 +1002,8 @@ class PrePanel(ctk.CTkFrame):
         self.on_state_change("loaded", path=p,
                               sample_key=self.sample_key,
                               scan_shape=(Ny, Nx),
-                              frame_shape=(H, W))
+                              frame_shape=(H, W),
+                              calib=getattr(self, "_dm4_calib", None))
 
     def _run_binning(self, src, n, out):
         """Stream a real-space n×n bin of `src` → `out` (.cube.npy) with a
@@ -1429,9 +1442,12 @@ class PrePanel(ctk.CTkFrame):
             tmp_path = os.path.join(tmp_dir,
                                        new_basename + ".cube.npy")
             Ny, Nx, H, W = self.cube.shape
+            # Always float32 — the affine warp (INTER_LINEAR) produces
+            # fractional values that an integer source dtype (e.g. uint16
+            # dm4) would truncate, zeroing out low-count data.
             out = np.lib.format.open_memmap(
                 tmp_path, mode="w+",
-                dtype=getattr(self.cube, "dtype", np.float32),
+                dtype=np.float32,
                 shape=(Ny, Nx, H, W))
             # Pre-compute the affine matrix once (constant for whole cube).
             M = self._ellip_warp_matrix(H, W)
@@ -1608,10 +1624,13 @@ class PrePanel(ctk.CTkFrame):
                                        new_basename + ".cube.npy")
             Ny, Nx, H, W = self.cube.shape
             from scipy.ndimage import gaussian_filter
+            # Blur produces fractional values, so the output MUST be
+            # float32.  Inheriting an integer source dtype (e.g. uint16
+            # dm4 cubes) would truncate every smoothed pixel to an int
+            # and zero out low-count data (an ~84% intensity loss).
             out = np.lib.format.open_memmap(
                 tmp_path, mode="w+",
-                dtype=self.cube.dtype if hasattr(self.cube, "dtype")
-                       else np.float32,
+                dtype=np.float32,
                 shape=(Ny, Nx, H, W))
             t0 = time.time()
             for y in range(Ny):

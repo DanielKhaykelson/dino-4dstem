@@ -452,6 +452,15 @@ class NMFPanel(ctk.CTkFrame):
         except Exception:
             self._scan_shape = None
 
+    def _recip_per_px(self):
+        """Reciprocal calibration (nm⁻¹ per raw detector px) from the
+        app topbar — used by the interactive cluster-map for q readouts.
+        Returns 0.0 if unavailable (the map still works, just no q)."""
+        try:
+            return float(self.app.recip_res.get()) if self.app else 0.0
+        except Exception:
+            return 0.0
+
     # ----- variant citation --------------------------------------------
     def _on_variant_change(self):
         """Update the clickable citation label for the selected variant."""
@@ -642,9 +651,15 @@ class NMFPanel(ctk.CTkFrame):
         ctk.CTkButton(sb, text="Show class averages…",
                        command=self._open_class_averages_popup
                        ).pack(fill="x", padx=8, pady=(2, 2))
-        ctk.CTkButton(sb, text="Save snapshot",
+        _sl_row = ctk.CTkFrame(sb, fg_color="transparent")
+        _sl_row.pack(fill="x", padx=8, pady=(2, 4))
+        ctk.CTkButton(_sl_row, text="Save snapshot",
                        command=self._save_snapshot
-                       ).pack(fill="x", padx=8, pady=(2, 4))
+                       ).pack(side="left", fill="x", expand=True, padx=(0, 2))
+        ctk.CTkButton(_sl_row, text="Load snapshot…",
+                       fg_color=("#4D6FB0", "#3A5380"),
+                       command=self._load_snapshot
+                       ).pack(side="left", fill="x", expand=True, padx=(2, 0))
 
         self._status_lbl = ctk.CTkLabel(sb,
             text="", font=("Consolas", 9), justify="left",
@@ -1261,6 +1276,11 @@ class NMFPanel(ctk.CTkFrame):
                     "K": int(self._last["K"]),
                     "err_final": float(self._last["err_final"]),
                     "methods": list(self._last["labels"].keys()),
+                    # comp_shape is required to re-render on reload.
+                    "comp_shape": [int(x) for x in
+                                     self._last["comp_shape"]],
+                    "scan_shape": ([int(x) for x in self._scan_shape]
+                                     if self._scan_shape else None),
                 }, fh, indent=2)
             ny, nx = (self._scan_shape if self._scan_shape else (1, -1))
             self._save_items_pngs(out_dir, self._last["H"],
@@ -1269,6 +1289,62 @@ class NMFPanel(ctk.CTkFrame):
         except Exception as e:
             messagebox.showerror("save", repr(e)); return
         self._status_lbl.configure(text=f"saved → {out_dir}  (+ per-item pngs)")
+
+    def _load_snapshot(self):
+        """Reload a previously-saved NMF+clustering snapshot (W/H/labels +
+        summary.json) so results can be viewed without recomputing."""
+        from tkinter import filedialog
+        d = filedialog.askdirectory(
+            title="Pick a saved NMF snapshot folder "
+                  "(contains W.npy, H.npy, summary.json)",
+            initialdir=(os.path.join(self.outdir, "nmf")
+                          if self.outdir else "."))
+        if not d:
+            return
+        try:
+            with open(os.path.join(d, "summary.json")) as fh:
+                meta = json.load(fh)
+            W = np.load(os.path.join(d, "W.npy"))
+            H = np.load(os.path.join(d, "H.npy"))
+            labels = {}
+            for m in meta.get("methods", []):
+                p = os.path.join(d, f"labels_{m}.npy")
+                if os.path.exists(p):
+                    labels[m] = np.load(p)
+            if not labels:
+                # fall back: any labels_*.npy present
+                for fn in os.listdir(d):
+                    if fn.startswith("labels_") and fn.endswith(".npy"):
+                        labels[fn[7:-4]] = np.load(os.path.join(d, fn))
+            if not labels:
+                raise RuntimeError("no labels_*.npy in the folder")
+            comp_shape = tuple(meta.get("comp_shape")
+                                 or (1, H.shape[1]))
+        except Exception as e:
+            messagebox.showerror("load", f"Could not load snapshot:\n{e!r}")
+            return
+        # Adopt the saved scan shape if we don't already have one.
+        if not self._scan_shape and meta.get("scan_shape"):
+            self._scan_shape = tuple(meta["scan_shape"])
+        # Rebuild the _last dict the renderer / interactive map expect.
+        self._last = dict(
+            variant=meta.get("variant", "(loaded)"), cfg={},
+            X_shape=(W.shape[0], H.shape[1]), comp_shape=comp_shape,
+            W=W, H=H, n_comp=int(meta.get("n_comp", H.shape[0])),
+            K=int(meta.get("K", 0)), labels=labels,
+            errs=None, sil=None,
+            err_final=float(meta.get("err_final", 0.0)),
+            polar_full=None,
+        )
+        self.last_cluster_labels = dict(labels)
+        try:
+            self._render_last()
+        except Exception as e:
+            print(f"[nmf] render after load failed: {e!r}", flush=True)
+        self._status_lbl.configure(
+            text=f"loaded snapshot ← {d}\n"
+                 f"variant={self._last['variant']}  K={self._last['K']}  "
+                 f"methods={', '.join(labels)}")
 
     def _save_items_pngs(self, out_dir, H, comp_shape, labels, Ny, Nx):
         """Save EACH NMF component H[k] and EACH cluster map as its own PNG

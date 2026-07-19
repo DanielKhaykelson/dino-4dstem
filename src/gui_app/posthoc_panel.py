@@ -958,9 +958,13 @@ class PostHocPanel(ctk.CTkFrame):
         os.makedirs(eval_dir, exist_ok=True)
         np.savez(self._inference_cache_path(),
                   soft_probs=inf["soft_probs"], assigns=inf["assigns"],
-                  embeds=inf["embeds"])
+                  embeds=inf["embeds"],
+                  K_original_ids=np.asarray(inf.get("K_original_ids", []),
+                                            dtype=np.int64),
+                  K_original=np.int64(inf.get("K_original", 0)))
         return dict(soft_probs=inf["soft_probs"],
-                    assigns=inf["assigns"], embeds=inf["embeds"])
+                    assigns=inf["assigns"], embeds=inf["embeds"],
+                    K_original_ids=inf.get("K_original_ids", []))
 
     def _refresh_class_dropdown(self):
         """After inference, populate class dropdown + multi-select +
@@ -4891,6 +4895,37 @@ class PostHocPanel(ctk.CTkFrame):
                 f"(was the run trained with n_layers ≥ {ln}?)")
         raise ValueError(f"unknown cam layer {name!r}")
 
+    def _dense_to_proto_ids(self, model, cfg, polar_pre, device):
+        """dense class id -> original prototype index for the loaded run.
+        GradCAM/IG target the 60-way prototype head, so a dense id (0..K-1)
+        must be mapped to the actual prototype index or the attribution points
+        at an inactive/wrong prototype. Cached per run dir; recovers + caches
+        into inference.npz for runs that predate K_original_ids being saved."""
+        from viz_gradcam import (load_original_prototype_ids,
+                                  resolve_prototype_ids)
+        run_dir = self.outdir
+        cache = getattr(self, "_proto_ids_cache", None)
+        if cache is None:
+            cache = self._proto_ids_cache = {}
+        if run_dir in cache:
+            return cache[run_dir]
+        ids = load_original_prototype_ids(run_dir)
+        if ids is None:
+            inf = getattr(self, "_inf", None)
+            ki = inf.get("K_original_ids") if isinstance(inf, dict) else None
+            if ki is not None and len(ki):
+                ids = [int(x) for x in np.asarray(ki).ravel().tolist()]
+        if ids is None:
+            try:
+                from data import LoadPRZ
+                ds_full = LoadPRZ(cfg["path"], resize=192, vmax=cfg["vmax"])
+                ids = resolve_prototype_ids(run_dir, model, ds_full, device,
+                                            polar_pre=polar_pre)
+            except Exception as e:
+                print(f"[gradcam] prototype-id resolve failed: {e!r}")
+        cache[run_dir] = ids
+        return ids
+
     def _compute_gradcam_and_ig_from_raw(
             self, ckpt_path: str, c: int,
             raw_pattern_2d: np.ndarray
@@ -4904,7 +4939,7 @@ class PostHocPanel(ctk.CTkFrame):
         from scipy.ndimage import gaussian_filter
         from dino_sr_contrastive_model import load_contrastive_checkpoint
         from viz_gradcam import (GradCAM, integrated_gradients,
-                                   polar_cam_to_cartesian)
+                                   polar_cam_to_cartesian, dense_target)
         from viz_paper_attribution import (build_polar_preproc,
                                               build_cart_preproc)
         device = torch.device("cuda" if torch.cuda.is_available()
@@ -4941,16 +4976,17 @@ class PostHocPanel(ctk.CTkFrame):
         last_mod = self._resolve_cam_target(model.student_encoder,
                                                 cam_layer_name)
         cam_tool = GradCAM(model, last_mod)
+        c_t = dense_target(self._dense_to_proto_ids(model, cfg, polar_pre, device), c)
         with torch.enable_grad():
             xp_cam = x_polar.detach().requires_grad_(True)
-            cam_p  = cam_tool(xp_cam, target_class=c)
+            cam_p  = cam_tool(xp_cam, target_class=c_t)
         cam_cart = polar_cam_to_cartesian(cam_p).detach().cpu().numpy()
         cam_cart = gaussian_filter(np.abs(cam_cart), sigma=2.0)
         # IG (uses a fresh input tensor so the GradCAM autograd graph
         # doesn't interfere with the IG accumulation).
         with torch.enable_grad():
             ig_p = integrated_gradients(model, x_polar.detach(),
-                                          target_class=c, n_steps=50)
+                                          target_class=c_t, n_steps=50)
         ig_cart = polar_cam_to_cartesian(ig_p).detach().cpu().numpy()
         ig_cart = gaussian_filter(np.abs(ig_cart), sigma=2.0)
         avg_cart = x_cart[0, 0].detach().cpu().numpy()
@@ -4965,7 +5001,7 @@ class PostHocPanel(ctk.CTkFrame):
         import torch.nn.functional as F
         from scipy.ndimage import gaussian_filter
         from dino_sr_contrastive_model import load_contrastive_checkpoint
-        from viz_gradcam import GradCAM, polar_cam_to_cartesian
+        from viz_gradcam import GradCAM, polar_cam_to_cartesian, dense_target
         from viz_paper_attribution import (build_polar_preproc,
                                               build_cart_preproc)
         device = torch.device("cuda" if torch.cuda.is_available()
@@ -5003,9 +5039,10 @@ class PostHocPanel(ctk.CTkFrame):
         last_mod = self._resolve_cam_target(model.student_encoder,
                                                 cam_layer_name)
         cam_tool = GradCAM(model, last_mod)
+        c_t = dense_target(self._dense_to_proto_ids(model, cfg, polar_pre, device), c)
         with torch.enable_grad():
             xp_cam = x_polar.detach().requires_grad_(True)
-            cam_p  = cam_tool(xp_cam, target_class=c)
+            cam_p  = cam_tool(xp_cam, target_class=c_t)
         cam_cart = polar_cam_to_cartesian(cam_p).detach().cpu().numpy()
         cam_cart = gaussian_filter(np.abs(cam_cart), sigma=2.0)
         avg_cart = x_cart[0, 0].detach().cpu().numpy()
@@ -5025,7 +5062,7 @@ class PostHocPanel(ctk.CTkFrame):
         from scipy.ndimage import gaussian_filter
         from dino_sr_contrastive_model import load_contrastive_checkpoint
         from viz_gradcam import (GradCAM, integrated_gradients,
-                                   polar_cam_to_cartesian)
+                                   polar_cam_to_cartesian, dense_target)
         from viz_paper_attribution import (build_polar_preproc,
                                              build_cart_preproc)
 
@@ -5079,17 +5116,18 @@ class PostHocPanel(ctk.CTkFrame):
         last_mod = self._resolve_cam_target(model.student_encoder,
                                                 cam_layer_name)
         cam_tool = GradCAM(model, last_mod)
+        c_t = dense_target(self._dense_to_proto_ids(model, cfg, polar_pre, device), c)
 
         with torch.enable_grad():
             xp_cam = x_polar.detach().requires_grad_(True)
-            cam_p  = cam_tool(xp_cam, target_class=c)
+            cam_p  = cam_tool(xp_cam, target_class=c_t)
         cam_cart = polar_cam_to_cartesian(cam_p).detach().cpu().numpy()
         cam_cart = gaussian_filter(np.abs(cam_cart), sigma=2.0)
 
         # IG uses its own clean input tensor
         with torch.enable_grad():
             ig_p = integrated_gradients(model, x_polar.detach(),
-                                          target_class=c, n_steps=50)
+                                          target_class=c_t, n_steps=50)
         ig_cart = polar_cam_to_cartesian(ig_p).detach().cpu().numpy()
         ig_cart = gaussian_filter(np.abs(ig_cart), sigma=2.0)
 

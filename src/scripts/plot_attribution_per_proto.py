@@ -118,6 +118,9 @@ def _process_one_sample(model, sample, src_dir, device):
     for p in model.prototypes.parameters():
         p.requires_grad_(True)
     cam_tool = GradCAM(model, last_mod)
+    from viz_gradcam import resolve_prototype_ids, dense_target
+    orig_ids = resolve_prototype_ids(os.path.dirname(eval_dir), model, dataset,
+                                     device, polar_pre=polar_pre)
 
     out_dir = os.path.join(eval_dir, "attribution_per_proto")
     os.makedirs(out_dir, exist_ok=True)
@@ -140,9 +143,10 @@ def _process_one_sample(model, sample, src_dir, device):
         x_cart = cart_pre(x_full); x_polar = polar_pre(x_full)
         with torch.enable_grad():
             xp = x_polar.detach().requires_grad_(True)
-            cam_p = cam_tool(xp, target_class=c)
+            _ct = dense_target(orig_ids, c)
+            cam_p = cam_tool(xp, target_class=_ct)
             ig_p = integrated_gradients(model, x_polar.detach(),
-                                         target_class=c, n_steps=IG_STEPS)
+                                         target_class=_ct, n_steps=IG_STEPS)
         avg_cart_arr = x_cart[0, 0].detach().cpu().numpy()
         cam_cart_arr = polar_cam_to_cartesian(cam_p).detach().cpu().numpy()
         ig_cart_arr = polar_cam_to_cartesian(ig_p).detach().cpu().numpy()

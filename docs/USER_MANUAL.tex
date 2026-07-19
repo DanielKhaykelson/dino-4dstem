@@ -269,6 +269,33 @@ useful for a time series.
 
 % =====================================================================
 \section{Analysis: understanding the class map}
+\subsection{The key idea: multi-scale, human-in-the-loop inspection}
+
+The program is built so that \emph{you} can look at the data yourself, at several
+levels of detail, from a single pattern up to a whole class. The model proposes the
+grouping; you decide what it means by inspecting the level that answers your
+question. Besides all the automated tools described below, you are encouraged to
+simply \emph{look} at each of these levels:
+\begin{itemize}[itemsep=3pt]
+\item \textbf{A single frame} --- click any position on the class map to see its raw
+diffraction pattern (one probe position). Good for spotting empty or bad pixels and
+for a first impression.
+\item \textbf{A grain (region) average} --- the average of the patterns over one
+contiguous grain or region. Much cleaner than a single low-dose frame; this is the
+level at which rings and spots become unambiguous.
+\item \textbf{A comparison of grain averages} --- put two or more grain/region
+averages side by side (save a snapshot of each, or use the multi-panel report) to
+ask whether two regions are really the same phase and texture, or different.
+\item \textbf{A class average} --- click a class to see the average diffraction of
+every pattern the model put in it (``class avg (top 200)''). This is the model's own
+summary of a domain and the cleanest view of what a class represents.
+\end{itemize}
+\tip{No single level tells the whole story. A class can look uniform yet split into
+distinct grains; two grains the model separated may turn out identical when you
+overlay their averages. Flipping between frame, grain, and class is the fastest way
+to judge whether a class is physically meaningful --- the automated tools below then
+quantify what you find this way.}
+
 \subsection{Post-hoc: explore the map}
 \tab{Analysis \textrightarrow{} Post-hoc \textrightarrow{} Analysis}
 

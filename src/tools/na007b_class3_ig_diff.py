@@ -7,7 +7,7 @@ import numpy as np, torch, torch.nn.functional as F
 from scipy.ndimage import distance_transform_edt, gaussian_filter
 from data import register_runtime_sample, LoadPRZ, SAMPLES
 from dino_sr_contrastive_model import load_contrastive_checkpoint
-from viz_gradcam import integrated_gradients, polar_cam_to_cartesian, build_polar_preproc, build_cart_preproc
+from viz_gradcam import integrated_gradients, polar_cam_to_cartesian, build_polar_preproc, build_cart_preproc, resolve_prototype_ids, dense_target
 from viz_paper_attribution import _read_train_cfg
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -22,6 +22,7 @@ cart_pre = build_cart_preproc(polar_size=tc["polar_size"], center_crop_size=tc["
 model, _, _, _ = load_contrastive_checkpoint(os.path.join(RUN, "best.pth"), device=dev)
 for p in model.parameters(): p.requires_grad_(True)
 model.eval()
+orig_ids = resolve_prototype_ids(RUN, model, ds, dev, polar_pre=polar_pre)  # dense id -> real prototype
 c3 = np.where(asg == 3)[0]; edge = c3[dist[c3] <= 1.5]; edge = edge[np.argsort(-sp[edge, 3])[:2]]
 ln = np.where(asg == LINE_T)[0]; ln = ln[np.argsort(-sp[ln, LINE_T])[:1]]
 frames = [("edge", int(i)) for i in edge] + [("Line", int(i)) for i in ln]
@@ -32,7 +33,7 @@ def prep(i):
 def ig(xp, c): return gaussian_filter(polar_cam_to_cartesian(integrated_gradients(model, xp.detach(), target_class=c, n_steps=50)).detach().cpu().numpy(), 2.0)
 rows = []
 for tag, i in frames:
-    xc, xp = prep(i); g3, gL = ig(xp, 3), ig(xp, LINE_T); rows.append((tag, i, xc[0, 0].detach().cpu().numpy(), g3, gL, g3 - gL))
+    xc, xp = prep(i); g3, gL = ig(xp, dense_target(orig_ids, 3)), ig(xp, dense_target(orig_ids, LINE_T)); rows.append((tag, i, xc[0, 0].detach().cpu().numpy(), g3, gL, g3 - gL))
     print(f"{tag} {i}: prob3={sp[i,3]:.2f} prob8={sp[i,8]:.2f} dist={dist[i]:.1f}", flush=True)
 fig = Figure(figsize=(13, 3.0 * len(rows)), facecolor="white")
 cols = ["pattern", "IG -> class 3", f"IG -> Line(c{LINE_T})", "IG3 - IG_Line (red=class-3 cue)"]

@@ -10,25 +10,62 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.colors import ListedColormap
 from matplotlib import image as mpimg
+from matplotlib.patches import Rectangle
 import matplotlib as mpl
+from gui_app.crystallinity_panel import _radial_mean_var
 
 FIGS = "docs/paper/draft_v2/figs"; OUT = os.path.join(FIGS, "BorisEdits")
 NAMES = ["SI3", "SI4", "SI5"]
-ROLE = {"SI3": "overview", "SI4": "needles", "SI5": "interface"}
+ROLE = {"SI3": "interface", "SI4": "needles", "SI5": "interface (magnified)"}
+NMPX = {"SI3": 44.0, "SI4": 44.0, "SI5": 16.0}   # nm per scan pixel
+BARNM = {"SI3": 1000, "SI4": 1000, "SI5": 500}
 COLS = [("kmeans", "NMF + k-means"), ("aglo", "NMF + agglomerative"), ("gmm", "NMF + GMM")]
+INV = 0.00185; KMAX = 0.35; FOV = {"SI3": 187, "SI4": 160, "SI5": 160}
 
 
-def discrete(ax, lab):
+def spot_rank(name, dino):
+    """{class: rank} ordered by median azimuthal spottiness (low->high); classes
+    with no measurable grain rank lowest."""
+    try:
+        z = np.load(os.path.join(FIGS, f"grain_acom_v2_{name}.npz"))
+    except Exception:
+        return {int(c): i for i, c in enumerate(sorted(np.unique(dino)))}
+    cls, gsum, gcnt, vac = z["cls"], z["gsum"], z["gcnt"], z["vac"]
+    H = int(z["H"]); cyx = (H - 1) / 2.0; beam = max(8, round(0.11 * H)); lo = beam + 1
+    hi = min(int(KMAX / INV), FOV[name])
+    spot = np.full(gsum.shape[0], np.nan)
+    for g in range(gsum.shape[0]):
+        if vac[g]:
+            continue
+        m, v, _ = _radial_mean_var(gsum[g] / max(gcnt[g], 1), (cyx, cyx), beam_px=beam)
+        seg = m[lo:hi]; vseg = v[lo:hi]
+        if seg.size < 5 or seg.sum() <= 0:
+            continue
+        spot[g] = np.percentile(np.sqrt(np.clip(vseg, 0, None)) / np.clip(seg, 1e-9, None), 90)
+    cval = {}
+    for c in np.unique(dino):
+        gv = spot[cls == c]; gv = gv[np.isfinite(gv)]
+        cval[int(c)] = float(np.median(gv)) if gv.size else -np.inf
+    order = sorted(np.unique(dino).tolist(), key=lambda c: cval[int(c)])
+    return {int(c): r for r, c in enumerate(order)}
+
+
+def discrete(ax, lab, rank=None, cmap="tab20b"):
     uni = sorted(np.unique(lab).tolist()); has_noise = -1 in uni
-    base = mpl.colormaps.get_cmap("tab20").resampled(max(len([u for u in uni if u != -1]), 1))
+    base = mpl.colormaps.get_cmap(cmap).resampled(max(len([u for u in uni if u != -1]), 1))
     cols = [(0.72, 0.72, 0.72) if u == -1 else base(i - (1 if has_noise else 0)) for i, u in enumerate(uni)]
-    lut = {u: i for i, u in enumerate(uni)}
+    lut = rank if rank is not None else {u: i for i, u in enumerate(uni)}
     ax.imshow(np.vectorize(lut.get)(lab).astype(float), cmap=ListedColormap(cols),
               interpolation="nearest", vmin=0, vmax=max(len(uni) - 1, 1))
     ax.set_xticks([]); ax.set_yticks([])
 
 
 ncol = 2 + len(COLS)
+_LET = "abcdefghijklmnopqrstuvwxyz"
+def _pl(ax, idx):
+    ax.text(0.06, 0.95, _LET[idx], transform=ax.transAxes, fontsize=15, fontweight="bold",
+            va="top", ha="left", color="white",
+            bbox=dict(boxstyle="round,pad=0.14", fc="black", alpha=0.55, ec="none"), zorder=20)
 fig = Figure(figsize=(2.05 * ncol, 2.15 * 3 + 0.5), facecolor="white")
 for ri, n in enumerate(NAMES):
     z = np.load(os.path.join(FIGS, f"boris_nmf_cache_{n}.npz"))
@@ -38,14 +75,19 @@ for ri, n in enumerate(NAMES):
         ax.imshow(mpimg.imread(os.path.join(OUT, f"haadf_{n}.png")))
     except Exception:
         ax.text(0.5, 0.5, "HAADF", ha="center", va="center")
-    ax.set_ylabel(f"{n}\n{ROLE[n]}", fontsize=11, fontweight="bold", rotation=0, labelpad=20, va="center")
+    ax.set_ylabel(ROLE[n], fontsize=9.5, fontweight="bold", rotation=90, labelpad=6, va="center")
+    _pl(ax, ri * ncol + 0)
     if ri == 0: ax.set_title("HAADF (scan ROI)", fontsize=10)
-    # col 1: DINO
-    ax = fig.add_subplot(3, ncol, ri * ncol + 2); discrete(ax, z["dino"])
+    # col 1: DINO (colours ordered by azimuthal spottiness)
+    ax = fig.add_subplot(3, ncol, ri * ncol + 2); discrete(ax, z["dino"]); _pl(ax, ri * ncol + 1)
+    _H, _W = z["dino"].shape; _bpx = BARNM[n] / NMPX[n]
+    ax.add_patch(Rectangle((4, _H - 6), _bpx, max(1.6, _H * 0.02), color="white", ec="black", lw=0.4, zorder=25))
+    ax.text(4 + _bpx / 2, _H - 8, f"{BARNM[n] // 1000} µm" if BARNM[n] >= 1000 else f"{BARNM[n]} nm",
+            color="white", ha="center", va="bottom", fontsize=7, zorder=25)
     if ri == 0: ax.set_title("DINO", fontsize=10, fontweight="bold")
     # cols 2..: NMF variants
     for ci, (key, title) in enumerate(COLS):
-        ax = fig.add_subplot(3, ncol, ri * ncol + 3 + ci); discrete(ax, z[key])
+        ax = fig.add_subplot(3, ncol, ri * ncol + 3 + ci); discrete(ax, z[key]); _pl(ax, ri * ncol + 2 + ci)
         if ri == 0: ax.set_title(title, fontsize=10)
 fig.suptitle("IMC clustering. For each field of view (rows): the HAADF with the 4D-STEM scan region, the DINO class map, and NMF clustered by "
              "k-means, agglomerative, and Gaussian-mixture. Colours are arbitrary cluster labels.", fontsize=10)

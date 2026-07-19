@@ -213,8 +213,17 @@ class _ClusterMapViewer:
             pass
         ctrl = ctk.CTkFrame(win, fg_color="transparent")
         ctrl.pack(side="top", fill="x", padx=6, pady=4)
-        vmax_var = ctk.DoubleVar(value=train_vmax)
-        log_var = ctk.BooleanVar(value=False)
+        # Auto-scale to a high percentile and log-stretch by default so the
+        # Bragg disks are visible instead of just the saturating direct
+        # beam.  "reset" still returns to the model's training vmax.
+        try:
+            auto_vmax = float(np.percentile(np.asarray(raw2d), 99.5))
+        except Exception:
+            auto_vmax = train_vmax
+        if not (auto_vmax > 0):
+            auto_vmax = train_vmax
+        vmax_var = ctk.DoubleVar(value=round(auto_vmax, 4))
+        log_var = ctk.BooleanVar(value=True)
         ctk.CTkLabel(ctrl, text="vmax:").pack(side="left", padx=(4, 2))
         ent = ctk.CTkEntry(ctrl, textvariable=vmax_var, width=70)
         ent.pack(side="left", padx=2)
@@ -291,7 +300,9 @@ class _ClusterMapViewer:
         self._gs_count.pack(side="left", padx=6)
         cfg = SAMPLES[self.sample]
         self._gs_vmax = ctk.DoubleVar(value=float(cfg.get("vmax", 2.0)))
-        self._gs_log = ctk.BooleanVar(value=False)
+        # Log-stretch on by default so the Bragg disks show, not just the
+        # saturating direct beam.
+        self._gs_log = ctk.BooleanVar(value=True)
         ctk.CTkLabel(bar, text="vmax:").pack(side="left", padx=(12, 2))
         ent = ctk.CTkEntry(bar, textvariable=self._gs_vmax, width=70)
         ent.pack(side="left", padx=2)
