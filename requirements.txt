@@ -9,20 +9,27 @@
 # --- core scientific stack ---
 numpy==1.26.4
 scipy==1.15.3
-scikit-learn==1.7.0
+# py4DSTEM 0.14.18 requires scikit-learn<1.5, so 1.7 cannot be installed
+# alongside it (the dev machine has py4DSTEM 0.14.19, which lifted that cap).
+scikit-learn==1.4.2
 scikit-image==0.25.2
 pandas==2.3.0
 matplotlib==3.10.3
 h5py==3.14.0
 hdf5plugin==5.1.0
 pillow==11.2.1
-opencv-python==4.12.0.88
+# NOTE: opencv-python 4.12.x requires numpy>=2, which conflicts with the
+# numpy 1.26.4 pin above (the dev machine has 4.12 + numpy 1.26 only because
+# they were installed at different times and pip never re-resolved).
+# 4.11.0.86 is the newest opencv that works with numpy 1.x.
+opencv-python==4.11.0.86
 tqdm==4.67.1
 psutil==7.0.0
 requests==2.32.4
 
 # --- clustering / embedding ---
-umap-learn==0.5.9.post2
+# 0.5.9 needs scikit-learn>=1.6, which clashes with the <1.5 cap above.
+umap-learn==0.5.7
 hdbscan==0.8.40
 colorcet==3.1.0
 
