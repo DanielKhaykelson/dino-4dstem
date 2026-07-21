@@ -47,6 +47,11 @@ torchvision==0.22.1
 py4DSTEM==0.14.18
 ase==3.28.0
 
+# --- synthetic diffraction simulation (Synthetic tab) ---
+# Needed for the Simulate feature; ships with ASE.  Pin the exact beta the
+# tab was written against (its API changes between betas).
+abtem==1.0.0b33
+
 # --- GUI / reporting ---
 customtkinter==5.2.2
 python-pptx==1.0.2
@@ -55,7 +60,6 @@ python-pptx==1.0.2
 # OPTIONAL extras (only needed for specific features; uncomment to enable):
 #
 # transformers==4.44.2          # "Pretrained DINO" panel
-# abtem==1.0.0b33               # synthetic diffraction simulation panel
 # segment-anything @ git+https://github.com/facebookresearch/segment-anything.git   # SAM masks
 # cupy-cuda11x                  # GPU acceleration for ACOM (NVIDIA, CUDA 11.x)
 # md-to-docx                    # Markdown -> .docx export helper
