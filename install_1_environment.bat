@@ -10,6 +10,10 @@ REM
 REM  Prerequisite: Miniconda or Anaconda installed.
 REM ============================================================
 cd /d "%~dp0"
+REM Don't nag about conda being outdated -- it's just a warning, and it
+REM confuses users into thinking they must update conda first (they don't).
+REM This only affects THIS window; the user's global conda config is untouched.
+set "CONDA_NOTIFY_OUTDATED_CONDA=false"
 set "ENV_NAME=dino4dstem"
 if exist "%~dp0env_name.txt" set /p ENV_NAME=<"%~dp0env_name.txt"
 

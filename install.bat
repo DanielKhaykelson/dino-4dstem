@@ -10,6 +10,7 @@ REM  You can also run those two separately -- handy when updating the
 REM  app later, since only step 2 is needed for a code update.
 REM ============================================================
 cd /d "%~dp0"
+set "CONDA_NOTIFY_OUTDATED_CONDA=false"
 
 echo ============================================================
 echo  DINO-4DSTEM install  --  step 1 of 2: environment

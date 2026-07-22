@@ -8,6 +8,8 @@ REM  time you update the code (you do NOT need to redo step 1).
 REM ============================================================
 cd /d "%~dp0"
 set PYTHONIOENCODING=utf-8
+REM Suppress conda's "a newer version exists" nag (see install_1 for why).
+set "CONDA_NOTIFY_OUTDATED_CONDA=false"
 
 call "%~dp0_activate.bat" || (
   echo.
