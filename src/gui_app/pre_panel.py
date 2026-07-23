@@ -293,11 +293,16 @@ class PrePanel(ctk.CTkFrame):
         self._idx_slider.pack(fill="x", padx=8, pady=(0, 8))
         self._wire_idx_keys()
 
-        self._row_slider(ctrl, "vmax", self.vmax, 0.1, 50.0, 0.1,
+        self._row_slider(ctrl, "vmax", self.vmax, 0.1, 250.0, 0.1,
                           "Per-pattern intensity normalisation cap. "
                           "Pixel values above this clip to 1.0 in the "
                           "rescaled image. Lower vmax saturates more of "
-                          "the central beam halo.")
+                          "the central beam halo.\n\n"
+                          "The slider covers 0.1-250. For raw-count data "
+                          "(e.g. un-normalised detector counts) you can "
+                          "TYPE a larger value in the box, up to 10000 - "
+                          "the slider then just rests at its right end.",
+                          entry_hi=1e4)
         self._row_slider(ctrl, "center crop (px, in 192 frame)",
                           self.center_crop_size, 32, 192, 1,
                           "Cartesian center-crop applied AFTER the cube "
@@ -623,8 +628,16 @@ class PrePanel(ctk.CTkFrame):
             font=("Segoe UI", 9), justify="left").pack(
                 anchor="w", padx=8, pady=(8, 4))
 
-    def _row_slider(self, parent, label, var, lo, hi, step, help_text):
-        """Slider with a two-way-bound editable text entry on the right."""
+    def _row_slider(self, parent, label, var, lo, hi, step, help_text,
+                      entry_hi=None):
+        """Slider with a two-way-bound editable text entry on the right.
+
+        `hi` is the SLIDER's maximum.  `entry_hi` (default = hi) is the
+        largest value the user may TYPE into the box -- set it higher when
+        occasional extreme values are useful but would ruin the slider's
+        resolution (e.g. vmax: slider to 250, typed up to 1e4).  A typed
+        value above `hi` parks the slider handle at its right end while the
+        real value is kept."""
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=8, pady=2)
         head = ctk.CTkFrame(row, fg_color="transparent")
@@ -633,6 +646,7 @@ class PrePanel(ctk.CTkFrame):
         h = add_help_button(head, help_text); h.pack(side="left", padx=(4, 0))
 
         is_int = isinstance(var, ctk.IntVar)
+        ehi = float(hi if entry_hi is None else entry_hi)
 
         def _fmt(v):
             return str(int(v)) if is_int else f"{float(v):.2f}"
@@ -660,18 +674,19 @@ class PrePanel(ctk.CTkFrame):
             except ValueError:
                 entry_var.set(_fmt(var.get()))
                 return
-            v = max(float(lo), min(float(hi), v))
+            # Typed values may exceed the slider's range (up to entry_hi).
+            v = max(float(lo), min(ehi, v))
             if is_int:
                 v = int(round(v))
             var.set(v)
-            s.set(v)
+            s.set(v)          # parks at the slider's max if v > hi
             entry_var.set(_fmt(v))
             self._refresh()
 
         def _from_key(n_steps):
-            """Nudge the value by n_steps × step, clamped to [lo, hi]."""
+            """Nudge the value by n_steps × step, clamped to [lo, entry_hi]."""
             v = float(var.get()) + float(n_steps) * float(step)
-            v = max(float(lo), min(float(hi), v))
+            v = max(float(lo), min(ehi, v))
             if is_int:
                 v = int(round(v))
             var.set(v)
