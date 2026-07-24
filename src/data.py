@@ -1049,6 +1049,17 @@ class LoadPRZ:
 
     def __getitem__(self, idx):
         img = self.flat[idx].astype(np.float32, copy=False)
+        return torch.from_numpy(self.preprocess_raw(img)).unsqueeze(0)
+
+    def preprocess_raw(self, img):
+        """Apply the EXACT per-frame preprocessing the model is fed:
+        resize → rescale_like_vmax → ellipticity → blur → log-stretch.
+
+        Shared by __getitem__ and by callers that hold a raw pattern of
+        their own (e.g. a class/grain average) and need the model-view
+        version of it.  Keeping this in one place stops attribution code
+        from silently drifting out of sync with what the model saw."""
+        img = np.asarray(img, dtype=np.float32)
         if not np.isfinite(img).all():
             img = np.nan_to_num(img, copy=False)
         if img.shape[0] != self.resize or img.shape[1] != self.resize:
@@ -1077,7 +1088,7 @@ class LoadPRZ:
             # range it was trained on.
             img = np.log1p(np.clip(img, 0.0, None) * 50.0) \
                     / float(np.log1p(50.0))
-        return torch.from_numpy(img).unsqueeze(0)
+        return img
 
 
 class LoadPRZMulti:
