@@ -1806,15 +1806,35 @@ class PrePanel(ctk.CTkFrame):
                 out = np.lib.format.open_memmap(
                     tmp_path, mode="w+", dtype=dtype,
                     shape=(nY, nX, H, W))
+                # HDF5-backed cubes expose read_block(): ONE contiguous
+                # read per scan row instead of one per frame.  Frame-by-
+                # frame reads make a chunked/compressed master
+                # re-decompress the same chunks over and over (this is what
+                # made a 2x2 bin take ~20 min).  Memmap cubes are already
+                # fast frame-by-frame, so they keep the simple path.
+                _reader = getattr(self.cube, "read_block", None)
+                _cols = max(1, min(nX, (256 * 1024 ** 2)
+                                      // max(n * n * H * W * 4, 1)))
                 for Y in range(nY):
-                    for X in range(nX):
-                        acc = np.zeros((H, W), dtype=np.float32)
-                        for dy in range(n):
-                            for dx in range(n):
-                                acc += np.asarray(
-                                    self.cube[Y*n + dy, X*n + dx],
-                                    dtype=np.float32)
-                        out[Y, X] = (acc * inv).astype(dtype, copy=False)
+                    if _reader is not None:
+                        for X0 in range(0, nX, _cols):
+                            X1 = min(nX, X0 + _cols)
+                            blk = np.asarray(
+                                _reader(Y * n, n, X0 * n, (X1 - X0) * n),
+                                dtype=np.float32)
+                            out[Y, X0:X1] = blk.reshape(
+                                n, X1 - X0, n, H, W).mean(axis=(0, 2)
+                                                            ).astype(dtype,
+                                                                     copy=False)
+                    else:
+                        for X in range(nX):
+                            acc = np.zeros((H, W), dtype=np.float32)
+                            for dy in range(n):
+                                for dx in range(n):
+                                    acc += np.asarray(
+                                        self.cube[Y*n + dy, X*n + dx],
+                                        dtype=np.float32)
+                            out[Y, X] = (acc * inv).astype(dtype, copy=False)
                     if (Y + 1) % max(1, nY // 40) == 0:
                         dt = time.time() - t0
                         eta = dt * (nY - Y - 1) / max(Y + 1, 1)

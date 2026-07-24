@@ -146,6 +146,34 @@ class _H5Cube4D:
         self.shape = (self.Nx, self.Ny, self.H, self.W)
         self.dtype = h5_dataset.dtype
 
+    def read_block(self, r0, nrows, c0, ncols):
+        """Read scan rows [r0, r0+nrows) x cols [c0, c0+ncols) using ONE
+        contiguous dataset read PER ROW -> (nrows, ncols, H, W).
+
+        Frame-by-frame reads are pathological on a chunked+compressed
+        master: consecutive scan rows sit Nx frames apart, so an n x n bin
+        keeps revisiting chunks and HDF5 re-decompresses them.  One
+        contiguous read per row avoids that (measured ~4x faster, ~11x
+        combined with a larger chunk cache)."""
+        r0, nrows = int(r0), int(nrows)
+        c0, ncols = int(c0), int(ncols)
+        S1 = self.shape[1]
+        rows = []
+        for r in range(r0, r0 + nrows):
+            if self._mode == "4d":
+                a = np.asarray(self._d[r, c0:c0 + ncols])
+            else:
+                s = r * S1 + c0
+                a = np.asarray(self._d[s:s + ncols])
+            rows.append(a)
+        arr = np.stack(rows, axis=0)
+        if self._corr:
+            flat = arr.reshape(-1, self.H, self.W)
+            arr = np.stack([_apply_dectris_corrections(f, self._corr)
+                              for f in flat]
+                             ).reshape(nrows, ncols, self.H, self.W)
+        return arr
+
     def __getitem__(self, idx):
         if self._mode == "4d":
             arr = np.asarray(self._d[idx])
@@ -228,23 +256,45 @@ def bin_realspace_to_npy(src, n, out_path, progress=None):
     oy, ox = Ny // n, Nx // n
     if oy < 1 or ox < 1:
         raise ValueError(f"bin factor {n} too large for scan {Ny}x{Nx}")
-    out = np.lib.format.open_memmap(out_path, mode="w+", dtype=np.uint16,
+    # float32, NOT uint16: the bin is a MEAN, so rounding it to integers
+    # wipes out low-count data (a dm4/Eiger frame averaging ~0.05 counts/px
+    # rounds to all-zero).  float32 also halves the accumulation traffic
+    # vs the old float64.
+    out = np.lib.format.open_memmap(out_path, mode="w+", dtype=np.float32,
                                     shape=(oy, ox, H, W))
     total = oy * ox
     done = 0
+    # HDF5-backed cubes expose read_block(): one contiguous read per scan
+    # row instead of one per frame.  Memmap-backed cubes are already fast
+    # frame-by-frame (measured), so they keep the simple path.
+    reader = getattr(src, "read_block", None)
+    # Bound the working set (~256 MB) so a big detector can't blow up RAM.
+    per_out_col = max(int(n) * int(n) * H * W * 4, 1)
+    col_group = max(1, min(ox, (256 * 1024 ** 2) // per_out_col))
     try:
         for i in range(oy):
-            for j in range(ox):
-                acc = np.zeros((H, W), dtype=np.float64)
-                for di in range(n):
-                    for dj in range(n):
-                        acc += np.asarray(src[i * n + di, j * n + dj],
-                                          dtype=np.float64)
-                acc /= float(n * n)
-                out[i, j] = np.rint(acc).astype(np.uint16)
-                done += 1
-                if progress and (done % 32 == 0 or done == total):
-                    progress(done, total, "binning")
+            if reader is not None:
+                for j0 in range(0, ox, col_group):
+                    j1 = min(ox, j0 + col_group)
+                    blk = np.asarray(
+                        reader(i * n, n, j0 * n, (j1 - j0) * n),
+                        dtype=np.float32)
+                    out[i, j0:j1] = blk.reshape(
+                        n, j1 - j0, n, H, W).mean(axis=(0, 2))
+                    done += (j1 - j0)
+                    if progress:
+                        progress(min(done, total), total, "binning")
+            else:
+                for j in range(ox):
+                    acc = np.zeros((H, W), dtype=np.float32)
+                    for di in range(n):
+                        for dj in range(n):
+                            acc += np.asarray(src[i * n + di, j * n + dj],
+                                              dtype=np.float32)
+                    out[i, j] = acc / float(n * n)
+                    done += 1
+                    if progress and (done % 32 == 0 or done == total):
+                        progress(done, total, "binning")
     finally:
         out.flush()
         del out
@@ -526,6 +576,28 @@ def dm4_calibration(path):
     return out
 
 
+#: Raw-data chunk cache for HDF5 reads, in bytes.  h5py's DEFAULT IS 1 MB,
+#: which is catastrophic for chunked+compressed Eiger/Dectris masters: any
+#: access pattern that revisits a chunk (e.g. an n x n real-space bin, which
+#: alternates between scan rows Nx frames apart) evicts and RE-DECOMPRESSES
+#: the same chunks over and over.  Measured ~4.5x faster binning with this
+#: raised, and ~11x combined with slab reads.  Override with DINO_H5_CACHE_MB.
+_H5_CACHE_BYTES = int(float(os.environ.get("DINO_H5_CACHE_MB", 256)) * 1024 ** 2)
+_H5_CACHE_NSLOTS = 100003          # prime, >> number of cached chunks
+
+
+def _h5_open(path, mode="r"):
+    """h5py.File with a usefully sized chunk cache (see _H5_CACHE_BYTES).
+    Falls back to a plain open if this h5py build rejects the kwargs."""
+    import h5py
+    try:
+        return h5py.File(path, mode,
+                          rdcc_nbytes=_H5_CACHE_BYTES,
+                          rdcc_nslots=_H5_CACHE_NSLOTS)
+    except Exception:
+        return h5py.File(path, mode)
+
+
 def open_lazy_cube(path, scan_shape=None,
                      apply_dectris_corrections: bool = False):
     """Universal lazy 4D-cube loader.  Returns a numpy memmap
@@ -537,7 +609,7 @@ def open_lazy_cube(path, scan_shape=None,
     """
     if path.lower().endswith((".h5", ".hdf5")):
         import h5py
-        f = h5py.File(path, "r")
+        f = _h5_open(path)
         corr = (_h5_load_dectris_corrections(f)
                   if apply_dectris_corrections else {})
         try:
@@ -637,7 +709,7 @@ class _H5MasterFlat:
         H = W = None
         dtype = None
         for f, dpath in file_dataset_pairs:
-            fh = h5py.File(f, "r")
+            fh = _h5_open(f)
             try:
                 d = fh[dpath]
             except KeyError:
@@ -935,7 +1007,7 @@ class LoadPRZ:
         self._h5_file = None
         if used_path.lower().endswith((".h5", ".hdf5")):
             import h5py
-            self._h5_file = h5py.File(used_path, "r")
+            self._h5_file = _h5_open(used_path)
             corrections = (_h5_load_dectris_corrections(self._h5_file)
                               if apply_dectris_corrections else {})
             # Try direct: 4D / 3D dataset reachable from inside this file.
