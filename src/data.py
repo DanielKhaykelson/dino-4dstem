@@ -745,7 +745,24 @@ class _H5MasterFlat:
             local = i - self._cumsum[fi]
             return np.asarray(self._datasets[fi][local])
         if isinstance(idx, slice):
-            r = range(*idx.indices(self.shape[0]))
+            start, stop, step = idx.indices(self.shape[0])
+            if step == 1 and stop > start:
+                # Contiguous run: ONE hyperslab read per underlying data
+                # file, instead of one call per frame.  The old
+                # np.stack([self[i] ...]) path both looped per frame AND
+                # forced a second full copy of the whole block.
+                parts = []
+                i = start
+                while i < stop:
+                    fi = self._bisect.bisect_right(self._cumsum, i) - 1
+                    base = self._cumsum[fi]
+                    j = min(stop, self._cumsum[fi + 1])
+                    parts.append(np.asarray(
+                        self._datasets[fi][i - base:j - base]))
+                    i = j
+                return (parts[0] if len(parts) == 1
+                          else np.concatenate(parts, axis=0))
+            r = range(start, stop, step)
             return np.stack([self[i] for i in r], axis=0)
         if isinstance(idx, (list, tuple, np.ndarray)):
             return np.stack([self[int(i)] for i in idx], axis=0)
