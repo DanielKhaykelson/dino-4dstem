@@ -81,7 +81,7 @@ Double-click **DINO-4DSTEM GUI** (or **Assistant**). The first launch can take
 ~30 seconds while Python starts up. That's it. 🎉
 
 To analyze your data, point the app at your own 4D-STEM files
-(`.prz` / `.npz` / `.h5` master / `.npy` / `.dm4`) — no data is included with the app.
+(`.prz` / `.npz` / `.h5` master / `.npy` / `.dm4` / EMPAD `.raw`) — no data is included with the app.
 
 ---
 

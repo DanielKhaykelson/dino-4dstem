@@ -240,6 +240,9 @@ def peek_cube_info(path):
     if pl.endswith((".dm4", ".dm3")):
         arr = _open_dm4(path)            # memmap — cheap header peek
         return tuple(arr.shape), arr.dtype, True
+    if pl.endswith(".raw"):             # EMPAD — shape from size/xml, no read
+        info = empad_probe(path)
+        return tuple(info["shape4d"]), info["dtype"], True
     raise ValueError("peek_cube_info: unsupported (use h5 peek for hdf5)")
 
 
@@ -251,6 +254,11 @@ def bin_realspace_to_npy(src, n, out_path, progress=None):
     Each output position is the mean of the n×n block of diffraction
     patterns (full detector detail kept).  Returns out_path.
     """
+    # TODO(perf, deferred 2026-07-25): for chunked/compressed HDF5 masters
+    # the cost here is single-threaded bitshuffle/LZ4 decompression (~99%
+    # CPU).  A ProcessPoolExecutor over scan-row ranges measured ~5x on a
+    # 16-core box.  See memory: project-binning-parallel-todo.  Opt-in +
+    # serial fallback, and mind this machine's multiprocessing fragility.
     n = int(n)
     Ny, Nx, H, W = src.shape
     oy, ox = Ny // n, Nx // n
@@ -598,6 +606,82 @@ def _h5_open(path, mode="r"):
         return h5py.File(path, mode)
 
 
+# =========================================================================
+# EMPAD (Cornell/Thermo) .raw loader.
+#
+# EMPAD writes a headerless little-endian float32 .raw: N = Ny*Nx frames,
+# each frame is 128 columns x 130 ROWS, where the last 2 rows are per-frame
+# metadata (a timestamp/counters), NOT signal -- they must be cropped, so
+# the real detector is 128x128.  The scan shape lives in the sibling
+# acquisition_*.xml (<pix_x>,<pix_y>) and usually in the filename
+# (scan_x{Nx}_y{Ny}.raw).  Because each frame's first 128 rows are stored
+# contiguously, a memmap sliced [:, :128, :] is a zero-copy lazy view.
+# =========================================================================
+_EMPAD_META_ROWS = 2         # trailing rows per frame that are metadata
+_EMPAD_DET = 128             # detector is 128x128
+
+
+def _empad_scan_shape(path, scan_shape=None):
+    """Resolve (Ny, Nx) for an EMPAD .raw and whether frames carry the 2
+    metadata rows.  Order: explicit arg -> filename 'x{Nx}_y{Ny}' -> sibling
+    acquisition_*.xml <pix_x>/<pix_y>.  Validates against the file size."""
+    import re, glob
+    fsize = os.path.getsize(path)
+    nfloat = fsize // 4
+    cand = []
+    if scan_shape is not None:
+        cand.append((int(scan_shape[0]), int(scan_shape[1])))
+    m = re.search(r"x(\d+)_y(\d+)", os.path.basename(path))
+    if m:
+        cand.append((int(m.group(2)), int(m.group(1))))   # y=Ny, x=Nx
+    for xmlp in glob.glob(os.path.join(os.path.dirname(path),
+                                          "*.xml")):
+        try:
+            txt = open(xmlp, encoding="utf-8", errors="ignore").read()
+            px = re.search(r"<pix_x>\s*(\d+)", txt)
+            py = re.search(r"<pix_y>\s*(\d+)", txt)
+            if px and py:
+                cand.append((int(py.group(1)), int(px.group(1))))
+        except Exception:
+            pass
+    W = _EMPAD_DET
+    for Ny, Nx in cand:
+        if Ny < 1 or Nx < 1:
+            continue
+        per = nfloat // (Ny * Nx) if (Ny * Nx) else 0
+        # frame is 128 wide; height is 130 (with metadata) or 128 (without)
+        for rows in (_EMPAD_DET + _EMPAD_META_ROWS, _EMPAD_DET):
+            if per == rows * W and Ny * Nx * rows * W == nfloat:
+                return Ny, Nx, rows
+    raise ValueError(
+        f"{os.path.basename(path)}: could not determine EMPAD scan shape "
+        f"({fsize} bytes = {nfloat} float32). Pass scan_shape=(Ny, Nx).")
+
+
+def _open_empad(path, scan_shape=None):
+    """Lazy 4D EMPAD cube: memmap the .raw and return a (Ny, Nx, 128, 128)
+    view with the 2 metadata rows cropped.  Zero-copy, zero extra RAM."""
+    Ny, Nx, rows = _empad_scan_shape(path, scan_shape)
+    mm = np.memmap(path, dtype="<f4", mode="r",
+                   shape=(Ny, Nx, rows, _EMPAD_DET))
+    return mm[:, :, :_EMPAD_DET, :]     # crop metadata rows -> (Ny,Nx,128,128)
+
+
+def empad_probe(path, scan_shape=None):
+    """Inspect an EMPAD .raw WITHOUT reading frame data. Returns
+    {shape4d, dtype, scan_shape, has_metadata_rows, warnings}."""
+    Ny, Nx, rows = _empad_scan_shape(path, scan_shape)
+    w = []
+    if rows == _EMPAD_DET:
+        w.append("no trailing metadata rows detected (frames are 128x128); "
+                 "reading as-is.")
+    return {"shape4d": (Ny, Nx, _EMPAD_DET, _EMPAD_DET),
+            "dtype": np.dtype("float32"),
+            "scan_shape": (Ny, Nx),
+            "has_metadata_rows": rows != _EMPAD_DET,
+            "warnings": w}
+
+
 def open_lazy_cube(path, scan_shape=None,
                      apply_dectris_corrections: bool = False):
     """Universal lazy 4D-cube loader.  Returns a numpy memmap
@@ -643,6 +727,8 @@ def open_lazy_cube(path, scan_shape=None,
         raise ValueError(f"unexpected dataset ndim={ndim}")
     if path.lower().endswith((".dm4", ".dm3")):
         return _open_dm4(path, scan_shape=scan_shape)
+    if path.lower().endswith(".raw"):
+        return _open_empad(path, scan_shape=scan_shape)
     if path.lower().endswith((".prz", ".npz")):
         base, _ = os.path.splitext(path)
         cand = base + ".cube.npy"
@@ -1060,6 +1146,16 @@ class LoadPRZ:
             cube = _open_dm4(used_path, scan_shape=scan_shape)
             self.Nx, self.Ny, self.H, self.W = cube.shape
             self.flat = cube.reshape(-1, self.H, self.W)
+        elif used_path.lower().endswith(".raw"):
+            # EMPAD .raw: memmap (N, rows, 128) and crop the metadata rows.
+            # Slicing [:, :128, :] is a zero-copy lazy view whose per-frame
+            # read (first 128 rows) is contiguous.
+            Ny, Nx, rows = _empad_scan_shape(used_path, scan_shape)
+            mm = np.memmap(used_path, dtype="<f4", mode="r",
+                           shape=(Ny * Nx, rows, 128))
+            self.Ny, self.Nx = int(Ny), int(Nx)
+            self.H = self.W = 128
+            self.flat = mm[:, :128, :]        # (N, 128, 128) lazy view
         else:
             if used_path.lower().endswith(".npy"):
                 cube = np.load(used_path, mmap_mode='r',

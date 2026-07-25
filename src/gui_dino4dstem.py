@@ -259,8 +259,9 @@ class App(ctk.CTk):
         path = filedialog.askopenfilename(
             title="Choose a 4D-STEM cube",
             filetypes=[("4D-STEM cubes",
-                        "*.npy *.npz *.prz *.h5 *.hdf5 *.dm4 *.dm3"),
+                        "*.npy *.npz *.prz *.h5 *.hdf5 *.dm4 *.dm3 *.raw"),
                        ("Gatan DM", "*.dm4 *.dm3"),
+                       ("EMPAD raw", "*.raw"),
                        ("All files", "*.*")])
         if not path:
             return

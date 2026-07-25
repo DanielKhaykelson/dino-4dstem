@@ -745,11 +745,12 @@ class PrePanel(ctk.CTkFrame):
     def _browse(self):
         p = filedialog.askopenfilename(
             filetypes=[("Cube files",
-                          "*.prz *.npz *.npy *.h5 *.hdf5 *.dm4 *.dm3"),
+                          "*.prz *.npz *.npy *.h5 *.hdf5 *.dm4 *.dm3 *.raw"),
                         ("PRZ/NPZ", "*.prz *.npz"),
                         ("Numpy", "*.npy"),
                         ("HDF5", "*.h5 *.hdf5"),
                         ("Gatan DM", "*.dm4 *.dm3"),
+                        ("EMPAD raw", "*.raw"),
                         ("All", "*.*")])
         if p:
             self._path_var.set(p); self._load()
@@ -835,6 +836,29 @@ class PrePanel(ctk.CTkFrame):
                 msg += "\n⚠ " + "\n⚠ ".join(info["warnings"]) + "\n"
             msg += "\nLoad this as a 4D-STEM cube?"
             if not messagebox.askyesno("Confirm DM load", msg):
+                return
+        # EMPAD .raw: confirm the detected scan shape (the 2 metadata rows
+        # per frame are cropped automatically -> 128x128 detector).
+        if p.lower().endswith(".raw"):
+            try:
+                from data import empad_probe
+                info = empad_probe(p)
+            except Exception as e:
+                messagebox.showerror(
+                    "EMPAD raw",
+                    f"Could not read {os.path.basename(p)} as an EMPAD "
+                    f".raw:\n{e}\n\nExpected an EMPAD scan_x{{Nx}}_y{{Ny}}.raw "
+                    f"with a sibling acquisition_*.xml.")
+                return
+            sh = info["shape4d"]
+            msg = (f"Detected an EMPAD cube in {os.path.basename(p)}:\n\n"
+                   f"   Ny × Nx × H × W = {sh[0]} × {sh[1]} × {sh[2]} × {sh[3]}\n"
+                   f"   dtype = float32\n"
+                   f"   {'(cropped 2 metadata rows/frame)' if info['has_metadata_rows'] else '(no metadata rows)'}\n")
+            if info["warnings"]:
+                msg += "\n⚠ " + "\n⚠ ".join(info["warnings"]) + "\n"
+            msg += "\nLoad this as a 4D-STEM cube?"
+            if not messagebox.askyesno("Confirm EMPAD load", msg):
                 return
         # For 3D HDF5 masters (Eiger / Dectris), peek the dataset shape
         # and pop a scan-shape dialog. For 4D HDF5 / .prz / .npy, no
