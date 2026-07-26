@@ -36,7 +36,7 @@ def main():
     import matplotlib as mpl
 
     FIGS = "docs/paper/draft_v2/figs"
-    OUT = "docs/paper/draft_v2/figs/revision"
+    OUT = "docs/paper/draft_v2/figs/Review"
     INV, KMAX = 0.00185, 0.35
     FOV = {"SI3": 187, "SI4": 160, "SI5": 160}
     DISP = {"SI3": "interface", "SI4": "needles", "SI5": "interface (mag.)"}
