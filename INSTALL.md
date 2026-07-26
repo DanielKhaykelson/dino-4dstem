@@ -5,8 +5,15 @@ anything about programming or "git".** Just follow the steps and copy-paste the
 lines exactly.
 
 There are 5 steps:
-**1)** install Miniconda · **2)** download the code · **3)** double-click `install.bat`
-· **4)** paste one line to make desktop icons · **5)** double-click an icon.
+**1)** install Miniconda · **2)** download the code · **3)** double-click
+`install_1_environment.bat` · **4)** double-click `install_2_dino4dstem.bat`
+· **5)** double-click the Desktop icon.
+
+> The install is split in two on purpose. **Step 3** builds the Python
+> environment — big and slow, but you only ever do it once. **Step 4** installs
+> DINO-4DSTEM itself and makes the icons — fast, and it's the *only* step you
+> repeat when you get a newer version of the code.
+> (In a hurry? `install.bat` just runs both back-to-back.)
 
 ---
 
@@ -40,41 +47,31 @@ You only ever do this once.
 
 ---
 
-## Step 3 — Install (one double-click)
+## Step 3 — Install the environment (one double-click)
 
-1. Double-click **`install.bat`**.
-2. A black window opens and sets everything up. The first time it downloads a few
-   GB and takes **several minutes** — let it run until it says
-   **"Install complete"**.
+1. Double-click **`install_1_environment.bat`**.
+2. A black window opens and builds the Python environment. The first time it
+   downloads a few GB and takes **several minutes** — let it run until it says
+   **"STEP 1 complete"**.
    - If Windows shows **"Windows protected your PC"**, click **More info →
      Run anyway** (this is normal for downloaded scripts).
    - If it says **"Could not find conda"**, Step 1 wasn't finished — install
      Miniconda and try again.
 
-When it finishes it prints the exact line you need for the next step.
+You only ever do this step again if the dependencies change.
 
 ---
 
-## Step 4 — Make the desktop icons (copy-paste one line)
+## Step 4 — Install DINO-4DSTEM (one double-click)
 
-1. Open the project folder (the one with `install.bat`) in File Explorer.
-2. Click the **address bar** at the top (where the folder path is shown), type:
-
-   ```
-   powershell
-   ```
-
-   and press **Enter**. A blue PowerShell window opens, already in the folder.
-3. **Copy** the line below, **paste** it into that blue window (right-click =
-   paste), and press **Enter**:
-
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File make_desktop_shortcuts.ps1
-   ```
-
-4. Two icons now appear on your **Desktop**:
+1. Double-click **`install_2_dino4dstem.bat`**.
+2. It checks the app can start in the environment (it prints the package
+   versions it found), then creates the icons automatically.
+3. Two icons now appear on your **Desktop**:
    - **DINO-4DSTEM GUI** — the full app
    - **DINO-4DSTEM Assistant** — the no-window, plain-English assistant
+
+This step is quick — re-run just this one whenever you update the code.
 
 ---
 
@@ -84,15 +81,19 @@ Double-click **DINO-4DSTEM GUI** (or **Assistant**). The first launch can take
 ~30 seconds while Python starts up. That's it. 🎉
 
 To analyze your data, point the app at your own 4D-STEM files
-(`.prz` / `.npz` / `.h5` master / `.npy` / `.dm4`) — no data is included with the app.
+(`.prz` / `.npz` / `.h5` master / `.npy` / `.dm4` / EMPAD `.raw`) — no data is included with the app.
 
 ---
 
 ## Updating later
 
 When there's a new version: download the ZIP again into the **same** folder
-(replace the files), double-click **`install.bat`** once more (it updates the
-environment), and your existing desktop icons keep working.
+(replace the files), then double-click **`install_2_dino4dstem.bat`**. That's
+usually all you need — a code update doesn't rebuild the environment, so it
+takes seconds and your desktop icons keep working.
+
+Only re-run **`install_1_environment.bat`** if the release notes say the
+dependencies changed (or step 2 reports missing packages).
 
 ---
 

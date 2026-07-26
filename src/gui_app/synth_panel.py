@@ -247,6 +247,21 @@ class SynthPanel(ctk.CTkFrame):
         # scaled to the same electron count but with NO Poisson sampling.
         self.noise_mode = ctk.StringVar(value="shot")
         self.engine = ctk.StringVar(value="finite")   # finite | multislice | PRISM
+        # Box boundary condition (independent of `engine`):
+        #   finite   — rotate a finite cluster + vacuum pad (has a shape
+        #              function: broadened peaks + sinc "cross").
+        #   periodic — laterally periodic slab, no vacuum (NO shape
+        #              function; peak width set purely by convergence).
+        self.box_mode = ctk.StringVar(value="finite")  # finite | periodic
+        # Illumination:
+        #   probe      — converged beam, semiangle = conv_mrad; each
+        #                reflection becomes a DISK of diameter 2*conv/lambda.
+        #   plane_wave — parallel illumination (SAED-like); conv_mrad is
+        #                ignored and reflections are points, so the peak
+        #                width comes only from the box/shape function.
+        #                Requires engine='finite' (a plane wave has no
+        #                scan position to place).
+        self.illumination = ctk.StringVar(value="probe")  # probe | plane_wave
         self.layout = ctk.StringVar(value="block")    # block | voronoi
         self.n_voronoi_seeds = ctk.IntVar(value=4)    # Phase 2: Voronoi grains (low default → safer)
         # Potential gpts — was 512 (fine, but each SMatrix ≈ 100s of MB).
@@ -393,6 +408,62 @@ class SynthPanel(ctk.CTkFrame):
             "it's one sim per grain, not one per pixel.  Use gpts≥512 for "
             "sharpest spots.\n\n"
             "  PRISM — scattering-matrix scan (experimental here).").pack(
+            side="left", padx=4)
+        ctk.CTkLabel(sel_row, text="Box:").pack(side="left", padx=(12, 4))
+        ctk.CTkOptionMenu(sel_row, variable=self.box_mode,
+                            values=["finite", "periodic"],
+                            width=110).pack(side="left", padx=4)
+        add_help_button(sel_row,
+            "Box boundary condition (independent of Engine):\n\n"
+            "  finite — rotate a finite crystal cluster to the zone axis "
+            "and pad it with vacuum.  Works for ANY zone axis, but the "
+            "finite patch has a shape function: every Bragg peak is "
+            "broadened by ~1/(patch size) and a rectangular patch adds "
+            "sinc side-lobe streaks (the 'cross' through the direct "
+            "beam).  Because the per-grain in-plane rotation is applied "
+            "to the finished pattern, that cross ROTATES with each grain "
+            "and can act as a per-grain fingerprint.\n\n"
+            "  periodic — build a laterally PERIODIC slab (no vacuum) "
+            "with the zone axis along the beam, so abTEM's periodic "
+            "boundary conditions describe an effectively infinite "
+            "crystal.  There is then NO shape function at all: no peak "
+            "broadening from the box and no cross.  Peak width is set "
+            "purely by the convergence angle.\n\n"
+            "  Trade-offs: 'periodic' needs a zone axis with an "
+            "orthogonal periodic supercell (low-index only) and fills "
+            "the whole box with atoms (more atoms for the same box). "
+            "Thickness is quantised to whole slab repeats.  Also, with "
+            "no shape broadening a very small convergence angle can make "
+            "peaks sub-pixel, which aliases under the in-plane image "
+            "rotation — keep the disk a few pixels wide.").pack(
+            side="left", padx=4)
+        ctk.CTkLabel(sel_row, text="Beam:").pack(side="left", padx=(12, 4))
+        ctk.CTkOptionMenu(sel_row, variable=self.illumination,
+                            values=["probe", "plane_wave"],
+                            width=120).pack(side="left", padx=4)
+        add_help_button(sel_row,
+            "Illumination:\n\n"
+            "  probe — converged beam with semiangle = conv_mrad "
+            "(nanobeam/CBED-like).  Every reflection is a DISK of "
+            "diameter 2*conv/lambda.  For a large unit cell (closely "
+            "spaced reflections) those disks overlap unless conv_mrad "
+            "is made small.\n\n"
+            "  plane_wave — parallel illumination (SAED-like).  "
+            "conv_mrad is IGNORED and reflections become points, so the "
+            "peak width is set only by the box: the shape function in "
+            "'finite' box mode, or the reciprocal grid in 'periodic' "
+            "box mode.\n\n"
+            "  Requires Engine='finite', because a plane wave has no "
+            "scan position to place (the scanned engines need a probe "
+            "per pixel).  The finite engine already computes ONE "
+            "pattern per grain, which is exactly what a plane-wave "
+            "illumination gives you.\n\n"
+            "  CAUTION: plane_wave + periodic box removes BOTH sources "
+            "of peak width, so reflections collapse to ~1 pixel.  A "
+            "sub-pixel peak aliases badly under the per-grain in-plane "
+            "image rotation.  Pair plane_wave with the 'finite' box "
+            "(the patch size then sets a controlled peak width), or "
+            "keep a few pixels of width some other way.").pack(
             side="left", padx=4)
         ctk.CTkLabel(sel_row, text="Layout:").pack(side="left",
                                                         padx=(12, 4))
@@ -1356,7 +1427,8 @@ class SynthPanel(ctk.CTkFrame):
             key = (phase_id, za, tuple(tile_xyz),
                    round(thickness_crop_A, 3),
                    round(tilt_mag_mrad, 1), round(tilt_az_deg, 1),
-                   crystallinity, engine)
+                   crystallinity, engine,
+                   str(self.box_mode.get() or "finite").lower())
             hit = _cache_get(key)
             if hit is not None:
                 return hit
@@ -1383,19 +1455,30 @@ class SynthPanel(ctk.CTkFrame):
             #      additional rotation for off-axis tilt → center with
             #      vacuum padding so the bounding box is orthogonal.
             #      No orthogonalize_cell, no surface(), no auto-tile.
+            _boxmode = str(self.box_mode.get() or "finite").lower()
             try:
-                atoms = _build_atoms_vacuum_box(
-                    atoms_base,
-                    zone_axis=za,
-                    tile_xyz=tile_xyz,
-                    tilt_mag_mrad=float(tilt_mag_mrad),
-                    tilt_az_deg=float(tilt_az_deg),
-                    vacuum_pad_A=float(self.vacuum_pad_A.get()),
-                    thickness_crop_A=float(thickness_crop_A))
+                if _boxmode == "periodic":
+                    # Laterally periodic slab: no vacuum, no shape function.
+                    # Beam tilt is applied via Probe/SMatrix(tilt=...) as
+                    # usual, so no cell rotation is needed here either.
+                    atoms = _build_atoms_periodic(
+                        atoms_base,
+                        zone_axis=za,
+                        tile_xyz=tile_xyz,
+                        thickness_crop_A=float(thickness_crop_A))
+                else:
+                    atoms = _build_atoms_vacuum_box(
+                        atoms_base,
+                        zone_axis=za,
+                        tile_xyz=tile_xyz,
+                        tilt_mag_mrad=float(tilt_mag_mrad),
+                        tilt_az_deg=float(tilt_az_deg),
+                        vacuum_pad_A=float(self.vacuum_pad_A.get()),
+                        thickness_crop_A=float(thickness_crop_A))
             except Exception as e:
                 raise RuntimeError(
-                    f"atom build failed for {s.label!r}, ZA={za}, "
-                    f"tilt={tilt_mag_mrad} mrad: {e!r}") from e
+                    f"atom build failed ({_boxmode} box) for {s.label!r}, "
+                    f"ZA={za}, tilt={tilt_mag_mrad} mrad: {e!r}") from e
             # ---- Crystallinity: wrap atoms in FrozenPhonons so the
             #      multislice averages over displacement configs → smooth
             #      diffuse scattering + Debye-Waller damping of the Bragg
@@ -1463,6 +1546,25 @@ class SynthPanel(ctk.CTkFrame):
         probe = ProbeCls(energy=kV * 1e3,
                             semiangle_cutoff=sa,
                             sampling=0.1)
+        # ---- Illumination: converged probe (default) or plane wave ----
+        # A plane wave has no scan position, so it only makes sense with
+        # the 'finite' engine, which already produces ONE pattern per
+        # grain.  conv_mrad is unused in that case: reflections become
+        # points and the peak width comes purely from the box.
+        _illum = str(getattr(self, "illumination", None)
+                       and self.illumination.get() or "probe").lower()
+        plane_wave = None
+        if _illum == "plane_wave":
+            if engine != "finite":
+                raise RuntimeError(
+                    f"illumination='plane_wave' requires engine='finite' "
+                    f"(got engine={engine!r}).  The scanned engines "
+                    f"({engine}) need a probe per scan position; a plane "
+                    f"wave has none.  Switch Engine to 'finite'.")
+            PlaneWaveCls = _resolve_abtem("PlaneWave")
+            plane_wave = PlaneWaveCls(energy=kV * 1e3, sampling=0.1)
+            print(f"[synth] illumination = PLANE WAVE (conv_mrad={sa} "
+                  f"ignored; peak width set by the box)", flush=True)
 
         # ---- 4) scan, grouped BY GRAIN so each grain runs one
         #          batched multislice / SMatrix.collapse call. The
@@ -1528,6 +1630,15 @@ class SynthPanel(ctk.CTkFrame):
                     # arbitrary probe positions.  Cached `obj` is
                     # already the SMatrixArray.
                     waves = obj.collapse(positions=positions)
+                elif kind == "finite" and plane_wave is not None:
+                    # Plane-wave (SAED-like) illumination: one exit wave
+                    # for the whole cell, no probe position needed.  Same
+                    # per-grain broadcast as the probe path below.
+                    try:
+                        plane_wave.match_grid(obj)
+                    except Exception:
+                        pass
+                    waves = plane_wave.multislice(obj, pbar=False)
                 elif kind == "finite":
                     # ONE high-quality pattern for the whole grain: a
                     # single probe at the (square) box centre.  It is
@@ -1670,6 +1781,10 @@ class SynthPanel(ctk.CTkFrame):
                      "main": cm_main, "C": cm_C}
         meta = {
             "engine": engine,
+            "box_mode": str(self.box_mode.get() or "finite").lower(),
+            "illumination": _illum,
+            "pot_gpts": int(self.pot_gpts.get()),
+            "vacuum_pad_A": float(self.vacuum_pad_A.get()),
             "beam_kV": kV,
             "conv_mrad": sa,
             "det_size": det_size,
@@ -2675,6 +2790,70 @@ def _build_atoms_vacuum_box(atoms_base, *, zone_axis, tile_xyz,
         cell[1, 1] = L
         atoms.set_cell(cell)
     return atoms
+
+
+def _build_atoms_periodic(atoms_base, *, zone_axis, tile_xyz,
+                              thickness_crop_A=0.0, max_repetitions=4):
+    """PERIODIC structure builder (no vacuum, no finite crystal patch).
+
+    Counterpart to :func:`_build_atoms_vacuum_box`.  Instead of rotating a
+    finite cluster and padding it with vacuum, this builds a laterally
+    PERIODIC slab whose [hkl] zone axis points along +z, so abTEM's
+    periodic boundary conditions describe an effectively infinite crystal.
+
+    Why you would want it: a finite vacuum-padded patch has a shape
+    function (the FT of the patch), which broadens every Bragg peak and,
+    for a rectangular patch, adds sinc side-lobe streaks (the "cross"
+    through the direct beam).  A periodic cell has NO shape function at
+    all: the peak width is then set purely by the convergence angle.
+
+    Caveats:
+      * Only works for zone axes admitting an orthogonal periodic
+        supercell (low-index axes).  Raises otherwise.
+      * Thickness is quantised to whole slab repeats (``nz``), because
+        cropping mid-cell would break z-periodicity.  ``thickness_crop_A``
+        is therefore SNAPPED to the nearest whole number of repeats.
+      * Peaks are no longer shape-broadened, so if the convergence angle
+        is also tiny the peaks can become sub-pixel and alias under the
+        per-grain in-plane image rotation.  Keep the disk a few px wide.
+
+    Steps:
+      1. ``ase.build.surface`` orients [hkl] along +z, periodic in-plane.
+      2. Orthogonalise only if the cell is not already orthogonal (abTEM
+         needs an orthorhombic cell; skipping the no-op avoids the
+         boundary-atom de-duplication that call performs).
+      3. Tile in-plane (nx, ny) to set the box size and hence the
+         reciprocal sampling, and in z (nz) to set the thickness.
+    """
+    from ase.build import surface as _surface
+    import numpy as _np
+    nx, ny, nz = (max(int(x), 1) for x in tile_xyz)
+    h, k, l = (int(round(float(x))) for x in zone_axis)
+    try:
+        slab = _surface(atoms_base, (h, k, l), layers=1,
+                          vacuum=None, periodic=True)
+    except Exception as e:
+        raise RuntimeError(
+            f"periodic box: ase.build.surface failed for zone axis "
+            f"{(h, k, l)}: {e!r}.  Use box_mode='finite' for this "
+            f"zone axis.") from e
+    cell = _np.asarray(slab.get_cell(), dtype=float)
+    offdiag = float(_np.abs(cell - _np.diag(_np.diag(cell))).max())
+    if offdiag > 1e-6:
+        try:
+            slab = _orthogonalize(slab, max_repetitions=max_repetitions)
+        except Exception as e:
+            raise RuntimeError(
+                f"periodic box: no orthogonal supercell within "
+                f"max_repetitions={max_repetitions} for zone axis "
+                f"{(h, k, l)}: {e!r}.  Use box_mode='finite'.") from e
+    # Thickness: snap a requested crop to whole repeats to keep periodicity.
+    c_slab = float(_np.asarray(slab.get_cell(), dtype=float)[2, 2])
+    if thickness_crop_A and thickness_crop_A > 0 and c_slab > 1e-6:
+        nz = max(1, int(round(float(thickness_crop_A) / c_slab)))
+    slab = slab * (nx, ny, nz)
+    slab.set_pbc((True, True, True))
+    return slab
 
 
 def _autotile_inplane_to_square(atoms, max_tile: int = 8,

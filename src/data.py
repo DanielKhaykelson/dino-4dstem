@@ -146,6 +146,34 @@ class _H5Cube4D:
         self.shape = (self.Nx, self.Ny, self.H, self.W)
         self.dtype = h5_dataset.dtype
 
+    def read_block(self, r0, nrows, c0, ncols):
+        """Read scan rows [r0, r0+nrows) x cols [c0, c0+ncols) using ONE
+        contiguous dataset read PER ROW -> (nrows, ncols, H, W).
+
+        Frame-by-frame reads are pathological on a chunked+compressed
+        master: consecutive scan rows sit Nx frames apart, so an n x n bin
+        keeps revisiting chunks and HDF5 re-decompresses them.  One
+        contiguous read per row avoids that (measured ~4x faster, ~11x
+        combined with a larger chunk cache)."""
+        r0, nrows = int(r0), int(nrows)
+        c0, ncols = int(c0), int(ncols)
+        S1 = self.shape[1]
+        rows = []
+        for r in range(r0, r0 + nrows):
+            if self._mode == "4d":
+                a = np.asarray(self._d[r, c0:c0 + ncols])
+            else:
+                s = r * S1 + c0
+                a = np.asarray(self._d[s:s + ncols])
+            rows.append(a)
+        arr = np.stack(rows, axis=0)
+        if self._corr:
+            flat = arr.reshape(-1, self.H, self.W)
+            arr = np.stack([_apply_dectris_corrections(f, self._corr)
+                              for f in flat]
+                             ).reshape(nrows, ncols, self.H, self.W)
+        return arr
+
     def __getitem__(self, idx):
         if self._mode == "4d":
             arr = np.asarray(self._d[idx])
@@ -212,6 +240,9 @@ def peek_cube_info(path):
     if pl.endswith((".dm4", ".dm3")):
         arr = _open_dm4(path)            # memmap — cheap header peek
         return tuple(arr.shape), arr.dtype, True
+    if pl.endswith(".raw"):             # EMPAD — shape from size/xml, no read
+        info = empad_probe(path)
+        return tuple(info["shape4d"]), info["dtype"], True
     raise ValueError("peek_cube_info: unsupported (use h5 peek for hdf5)")
 
 
@@ -223,28 +254,55 @@ def bin_realspace_to_npy(src, n, out_path, progress=None):
     Each output position is the mean of the n×n block of diffraction
     patterns (full detector detail kept).  Returns out_path.
     """
+    # TODO(perf, deferred 2026-07-25): for chunked/compressed HDF5 masters
+    # the cost here is single-threaded bitshuffle/LZ4 decompression (~99%
+    # CPU).  A ProcessPoolExecutor over scan-row ranges measured ~5x on a
+    # 16-core box.  See memory: project-binning-parallel-todo.  Opt-in +
+    # serial fallback, and mind this machine's multiprocessing fragility.
     n = int(n)
     Ny, Nx, H, W = src.shape
     oy, ox = Ny // n, Nx // n
     if oy < 1 or ox < 1:
         raise ValueError(f"bin factor {n} too large for scan {Ny}x{Nx}")
-    out = np.lib.format.open_memmap(out_path, mode="w+", dtype=np.uint16,
+    # float32, NOT uint16: the bin is a MEAN, so rounding it to integers
+    # wipes out low-count data (a dm4/Eiger frame averaging ~0.05 counts/px
+    # rounds to all-zero).  float32 also halves the accumulation traffic
+    # vs the old float64.
+    out = np.lib.format.open_memmap(out_path, mode="w+", dtype=np.float32,
                                     shape=(oy, ox, H, W))
     total = oy * ox
     done = 0
+    # HDF5-backed cubes expose read_block(): one contiguous read per scan
+    # row instead of one per frame.  Memmap-backed cubes are already fast
+    # frame-by-frame (measured), so they keep the simple path.
+    reader = getattr(src, "read_block", None)
+    # Bound the working set (~256 MB) so a big detector can't blow up RAM.
+    per_out_col = max(int(n) * int(n) * H * W * 4, 1)
+    col_group = max(1, min(ox, (256 * 1024 ** 2) // per_out_col))
     try:
         for i in range(oy):
-            for j in range(ox):
-                acc = np.zeros((H, W), dtype=np.float64)
-                for di in range(n):
-                    for dj in range(n):
-                        acc += np.asarray(src[i * n + di, j * n + dj],
-                                          dtype=np.float64)
-                acc /= float(n * n)
-                out[i, j] = np.rint(acc).astype(np.uint16)
-                done += 1
-                if progress and (done % 32 == 0 or done == total):
-                    progress(done, total, "binning")
+            if reader is not None:
+                for j0 in range(0, ox, col_group):
+                    j1 = min(ox, j0 + col_group)
+                    blk = np.asarray(
+                        reader(i * n, n, j0 * n, (j1 - j0) * n),
+                        dtype=np.float32)
+                    out[i, j0:j1] = blk.reshape(
+                        n, j1 - j0, n, H, W).mean(axis=(0, 2))
+                    done += (j1 - j0)
+                    if progress:
+                        progress(min(done, total), total, "binning")
+            else:
+                for j in range(ox):
+                    acc = np.zeros((H, W), dtype=np.float32)
+                    for di in range(n):
+                        for dj in range(n):
+                            acc += np.asarray(src[i * n + di, j * n + dj],
+                                              dtype=np.float32)
+                    out[i, j] = acc / float(n * n)
+                    done += 1
+                    if progress and (done % 32 == 0 or done == total):
+                        progress(done, total, "binning")
     finally:
         out.flush()
         del out
@@ -526,6 +584,104 @@ def dm4_calibration(path):
     return out
 
 
+#: Raw-data chunk cache for HDF5 reads, in bytes.  h5py's DEFAULT IS 1 MB,
+#: which is catastrophic for chunked+compressed Eiger/Dectris masters: any
+#: access pattern that revisits a chunk (e.g. an n x n real-space bin, which
+#: alternates between scan rows Nx frames apart) evicts and RE-DECOMPRESSES
+#: the same chunks over and over.  Measured ~4.5x faster binning with this
+#: raised, and ~11x combined with slab reads.  Override with DINO_H5_CACHE_MB.
+_H5_CACHE_BYTES = int(float(os.environ.get("DINO_H5_CACHE_MB", 256)) * 1024 ** 2)
+_H5_CACHE_NSLOTS = 100003          # prime, >> number of cached chunks
+
+
+def _h5_open(path, mode="r"):
+    """h5py.File with a usefully sized chunk cache (see _H5_CACHE_BYTES).
+    Falls back to a plain open if this h5py build rejects the kwargs."""
+    import h5py
+    try:
+        return h5py.File(path, mode,
+                          rdcc_nbytes=_H5_CACHE_BYTES,
+                          rdcc_nslots=_H5_CACHE_NSLOTS)
+    except Exception:
+        return h5py.File(path, mode)
+
+
+# =========================================================================
+# EMPAD (Cornell/Thermo) .raw loader.
+#
+# EMPAD writes a headerless little-endian float32 .raw: N = Ny*Nx frames,
+# each frame is 128 columns x 130 ROWS, where the last 2 rows are per-frame
+# metadata (a timestamp/counters), NOT signal -- they must be cropped, so
+# the real detector is 128x128.  The scan shape lives in the sibling
+# acquisition_*.xml (<pix_x>,<pix_y>) and usually in the filename
+# (scan_x{Nx}_y{Ny}.raw).  Because each frame's first 128 rows are stored
+# contiguously, a memmap sliced [:, :128, :] is a zero-copy lazy view.
+# =========================================================================
+_EMPAD_META_ROWS = 2         # trailing rows per frame that are metadata
+_EMPAD_DET = 128             # detector is 128x128
+
+
+def _empad_scan_shape(path, scan_shape=None):
+    """Resolve (Ny, Nx) for an EMPAD .raw and whether frames carry the 2
+    metadata rows.  Order: explicit arg -> filename 'x{Nx}_y{Ny}' -> sibling
+    acquisition_*.xml <pix_x>/<pix_y>.  Validates against the file size."""
+    import re, glob
+    fsize = os.path.getsize(path)
+    nfloat = fsize // 4
+    cand = []
+    if scan_shape is not None:
+        cand.append((int(scan_shape[0]), int(scan_shape[1])))
+    m = re.search(r"x(\d+)_y(\d+)", os.path.basename(path))
+    if m:
+        cand.append((int(m.group(2)), int(m.group(1))))   # y=Ny, x=Nx
+    for xmlp in glob.glob(os.path.join(os.path.dirname(path),
+                                          "*.xml")):
+        try:
+            txt = open(xmlp, encoding="utf-8", errors="ignore").read()
+            px = re.search(r"<pix_x>\s*(\d+)", txt)
+            py = re.search(r"<pix_y>\s*(\d+)", txt)
+            if px and py:
+                cand.append((int(py.group(1)), int(px.group(1))))
+        except Exception:
+            pass
+    W = _EMPAD_DET
+    for Ny, Nx in cand:
+        if Ny < 1 or Nx < 1:
+            continue
+        per = nfloat // (Ny * Nx) if (Ny * Nx) else 0
+        # frame is 128 wide; height is 130 (with metadata) or 128 (without)
+        for rows in (_EMPAD_DET + _EMPAD_META_ROWS, _EMPAD_DET):
+            if per == rows * W and Ny * Nx * rows * W == nfloat:
+                return Ny, Nx, rows
+    raise ValueError(
+        f"{os.path.basename(path)}: could not determine EMPAD scan shape "
+        f"({fsize} bytes = {nfloat} float32). Pass scan_shape=(Ny, Nx).")
+
+
+def _open_empad(path, scan_shape=None):
+    """Lazy 4D EMPAD cube: memmap the .raw and return a (Ny, Nx, 128, 128)
+    view with the 2 metadata rows cropped.  Zero-copy, zero extra RAM."""
+    Ny, Nx, rows = _empad_scan_shape(path, scan_shape)
+    mm = np.memmap(path, dtype="<f4", mode="r",
+                   shape=(Ny, Nx, rows, _EMPAD_DET))
+    return mm[:, :, :_EMPAD_DET, :]     # crop metadata rows -> (Ny,Nx,128,128)
+
+
+def empad_probe(path, scan_shape=None):
+    """Inspect an EMPAD .raw WITHOUT reading frame data. Returns
+    {shape4d, dtype, scan_shape, has_metadata_rows, warnings}."""
+    Ny, Nx, rows = _empad_scan_shape(path, scan_shape)
+    w = []
+    if rows == _EMPAD_DET:
+        w.append("no trailing metadata rows detected (frames are 128x128); "
+                 "reading as-is.")
+    return {"shape4d": (Ny, Nx, _EMPAD_DET, _EMPAD_DET),
+            "dtype": np.dtype("float32"),
+            "scan_shape": (Ny, Nx),
+            "has_metadata_rows": rows != _EMPAD_DET,
+            "warnings": w}
+
+
 def open_lazy_cube(path, scan_shape=None,
                      apply_dectris_corrections: bool = False):
     """Universal lazy 4D-cube loader.  Returns a numpy memmap
@@ -537,7 +693,7 @@ def open_lazy_cube(path, scan_shape=None,
     """
     if path.lower().endswith((".h5", ".hdf5")):
         import h5py
-        f = h5py.File(path, "r")
+        f = _h5_open(path)
         corr = (_h5_load_dectris_corrections(f)
                   if apply_dectris_corrections else {})
         try:
@@ -571,6 +727,8 @@ def open_lazy_cube(path, scan_shape=None,
         raise ValueError(f"unexpected dataset ndim={ndim}")
     if path.lower().endswith((".dm4", ".dm3")):
         return _open_dm4(path, scan_shape=scan_shape)
+    if path.lower().endswith(".raw"):
+        return _open_empad(path, scan_shape=scan_shape)
     if path.lower().endswith((".prz", ".npz")):
         base, _ = os.path.splitext(path)
         cand = base + ".cube.npy"
@@ -637,7 +795,7 @@ class _H5MasterFlat:
         H = W = None
         dtype = None
         for f, dpath in file_dataset_pairs:
-            fh = h5py.File(f, "r")
+            fh = _h5_open(f)
             try:
                 d = fh[dpath]
             except KeyError:
@@ -673,7 +831,24 @@ class _H5MasterFlat:
             local = i - self._cumsum[fi]
             return np.asarray(self._datasets[fi][local])
         if isinstance(idx, slice):
-            r = range(*idx.indices(self.shape[0]))
+            start, stop, step = idx.indices(self.shape[0])
+            if step == 1 and stop > start:
+                # Contiguous run: ONE hyperslab read per underlying data
+                # file, instead of one call per frame.  The old
+                # np.stack([self[i] ...]) path both looped per frame AND
+                # forced a second full copy of the whole block.
+                parts = []
+                i = start
+                while i < stop:
+                    fi = self._bisect.bisect_right(self._cumsum, i) - 1
+                    base = self._cumsum[fi]
+                    j = min(stop, self._cumsum[fi + 1])
+                    parts.append(np.asarray(
+                        self._datasets[fi][i - base:j - base]))
+                    i = j
+                return (parts[0] if len(parts) == 1
+                          else np.concatenate(parts, axis=0))
+            r = range(start, stop, step)
             return np.stack([self[i] for i in r], axis=0)
         if isinstance(idx, (list, tuple, np.ndarray)):
             return np.stack([self[int(i)] for i in idx], axis=0)
@@ -935,7 +1110,7 @@ class LoadPRZ:
         self._h5_file = None
         if used_path.lower().endswith((".h5", ".hdf5")):
             import h5py
-            self._h5_file = h5py.File(used_path, "r")
+            self._h5_file = _h5_open(used_path)
             corrections = (_h5_load_dectris_corrections(self._h5_file)
                               if apply_dectris_corrections else {})
             # Try direct: 4D / 3D dataset reachable from inside this file.
@@ -971,6 +1146,16 @@ class LoadPRZ:
             cube = _open_dm4(used_path, scan_shape=scan_shape)
             self.Nx, self.Ny, self.H, self.W = cube.shape
             self.flat = cube.reshape(-1, self.H, self.W)
+        elif used_path.lower().endswith(".raw"):
+            # EMPAD .raw: memmap (N, rows, 128) and crop the metadata rows.
+            # Slicing [:, :128, :] is a zero-copy lazy view whose per-frame
+            # read (first 128 rows) is contiguous.
+            Ny, Nx, rows = _empad_scan_shape(used_path, scan_shape)
+            mm = np.memmap(used_path, dtype="<f4", mode="r",
+                           shape=(Ny * Nx, rows, 128))
+            self.Ny, self.Nx = int(Ny), int(Nx)
+            self.H = self.W = 128
+            self.flat = mm[:, :128, :]        # (N, 128, 128) lazy view
         else:
             if used_path.lower().endswith(".npy"):
                 cube = np.load(used_path, mmap_mode='r',
@@ -1049,6 +1234,17 @@ class LoadPRZ:
 
     def __getitem__(self, idx):
         img = self.flat[idx].astype(np.float32, copy=False)
+        return torch.from_numpy(self.preprocess_raw(img)).unsqueeze(0)
+
+    def preprocess_raw(self, img):
+        """Apply the EXACT per-frame preprocessing the model is fed:
+        resize → rescale_like_vmax → ellipticity → blur → log-stretch.
+
+        Shared by __getitem__ and by callers that hold a raw pattern of
+        their own (e.g. a class/grain average) and need the model-view
+        version of it.  Keeping this in one place stops attribution code
+        from silently drifting out of sync with what the model saw."""
+        img = np.asarray(img, dtype=np.float32)
         if not np.isfinite(img).all():
             img = np.nan_to_num(img, copy=False)
         if img.shape[0] != self.resize or img.shape[1] != self.resize:
@@ -1077,7 +1273,7 @@ class LoadPRZ:
             # range it was trained on.
             img = np.log1p(np.clip(img, 0.0, None) * 50.0) \
                     / float(np.log1p(50.0))
-        return torch.from_numpy(img).unsqueeze(0)
+        return img
 
 
 class LoadPRZMulti:

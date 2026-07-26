@@ -151,24 +151,39 @@ def dense_target(orig_ids, c):
 
 def build_polar_preproc(polar_size: int = 192, polar_mask_cols: int = 30,
                          center_crop_size: int = 140,
-                         center_mask_radius: int = 0):
+                         center_mask_radius: int = 0,
+                         com_centering: bool = False,
+                         com_search_radius_factor: float = 2.0):
     """Eval/attribution polar pre-processor.
 
-    Mirrors the training-time get_contrastive_transforms order:
-       CenterCrop  →  Resize  →  CenterMask (if r > 0)  →  PolarTransform
-                                                        →  PolarMaskLeft
+    Mirrors `contrastive_eval.infer_scan`'s transform EXACTLY, because an
+    attribution is only meaningful if it is computed on the same tensor the
+    model was scored on:
 
-    The CenterMask step was previously absent here, so models trained
-    with center_mask_radius > 0 saw an OOD input at inference (the
-    central beam intact) and produced an artificial CAM donut at
-    the centre.  Pass center_mask_radius equal to whatever the training
-    used for a faithful eval.
+       CenterCrop → [CenterOnCOM if com_centering] → Resize
+                  → [CenterMask if r > 0] → PolarTransform → PolarMaskLeft
+
+    Notes:
+      * `com_centering` must match the run's setting.  It was previously
+        ignored here, so for COM-centred runs the attribution ran on a
+        NON-centred pattern (shifted relative to what the model saw).
+      * The polar pipeline masks the direct beam AFTER the polar warp with
+        PolarMaskLeft; inference applies no Cartesian CenterMask.  Leave
+        `center_mask_radius=0` for polar runs -- it is kept only for
+        non-polar models trained with a Cartesian beam mask.
     """
-    ops = [
-        T.CenterCrop(center_crop_size),
-        T.Resize(polar_size, interpolation=InterpolationMode.BILINEAR,
-                  antialias=True),
-    ]
+    ops = [T.CenterCrop(center_crop_size)]
+    if com_centering:
+        try:
+            from dino_sr_ablation import CenterOnCOM
+            ops.append(CenterOnCOM(
+                search_radius=int(com_search_radius_factor
+                                    * max(int(center_mask_radius), 1))))
+        except Exception:
+            pass
+    ops.append(T.Resize(polar_size,
+                          interpolation=InterpolationMode.BILINEAR,
+                          antialias=True))
     if int(center_mask_radius) > 0:
         try:
             from dino_sr_fixed import CenterMask

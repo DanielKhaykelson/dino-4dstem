@@ -103,6 +103,32 @@ from gui_app.acom_tab import ACOMTabPanel
 from gui_app.chat_panel import ChatPanel
 
 
+def set_app_icon(win) -> None:
+    """Set the pixel-dino window icon on `win` (a Tk/CTk window).
+
+    Uses assets/dino.ico on Windows (multi-size, crisp), falling back to
+    the PNG via iconphoto elsewhere.  Silently does nothing if the asset
+    is missing — a missing icon must never stop the app from starting."""
+    try:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        ico = os.path.join(root, "assets", "dino.ico")
+        png = os.path.join(root, "assets", "dino64.png")
+        if os.path.exists(ico):
+            try:
+                win.iconbitmap(default=ico)
+                return
+            except Exception:
+                win.iconbitmap(ico)
+                return
+        if os.path.exists(png):
+            import tkinter as _tk
+            img = _tk.PhotoImage(file=png)
+            win._icon_ref = img          # keep a reference alive
+            win.iconphoto(True, img)
+    except Exception:
+        pass
+
+
 def _ellipsize(s: str, n: int = 32) -> str:
     """Shorten a label to <= n chars with a middle ellipsis, keeping the
     head and (distinguishing) tail — e.g. 'loaded__Diffraction…611_1'."""
@@ -125,6 +151,7 @@ class App(ctk.CTk):
         self.title("DINO-4DSTEM")
         self.geometry("1480x920")
         self.minsize(1240, 780)
+        set_app_icon(self)
         # Global session = single source of truth for (sample, run_dir,
         # inference).  All panels subscribe; no more per-panel
         # outdir/sample fan-out.
@@ -232,8 +259,9 @@ class App(ctk.CTk):
         path = filedialog.askopenfilename(
             title="Choose a 4D-STEM cube",
             filetypes=[("4D-STEM cubes",
-                        "*.npy *.npz *.prz *.h5 *.hdf5 *.dm4 *.dm3"),
+                        "*.npy *.npz *.prz *.h5 *.hdf5 *.dm4 *.dm3 *.raw"),
                        ("Gatan DM", "*.dm4 *.dm3"),
+                       ("EMPAD raw", "*.raw"),
                        ("All files", "*.*")])
         if not path:
             return

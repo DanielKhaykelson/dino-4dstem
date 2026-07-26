@@ -11,6 +11,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.colors import ListedColormap
 from matplotlib import image as mpimg
 from matplotlib.patches import Rectangle
+import matplotlib.patheffects as pe
 import matplotlib as mpl
 from gui_app.crystallinity_panel import _radial_mean_var
 
@@ -66,6 +67,14 @@ def _pl(ax, idx):
     ax.text(0.06, 0.95, _LET[idx], transform=ax.transAxes, fontsize=15, fontweight="bold",
             va="top", ha="left", color="white",
             bbox=dict(boxstyle="round,pad=0.14", fc="black", alpha=0.55, ec="none"), zorder=20)
+def _scalebar(ax, H, W, n):
+    """Clear, Figure-4-style bar: thick white bar + bold black-outlined white label."""
+    bpx = BARNM[n] / NMPX[n]; x0 = W * 0.05; y0 = H - H * 0.07
+    ax.add_patch(Rectangle((x0, y0), bpx, max(2.5, H * 0.038), color="white", ec="black", lw=0.5, zorder=26))
+    lbl = f"{BARNM[n] // 1000} µm" if BARNM[n] >= 1000 else f"{BARNM[n]} nm"
+    ax.text(x0, y0 - H * 0.012, lbl, color="white", ha="left", va="bottom",
+            fontsize=9.5, fontweight="bold", zorder=26,
+            path_effects=[pe.withStroke(linewidth=1.8, foreground="black")])
 fig = Figure(figsize=(2.05 * ncol, 2.15 * 3 + 0.5), facecolor="white")
 for ri, n in enumerate(NAMES):
     z = np.load(os.path.join(FIGS, f"boris_nmf_cache_{n}.npz"))
@@ -80,14 +89,12 @@ for ri, n in enumerate(NAMES):
     if ri == 0: ax.set_title("HAADF (scan ROI)", fontsize=10)
     # col 1: DINO (colours ordered by azimuthal spottiness)
     ax = fig.add_subplot(3, ncol, ri * ncol + 2); discrete(ax, z["dino"]); _pl(ax, ri * ncol + 1)
-    _H, _W = z["dino"].shape; _bpx = BARNM[n] / NMPX[n]
-    ax.add_patch(Rectangle((4, _H - 6), _bpx, max(1.6, _H * 0.02), color="white", ec="black", lw=0.4, zorder=25))
-    ax.text(4 + _bpx / 2, _H - 8, f"{BARNM[n] // 1000} µm" if BARNM[n] >= 1000 else f"{BARNM[n]} nm",
-            color="white", ha="center", va="bottom", fontsize=7, zorder=25)
+    _scalebar(ax, z["dino"].shape[0], z["dino"].shape[1], n)
     if ri == 0: ax.set_title("DINO", fontsize=10, fontweight="bold")
-    # cols 2..: NMF variants
+    # cols 2..: NMF variants (scale bar on every map column, 2 to last)
     for ci, (key, title) in enumerate(COLS):
         ax = fig.add_subplot(3, ncol, ri * ncol + 3 + ci); discrete(ax, z[key]); _pl(ax, ri * ncol + 2 + ci)
+        _scalebar(ax, z[key].shape[0], z[key].shape[1], n)
         if ri == 0: ax.set_title(title, fontsize=10)
 fig.suptitle("IMC clustering. For each field of view (rows): the HAADF with the 4D-STEM scan region, the DINO class map, and NMF clustered by "
              "k-means, agglomerative, and Gaussian-mixture. Colours are arbitrary cluster labels.", fontsize=10)

@@ -32,7 +32,7 @@ profiles, classical baselines such as NMF/ACOM for comparison).
 ## Key capabilities
 
 - **Self-supervised DINO classifier** for 4D-STEM diffraction (`dino_sr_contrastive_model.py`).
-- **Memory-safe loading** of large cubes (`.prz`, `.npz`, `.h5` master, `.npy`, `.dm4`) via
+- **Memory-safe loading** of large cubes (`.prz`, `.npz`, `.h5` master, `.npy`, `.dm4`, EMPAD `.raw`) via
   zip-offset memmap + optional real-space binning prompt — an 8.6 GB `.prz` loads at
   ~0.7 GB RAM.
 - **Classical baselines** for comparison: NMF + clustering (K-means / agglomerative /

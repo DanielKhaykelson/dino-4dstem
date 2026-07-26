@@ -4946,19 +4946,23 @@ class PostHocPanel(ctk.CTkFrame):
                                   else "cpu")
         cfg = SAMPLES[self.sample]
         mr, mask_cols, ccrop, _com = self._read_polar_pipeline_cfg()
+        # Mirror infer_scan: the polar pipeline masks the beam AFTER the
+        # warp (PolarMaskLeft) and applies no Cartesian CenterMask, but it
+        # DOES honour COM centering.
         polar_pre = build_polar_preproc(polar_size=192,
                                           polar_mask_cols=mask_cols,
                                           center_crop_size=ccrop,
-                                          center_mask_radius=mr)
+                                          center_mask_radius=0,
+                                          com_centering=bool(_com))
         cart_pre  = build_cart_preproc(polar_size=192,
                                           center_crop_size=ccrop,
                                           center_mask_radius=mr)
-        wn = np.clip(raw_pattern_2d.astype(np.float32)
-                       / max(float(cfg["vmax"]), 1e-6), 0.0, 1.0)
-        x_full = (torch.from_numpy(wn).unsqueeze(0).unsqueeze(0)
-                    .to(device).float())
-        x_full = F.interpolate(x_full, size=(192, 192), mode="bilinear",
-                                 align_corners=False)
+        # Run the raw pattern through the DATASET's own preprocessing
+        # (resize → rescale_like_vmax → ellipticity → blur → log-stretch)
+        # so the attribution is computed on exactly the image the model was
+        # fed.  Previously this clipped by vmax BEFORE resizing and skipped
+        # blur/log/ellipticity entirely.
+        x_full = self._model_frame_from_raw(raw_pattern_2d, cfg, device)
         x_cart  = cart_pre(x_full)
         x_polar = polar_pre(x_full)
 
@@ -5008,20 +5012,24 @@ class PostHocPanel(ctk.CTkFrame):
                                   else "cpu")
         cfg = SAMPLES[self.sample]
         mr, mask_cols, ccrop, _com = self._read_polar_pipeline_cfg()
+        # Mirror infer_scan: the polar pipeline masks the beam AFTER the
+        # warp (PolarMaskLeft) and applies no Cartesian CenterMask, but it
+        # DOES honour COM centering.
         polar_pre = build_polar_preproc(polar_size=192,
                                           polar_mask_cols=mask_cols,
                                           center_crop_size=ccrop,
-                                          center_mask_radius=mr)
+                                          center_mask_radius=0,
+                                          com_centering=bool(_com))
         cart_pre  = build_cart_preproc(polar_size=192,
                                           center_crop_size=ccrop,
                                           center_mask_radius=mr)
 
-        wn = np.clip(raw_pattern_2d.astype(np.float32)
-                       / max(float(cfg["vmax"]), 1e-6), 0.0, 1.0)
-        x_full = (torch.from_numpy(wn).unsqueeze(0).unsqueeze(0)
-                    .to(device).float())
-        x_full = F.interpolate(x_full, size=(192, 192), mode="bilinear",
-                                 align_corners=False)
+        # Run the raw pattern through the DATASET's own preprocessing
+        # (resize → rescale_like_vmax → ellipticity → blur → log-stretch)
+        # so the attribution is computed on exactly the image the model was
+        # fed.  Previously this clipped by vmax BEFORE resizing and skipped
+        # blur/log/ellipticity entirely.
+        x_full = self._model_frame_from_raw(raw_pattern_2d, cfg, device)
         x_cart  = cart_pre(x_full)
         x_polar = polar_pre(x_full)
 
@@ -5048,6 +5056,28 @@ class PostHocPanel(ctk.CTkFrame):
         avg_cart = x_cart[0, 0].detach().cpu().numpy()
         return avg_cart, cam_cart
 
+    def _model_frame_from_raw(self, raw2d, cfg, device):
+        """Raw detector pattern -> the exact (1,1,192,192) tensor the model
+        is fed, by delegating to LoadPRZ.preprocess_raw (resize → vmax
+        rescale → ellipticity → blur → log-stretch).  Falls back to a plain
+        vmax clip + resize if the cube can't be opened."""
+        import torch
+        import torch.nn.functional as F
+        arr = np.asarray(raw2d, dtype=np.float32)
+        try:
+            ds = LoadPRZ(cfg["path"], resize=192, vmax=cfg["vmax"])
+            img = ds.preprocess_raw(arr)
+            return (torch.from_numpy(np.ascontiguousarray(img))
+                      .unsqueeze(0).unsqueeze(0).to(device).float())
+        except Exception as e:
+            print(f"[posthoc] preprocess_raw unavailable ({e!r}); "
+                  f"falling back to vmax-clip", flush=True)
+            wn = np.clip(arr / max(float(cfg.get("vmax", 2.0)), 1e-6), 0.0, 1.0)
+            x = (torch.from_numpy(wn).unsqueeze(0).unsqueeze(0)
+                   .to(device).float())
+            return F.interpolate(x, size=(192, 192), mode="bilinear",
+                                   align_corners=False)
+
     def _compute_attribution_pair(self, ckpt_path, c, source, target_idx):
         """Run BOTH GradCAM and IG on the same input. Returns
         (raw_full_HxW, avg_cart_192, gradcam_cart_192, ig_cart_192).
@@ -5071,35 +5101,42 @@ class PostHocPanel(ctk.CTkFrame):
         ds = LoadPRZ(cfg["path"], resize=192, vmax=cfg["vmax"])
         mask_r, mask_cols, ccrop, _com = \
             self._read_polar_pipeline_cfg()
+        # The model's polar input carries NO Cartesian CenterMask (the beam
+        # is masked post-polar by PolarMaskLeft) but DOES honour COM
+        # centering -- mirror infer_scan exactly.  cart_pre is display-only,
+        # so it keeps the beam mask for a readable underlay.
         polar_pre = build_polar_preproc(polar_size=192,
                                           polar_mask_cols=mask_cols,
                                           center_crop_size=ccrop,
-                                          center_mask_radius=mask_r)
+                                          center_mask_radius=0,
+                                          com_centering=bool(_com))
         cart_pre  = build_cart_preproc(polar_size=192,
                                           center_crop_size=ccrop,
                                           center_mask_radius=mask_r)
 
         # ---- pick the input pattern ----
+        # Use the DATASET's own frames (ds[i]), not ds.get_raw(): __getitem__
+        # applies resize -> rescale_like_vmax -> ellipticity -> blur ->
+        # log-stretch, i.e. exactly what the model was fed.  The old code
+        # took raw counts, clipped by vmax BEFORE resizing and skipped
+        # blur/log/ellipticity, so attributions were computed on a subtly
+        # different image than the one that produced the class assignment.
         if source == "class":
             soft = self._inf["soft_probs"]; ass = self._inf["assigns"]
             idx = np.where(ass == c)[0]
             if idx.size == 0:
                 raise RuntimeError(f"class {c} is empty")
             s = soft[idx, c]
-            top = idx[np.argsort(-s)[:min(200, len(idx))]]
-            patterns = np.stack([ds.get_raw(int(i)) for i in top],
-                                 0).astype(np.float32)
-            w = s[np.argsort(-s)[:len(top)]].astype(np.float32)
-            wavg = (patterns * w[:, None, None]).sum(0) / (w.sum() + 1e-12)
-            wn = np.clip(wavg / max(float(cfg["vmax"]), 1e-6), 0.0, 1.0)
+            order = np.argsort(-s)[:min(200, len(idx))]
+            top = idx[order]
+            frames = torch.stack([ds[int(i)] for i in top]).float()  # (N,1,192,192)
+            w = torch.from_numpy(
+                np.ascontiguousarray(s[order], dtype=np.float32))
+            x_full = ((frames * w[:, None, None, None]).sum(0)
+                        / (float(w.sum()) + 1e-12)).unsqueeze(0)
         else:
-            # single frame
-            raw = ds.get_raw(int(target_idx)).astype(np.float32)
-            wn = np.clip(raw / max(float(cfg["vmax"]), 1e-6), 0.0, 1.0)
-        x_full = (torch.from_numpy(wn).unsqueeze(0).unsqueeze(0)
-                   .to(device).float())
-        x_full = F.interpolate(x_full, size=(192, 192), mode="bilinear",
-                                align_corners=False)
+            x_full = ds[int(target_idx)].unsqueeze(0).float()
+        x_full = x_full.to(device).float()
         x_cart  = cart_pre(x_full)
         x_polar = polar_pre(x_full)
 
@@ -5132,10 +5169,11 @@ class PostHocPanel(ctk.CTkFrame):
         ig_cart = gaussian_filter(np.abs(ig_cart), sigma=2.0)
 
         avg_cart = x_cart[0, 0].detach().cpu().numpy()
-        # ``wn`` is the raw-resolution, vmax-normalised pattern (before
-        # CenterCrop/Resize). Return it so the triptych can use it as
-        # the underlay, matching the rest of the GUI.
-        raw_full = wn.astype(np.float32)
+        # Full (un-cropped) model-view frame, i.e. the 192x192 image before
+        # CenterCrop/Resize.  Kept for callers that want the wider field of
+        # view; _draw_triptych deliberately ignores it and shows everything
+        # at the cropped scale the attribution was computed on.
+        raw_full = x_full[0, 0].detach().cpu().numpy().astype(np.float32)
         return raw_full, avg_cart, cam_cart, ig_cart
 
     def _draw_triptych(self, c, source, target_idx, tag, avg, cam, ig,

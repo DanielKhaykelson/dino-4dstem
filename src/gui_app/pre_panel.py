@@ -293,11 +293,16 @@ class PrePanel(ctk.CTkFrame):
         self._idx_slider.pack(fill="x", padx=8, pady=(0, 8))
         self._wire_idx_keys()
 
-        self._row_slider(ctrl, "vmax", self.vmax, 0.1, 50.0, 0.1,
+        self._row_slider(ctrl, "vmax", self.vmax, 0.1, 250.0, 0.1,
                           "Per-pattern intensity normalisation cap. "
                           "Pixel values above this clip to 1.0 in the "
                           "rescaled image. Lower vmax saturates more of "
-                          "the central beam halo.")
+                          "the central beam halo.\n\n"
+                          "The slider covers 0.1-250. For raw-count data "
+                          "(e.g. un-normalised detector counts) you can "
+                          "TYPE a larger value in the box, up to 10000 - "
+                          "the slider then just rests at its right end.",
+                          entry_hi=1e4)
         self._row_slider(ctrl, "center crop (px, in 192 frame)",
                           self.center_crop_size, 32, 192, 1,
                           "Cartesian center-crop applied AFTER the cube "
@@ -623,8 +628,16 @@ class PrePanel(ctk.CTkFrame):
             font=("Segoe UI", 9), justify="left").pack(
                 anchor="w", padx=8, pady=(8, 4))
 
-    def _row_slider(self, parent, label, var, lo, hi, step, help_text):
-        """Slider with a two-way-bound editable text entry on the right."""
+    def _row_slider(self, parent, label, var, lo, hi, step, help_text,
+                      entry_hi=None):
+        """Slider with a two-way-bound editable text entry on the right.
+
+        `hi` is the SLIDER's maximum.  `entry_hi` (default = hi) is the
+        largest value the user may TYPE into the box -- set it higher when
+        occasional extreme values are useful but would ruin the slider's
+        resolution (e.g. vmax: slider to 250, typed up to 1e4).  A typed
+        value above `hi` parks the slider handle at its right end while the
+        real value is kept."""
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=8, pady=2)
         head = ctk.CTkFrame(row, fg_color="transparent")
@@ -633,6 +646,7 @@ class PrePanel(ctk.CTkFrame):
         h = add_help_button(head, help_text); h.pack(side="left", padx=(4, 0))
 
         is_int = isinstance(var, ctk.IntVar)
+        ehi = float(hi if entry_hi is None else entry_hi)
 
         def _fmt(v):
             return str(int(v)) if is_int else f"{float(v):.2f}"
@@ -660,18 +674,19 @@ class PrePanel(ctk.CTkFrame):
             except ValueError:
                 entry_var.set(_fmt(var.get()))
                 return
-            v = max(float(lo), min(float(hi), v))
+            # Typed values may exceed the slider's range (up to entry_hi).
+            v = max(float(lo), min(ehi, v))
             if is_int:
                 v = int(round(v))
             var.set(v)
-            s.set(v)
+            s.set(v)          # parks at the slider's max if v > hi
             entry_var.set(_fmt(v))
             self._refresh()
 
         def _from_key(n_steps):
-            """Nudge the value by n_steps × step, clamped to [lo, hi]."""
+            """Nudge the value by n_steps × step, clamped to [lo, entry_hi]."""
             v = float(var.get()) + float(n_steps) * float(step)
-            v = max(float(lo), min(float(hi), v))
+            v = max(float(lo), min(ehi, v))
             if is_int:
                 v = int(round(v))
             var.set(v)
@@ -730,11 +745,12 @@ class PrePanel(ctk.CTkFrame):
     def _browse(self):
         p = filedialog.askopenfilename(
             filetypes=[("Cube files",
-                          "*.prz *.npz *.npy *.h5 *.hdf5 *.dm4 *.dm3"),
+                          "*.prz *.npz *.npy *.h5 *.hdf5 *.dm4 *.dm3 *.raw"),
                         ("PRZ/NPZ", "*.prz *.npz"),
                         ("Numpy", "*.npy"),
                         ("HDF5", "*.h5 *.hdf5"),
                         ("Gatan DM", "*.dm4 *.dm3"),
+                        ("EMPAD raw", "*.raw"),
                         ("All", "*.*")])
         if p:
             self._path_var.set(p); self._load()
@@ -820,6 +836,29 @@ class PrePanel(ctk.CTkFrame):
                 msg += "\n⚠ " + "\n⚠ ".join(info["warnings"]) + "\n"
             msg += "\nLoad this as a 4D-STEM cube?"
             if not messagebox.askyesno("Confirm DM load", msg):
+                return
+        # EMPAD .raw: confirm the detected scan shape (the 2 metadata rows
+        # per frame are cropped automatically -> 128x128 detector).
+        if p.lower().endswith(".raw"):
+            try:
+                from data import empad_probe
+                info = empad_probe(p)
+            except Exception as e:
+                messagebox.showerror(
+                    "EMPAD raw",
+                    f"Could not read {os.path.basename(p)} as an EMPAD "
+                    f".raw:\n{e}\n\nExpected an EMPAD scan_x{{Nx}}_y{{Ny}}.raw "
+                    f"with a sibling acquisition_*.xml.")
+                return
+            sh = info["shape4d"]
+            msg = (f"Detected an EMPAD cube in {os.path.basename(p)}:\n\n"
+                   f"   Ny × Nx × H × W = {sh[0]} × {sh[1]} × {sh[2]} × {sh[3]}\n"
+                   f"   dtype = float32\n"
+                   f"   {'(cropped 2 metadata rows/frame)' if info['has_metadata_rows'] else '(no metadata rows)'}\n")
+            if info["warnings"]:
+                msg += "\n⚠ " + "\n⚠ ".join(info["warnings"]) + "\n"
+            msg += "\nLoad this as a 4D-STEM cube?"
+            if not messagebox.askyesno("Confirm EMPAD load", msg):
                 return
         # For 3D HDF5 masters (Eiger / Dectris), peek the dataset shape
         # and pop a scan-shape dialog. For 4D HDF5 / .prz / .npy, no
@@ -1791,15 +1830,35 @@ class PrePanel(ctk.CTkFrame):
                 out = np.lib.format.open_memmap(
                     tmp_path, mode="w+", dtype=dtype,
                     shape=(nY, nX, H, W))
+                # HDF5-backed cubes expose read_block(): ONE contiguous
+                # read per scan row instead of one per frame.  Frame-by-
+                # frame reads make a chunked/compressed master
+                # re-decompress the same chunks over and over (this is what
+                # made a 2x2 bin take ~20 min).  Memmap cubes are already
+                # fast frame-by-frame, so they keep the simple path.
+                _reader = getattr(self.cube, "read_block", None)
+                _cols = max(1, min(nX, (256 * 1024 ** 2)
+                                      // max(n * n * H * W * 4, 1)))
                 for Y in range(nY):
-                    for X in range(nX):
-                        acc = np.zeros((H, W), dtype=np.float32)
-                        for dy in range(n):
-                            for dx in range(n):
-                                acc += np.asarray(
-                                    self.cube[Y*n + dy, X*n + dx],
-                                    dtype=np.float32)
-                        out[Y, X] = (acc * inv).astype(dtype, copy=False)
+                    if _reader is not None:
+                        for X0 in range(0, nX, _cols):
+                            X1 = min(nX, X0 + _cols)
+                            blk = np.asarray(
+                                _reader(Y * n, n, X0 * n, (X1 - X0) * n),
+                                dtype=np.float32)
+                            out[Y, X0:X1] = blk.reshape(
+                                n, X1 - X0, n, H, W).mean(axis=(0, 2)
+                                                            ).astype(dtype,
+                                                                     copy=False)
+                    else:
+                        for X in range(nX):
+                            acc = np.zeros((H, W), dtype=np.float32)
+                            for dy in range(n):
+                                for dx in range(n):
+                                    acc += np.asarray(
+                                        self.cube[Y*n + dy, X*n + dx],
+                                        dtype=np.float32)
+                            out[Y, X] = (acc * inv).astype(dtype, copy=False)
                     if (Y + 1) % max(1, nY // 40) == 0:
                         dt = time.time() - t0
                         eta = dt * (nY - Y - 1) / max(Y + 1, 1)
