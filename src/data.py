@@ -243,6 +243,13 @@ def peek_cube_info(path):
     if pl.endswith(".raw"):             # EMPAD — shape from size/xml, no read
         info = empad_probe(path)
         return tuple(info["shape4d"]), info["dtype"], True
+    if pl.endswith(".mib"):             # Merlin/Medipix — header peek, no read
+        info = mib_probe(path)
+        if info["scan_shape"] is None:
+            raise ValueError(
+                f"{os.path.basename(path)}: Merlin .mib scan grid unknown "
+                f"({info['nframes']} frames). Supply scan_shape=(Ny, Nx).")
+        return tuple(info["shape4d"]), info["dtype"], True
     raise ValueError("peek_cube_info: unsupported (use h5 peek for hdf5)")
 
 
@@ -307,6 +314,94 @@ def bin_realspace_to_npy(src, n, out_path, progress=None):
         out.flush()
         del out
     return out_path
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Hot- / dead-pixel detection and removal (detector-fixed bad pixels)
+# ═══════════════════════════════════════════════════════════════════════
+def detect_hot_pixels(ref_img, k=8.0, include_dead=True, rel=1.0):
+    """Detect detector-fixed hot (and optionally dead) pixels on a reference
+    diffraction pattern (e.g. the scan-mean / PACBED).
+
+    Two conditions must BOTH hold for a hot pixel:
+      1. it exceeds its local 3×3 median by more than ``k`` robust sigmas
+         (sigma = 1.4826·MAD of the whole residual), and
+      2. it is more than ``rel``× brighter than that local median
+         (i.e. ref > (1+rel)·median).
+    Condition 2 is scale-relative, so even the steep, bright direct beam —
+    where the local median already tracks the intensity — is never flagged;
+    only genuine isolated spikes survive.  Dead pixels (near-zero surrounded
+    by real signal) are flagged by the mirror condition.
+
+    Returns a boolean mask (H, W): True where a pixel is bad.
+    """
+    from scipy.ndimage import median_filter
+    ref = np.asarray(ref_img, dtype=np.float64)
+    med = median_filter(ref, size=3, mode="nearest")
+    resid = ref - med
+    mad = np.median(np.abs(resid - np.median(resid)))
+    sigma = 1.4826 * mad if mad > 0 else (float(resid.std()) or 1.0)
+    eps = max(sigma, 1e-6)
+    hot = (resid > k * sigma) & (ref > (1.0 + rel) * np.maximum(med, eps))
+    if include_dead:
+        dead = (resid < -k * sigma) & (ref < 0.5 * med) & (med > k * sigma)
+        return hot | dead
+    return hot
+
+
+def build_hotpix_neighbors(mask, radius=2):
+    """For every bad pixel in ``mask`` (bool H×W), precompute the flat
+    indices of its GOOD neighbours within a (2·radius+1)² window.
+
+    Returns (bad_flat (n,), nbr (n, K) int64 with -1 for missing/out-of-
+    frame/bad neighbours).  Feed both to :func:`apply_hotpix_block`.
+    """
+    mask = np.asarray(mask, dtype=bool)
+    H, W = mask.shape
+    good = ~mask
+    bad = np.argwhere(mask)                       # (n, 2) -> (row, col)
+    n = bad.shape[0]
+    offs = [(dy, dx)
+            for dy in range(-radius, radius + 1)
+            for dx in range(-radius, radius + 1)
+            if not (dy == 0 and dx == 0)]
+    K = len(offs)
+    nbr = np.full((n, K), -1, dtype=np.int64)
+    if n == 0:
+        return (bad[:, 0] * W + bad[:, 1]).astype(np.int64), nbr
+    by, bx = bad[:, 0], bad[:, 1]
+    for j, (dy, dx) in enumerate(offs):
+        yy = by + dy; xx = bx + dx
+        inb = (yy >= 0) & (yy < H) & (xx >= 0) & (xx < W)
+        if not inb.any():
+            continue
+        gy = yy[inb]; gx = xx[inb]
+        is_good = good[gy, gx]
+        rows = np.where(inb)[0][is_good]
+        nbr[rows, j] = gy[is_good] * W + gx[is_good]
+    bad_flat = (by * W + bx).astype(np.int64)
+    return bad_flat, nbr
+
+
+def apply_hotpix_block(block, bad_flat, nbr):
+    """Replace bad pixels in a block of frames with the median of their good
+    neighbours.  ``block`` is (C, H, W); returns a corrected float32 (C, H, W).
+    Vectorised over the C frames for speed."""
+    block = np.asarray(block, dtype=np.float32)
+    C, H, W = block.shape
+    flat = block.reshape(C, H * W).copy()
+    if bad_flat.size == 0:
+        return flat.reshape(C, H, W)
+    safe = np.where(nbr >= 0, nbr, 0)             # (n, K)
+    gathered = flat[:, safe]                      # (C, n, K)
+    gathered = np.where((nbr < 0)[None, :, :], np.nan, gathered)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        med = np.nanmedian(gathered, axis=2)      # (C, n)
+    med = np.where(np.isfinite(med), med, 0.0).astype(np.float32)
+    flat[:, bad_flat] = med
+    return flat.reshape(C, H, W)
 
 
 def _npz_member_memmap(path, member="data"):
@@ -682,6 +777,203 @@ def empad_probe(path, scan_shape=None):
             "warnings": w}
 
 
+# ═══════════════════════════════════════════════════════════════════════
+#  Folder-of-images → 4D datacube.  A directory of numbered image files
+#  (tif/png/jpg/…) whose names carry the 1-D scan order is stacked into a
+#  (Ny, Nx, H, W) cube.  Frames are greyscaled and optionally q-binned, then
+#  streamed to a .cube.npy so arbitrarily large folders never fill RAM.
+# ═══════════════════════════════════════════════════════════════════════
+_IMG_EXTS = (".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp", ".gif",
+             ".webp")
+
+
+def _natural_key(s):
+    """Sort key that orders 'plot_2' before 'plot_10' (numeric-aware)."""
+    import re
+    return [int(t) if t.isdigit() else t.lower()
+            for t in re.split(r"(\d+)", str(s))]
+
+
+def list_folder_images(folder):
+    """Image files in `folder`, sorted by the NUMBER in their name (so the
+    filename numbering = 1-D scan order)."""
+    names = [f for f in os.listdir(folder)
+             if f.lower().endswith(_IMG_EXTS)]
+    names.sort(key=_natural_key)
+    return [os.path.join(folder, f) for f in names]
+
+
+def folder_probe(folder):
+    """Inspect an image folder WITHOUT loading all frames. Returns
+    {files, nframes, H, W, mode, scan_shape(or None)}."""
+    from PIL import Image
+    files = list_folder_images(folder)
+    if not files:
+        raise ValueError(
+            f"{os.path.basename(folder)}: no image files "
+            f"({'/'.join(e[1:] for e in _IMG_EXTS[:5])}/…) found.")
+    with Image.open(files[0]) as im:
+        W, H = im.size
+        mode = im.mode
+    n = len(files)
+    r = int(round(n ** 0.5))
+    ss = (r, r) if (r > 1 and r * r == n) else None
+    return {"files": files, "nframes": n, "H": H, "W": W,
+            "mode": mode, "scan_shape": ss}
+
+
+def build_folder_cube(files, scan_shape, out_path, qbin=1, to_gray=True,
+                       invert=False, progress=None):
+    """Stack `files` (1-D scan order) into a (Ny, Nx, H, W) `.cube.npy`.
+
+    Each image is greyscaled (unless already single-channel) and, if
+    ``qbin`` > 1, block-mean down-sampled by that factor in the detector
+    plane (essential for large rendered images).  Streams one frame at a
+    time so RAM stays bounded regardless of folder size.  Returns out_path.
+    """
+    from PIL import Image
+    Ny, Nx = int(scan_shape[0]), int(scan_shape[1])
+    n = Ny * Nx
+    if len(files) != n:
+        raise ValueError(
+            f"{len(files)} images ≠ scan {Ny}×{Nx} = {n}.")
+    with Image.open(files[0]) as im0:
+        W0, H0 = im0.size
+    qbin = max(1, int(qbin))
+    H, W = H0 // qbin, W0 // qbin
+    if H < 1 or W < 1:
+        raise ValueError(f"qbin={qbin} too large for {H0}×{W0} frames.")
+    # float32 when we average (qbin) or invert a non-8-bit frame; else keep
+    # the compact uint8 of typical 8-bit renders.
+    dtype = np.float32 if qbin > 1 else np.uint8
+    out = np.lib.format.open_memmap(out_path, mode="w+", dtype=dtype,
+                                    shape=(Ny, Nx, H, W))
+    try:
+        for i, fp in enumerate(files):
+            with Image.open(fp) as im:
+                if to_gray and im.mode not in ("L", "I", "F"):
+                    im = im.convert("L")
+                a = np.asarray(im)
+            if a.ndim == 3:                     # stray RGB(A) → luminance
+                a = a[..., :3].mean(axis=2)
+            a = a.astype(np.float32)
+            if qbin > 1:
+                a = (a[:H * qbin, :W * qbin]
+                     .reshape(H, qbin, W, qbin).mean(axis=(1, 3)))
+            else:
+                a = a[:H, :W]
+            if invert:
+                a = float(a.max()) - a
+            y, x = divmod(i, Nx)
+            out[y, x] = a.astype(dtype)
+            if progress and (i % 64 == 0 or i == n - 1):
+                progress(i + 1, n, "loading images")
+    finally:
+        out.flush()
+        del out
+    return out_path
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Quantum Detectors MerlinEM (Medipix3) .mib  (+ .hdr sidecar)
+#  Per-frame ASCII header; big-endian pixels; scan grid usually NOT in the
+#  .hdr, so it is inferred (square) or supplied by the caller.
+# ═══════════════════════════════════════════════════════════════════════
+_MIB_DTYPES = {"U08": ">u1", "U8": ">u1", "U16": ">u2",
+               "U32": ">u4", "U64": ">u8"}
+
+
+def _read_mib_frame_header(path):
+    """Parse the leading per-frame ASCII header of a Merlin .mib.
+    Returns (header_len, H, W, pixel_fmt, assembly)."""
+    with open(path, "rb") as f:
+        head = f.read(384)
+    parts = head.split(b",")
+    if len(parts) < 8 or parts[0][:3] not in (b"MQ1", b"MB1"):
+        raise ValueError(
+            f"{os.path.basename(path)}: not a Merlin .mib "
+            f"(magic {parts[0][:4]!r}).")
+    hlen = int(parts[2])
+    H = int(parts[4]); W = int(parts[5])
+    fmt = parts[6].decode("ascii", "replace").strip().upper()
+    assembly = parts[7].decode("ascii", "replace").strip()
+    return hlen, H, W, fmt, assembly
+
+
+def _mib_scan_from_hdr(path, nframes):
+    """Resolve (Ny, Nx): ScanX/ScanY in the .hdr sidecar if present, else a
+    square grid inferred from the frame count, else None."""
+    hdrp = os.path.splitext(path)[0] + ".hdr"
+    sx = sy = None
+    if os.path.exists(hdrp):
+        try:
+            import re
+            txt = open(hdrp, encoding="utf-8", errors="ignore").read()
+            mx = re.search(r"ScanX[^\d]*(\d+)", txt, re.I)
+            my = re.search(r"ScanY[^\d]*(\d+)", txt, re.I)
+            if mx: sx = int(mx.group(1))
+            if my: sy = int(my.group(1))
+        except Exception:
+            pass
+    if sx and sy and sx * sy == nframes:
+        return (sy, sx)                         # (Ny, Nx)
+    r = int(round(nframes ** 0.5))
+    if r > 1 and r * r == nframes:
+        return (r, r)
+    return None
+
+
+def mib_probe(path, scan_shape=None):
+    """Inspect a Merlin .mib WITHOUT reading frame data. Returns
+    {shape4d, dtype, scan_shape, H, W, hlen, stride, nframes, fmt,
+     assembly, warnings}.  `scan_shape` is None if it can't be resolved."""
+    hlen, H, W, fmt, assembly = _read_mib_frame_header(path)
+    if fmt not in _MIB_DTYPES:
+        raise ValueError(
+            f"{os.path.basename(path)}: Merlin pixel format {fmt!r} "
+            f"(e.g. RAW / R64) is not supported yet — only U08/U16/U32.")
+    dt = np.dtype(_MIB_DTYPES[fmt])
+    stride = hlen + H * W * dt.itemsize
+    n = int(os.path.getsize(path) // stride)
+    ss = None
+    if scan_shape is not None and int(scan_shape[0]) * int(scan_shape[1]) == n:
+        ss = (int(scan_shape[0]), int(scan_shape[1]))
+    if ss is None:
+        ss = _mib_scan_from_hdr(path, n)
+    warnings = []
+    if ss is None:
+        warnings.append(
+            f"{n} frames but the scan grid is unknown (not in .hdr and not "
+            f"square) — supply scan_shape=(Ny, Nx).")
+    return {"shape4d": ((ss[0], ss[1], H, W) if ss else (n, H, W)),
+            "dtype": dt, "scan_shape": ss, "H": H, "W": W, "hlen": hlen,
+            "stride": stride, "nframes": n, "fmt": fmt,
+            "assembly": assembly, "warnings": warnings}
+
+
+def _open_mib(path, scan_shape=None):
+    """Lazy 4D Merlin cube: memmap the .mib and return a big-endian
+    (Ny, Nx, H, W) view with the per-frame headers stripped.  Zero-copy —
+    frames are read from disk on demand and cast by the caller."""
+    info = mib_probe(path, scan_shape=scan_shape)
+    n, H, W = info["nframes"], info["H"], info["W"]
+    dt, hlen, stride = info["dtype"], info["hlen"], info["stride"]
+    ss = info["scan_shape"]
+    if ss is None:
+        raise ValueError(
+            f"{os.path.basename(path)}: Merlin .mib has {n} frames but the "
+            f"scan grid (Ny, Nx) is unknown — pass scan_shape=(Ny, Nx).")
+    Ny, Nx = int(ss[0]), int(ss[1])
+    if Ny * Nx != n:
+        raise ValueError(
+            f"scan_shape ({Ny}, {Nx}) → {Ny*Nx} ≠ {n} frames in the file.")
+    datasize = H * W * dt.itemsize
+    mm = np.memmap(path, dtype="<u1", mode="r", shape=(n, stride))
+    # strip each frame's header, reinterpret pixels big-endian, reshape.
+    px = mm[:, hlen:hlen + datasize].view(dt).reshape(Ny, Nx, H, W)
+    return px
+
+
 def open_lazy_cube(path, scan_shape=None,
                      apply_dectris_corrections: bool = False):
     """Universal lazy 4D-cube loader.  Returns a numpy memmap
@@ -729,6 +1021,8 @@ def open_lazy_cube(path, scan_shape=None,
         return _open_dm4(path, scan_shape=scan_shape)
     if path.lower().endswith(".raw"):
         return _open_empad(path, scan_shape=scan_shape)
+    if path.lower().endswith(".mib"):
+        return _open_mib(path, scan_shape=scan_shape)
     if path.lower().endswith((".prz", ".npz")):
         base, _ = os.path.splitext(path)
         cand = base + ".cube.npy"

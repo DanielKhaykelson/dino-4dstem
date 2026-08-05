@@ -31,6 +31,7 @@ from matplotlib.colors import ListedColormap
 import matplotlib.pyplot as plt
 
 from data import SAMPLES, LoadPRZ
+from gui_app import display_prefs
 
 
 def open_interactive_clustermap(parent, *, sample, scan_shape, labels,
@@ -104,6 +105,26 @@ class _ClusterMapViewer:
                   "cluster-grain avg    |    shift+right-click → stack"),
             font=("Segoe UI", 10), text_color=("#444", "#bbb")
             ).pack(side="left", padx=14)
+        # Colour-scheme pickers (app-wide, live).
+        self._class_cmap_var = ctk.StringVar(
+            value=display_prefs.get_class_cmap_name())
+        ctk.CTkLabel(bar, text="colors:").pack(side="left", padx=(10, 2))
+        ctk.CTkOptionMenu(
+            bar, variable=self._class_cmap_var,
+            values=display_prefs.CLASS_CMAPS, width=150,
+            command=lambda v: display_prefs.set_class_cmap_name(v)
+            ).pack(side="left", padx=2)
+        self._diff_cmap_var = ctk.StringVar(
+            value=display_prefs.get_diff_cmap_name())
+        ctk.CTkLabel(bar, text="DP cmap:").pack(side="left", padx=(10, 2))
+        ctk.CTkOptionMenu(
+            bar, variable=self._diff_cmap_var,
+            values=display_prefs.DIFF_CMAPS, width=110,
+            command=lambda v: display_prefs.set_diff_cmap_name(v)
+            ).pack(side="left", padx=2)
+        # Re-draw the map live when the palette changes anywhere in the app.
+        display_prefs.subscribe(self._on_cmap_change)
+        win.protocol("WM_DELETE_WINDOW", self._on_close)
         body = ctk.CTkFrame(win)
         body.pack(side="top", fill="both", expand=True, padx=6, pady=4)
         self.fig = Figure(figsize=(8.6, 8.2), dpi=110, facecolor="white")
@@ -117,9 +138,7 @@ class _ClusterMapViewer:
         m = self.method_var.get()
         grid = self.labels[m]
         K = int(grid.max()) + 1
-        base = "tab20" if K > 10 else "tab10"
-        cmap = plt.get_cmap(base)
-        pal = ListedColormap([cmap(i % cmap.N) for i in range(max(K, 1))])
+        pal = display_prefs.class_palette(K)
         self.ax.clear()
         im = self.ax.imshow(grid, cmap=pal, vmin=-0.5, vmax=K - 0.5,
                              interpolation="nearest", aspect="equal")
@@ -128,6 +147,7 @@ class _ClusterMapViewer:
             f"left=pattern   right=cluster-grain   shift+right=stack",
             fontsize=11)
         self.ax.set_xticks([]); self.ax.set_yticks([])
+        self._last_im = im
         if not getattr(self, "_cb", None):
             self._cb = self.fig.colorbar(im, ax=self.ax, fraction=0.046,
                                           pad=0.04)
@@ -136,6 +156,29 @@ class _ClusterMapViewer:
             self._cb.update_normal(im)
         self.fig.tight_layout()
         self.canvas.draw_idle()
+
+    def _on_cmap_change(self):
+        """Colour scheme changed (here or elsewhere) → recolour the map and
+        sync the dropdowns."""
+        try:
+            if not self.win.winfo_exists():
+                display_prefs.unsubscribe(self._on_cmap_change)
+                return
+        except Exception:
+            return
+        try:
+            self._class_cmap_var.set(display_prefs.get_class_cmap_name())
+            self._diff_cmap_var.set(display_prefs.get_diff_cmap_name())
+        except Exception:
+            pass
+        self._draw()
+
+    def _on_close(self):
+        display_prefs.unsubscribe(self._on_cmap_change)
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -246,7 +289,8 @@ class _ClusterMapViewer:
             img = np.clip(raw2d / vm, 0.0, 1.0)
             if log_var.get():
                 img = np.log1p(img * 50)
-            ax.imshow(img, cmap="inferno", interpolation="nearest")
+            ax.imshow(img, cmap=display_prefs.get_diff_cmap_name(),
+                      interpolation="nearest")
             stag = "  log1p×50" if log_var.get() else ""
             ax.set_title(f"{title}  [vmax={vm:.3g}{stag}]", fontsize=10)
             ax.set_xticks([]); ax.set_yticks([])
@@ -334,8 +378,7 @@ class _ClusterMapViewer:
         Ny, Nx = self.scan_shape
         grid = self.labels[self.method_var.get()]
         K = int(grid.max()) + 1
-        cmap = plt.get_cmap("tab20" if K > 10 else "tab10")
-        pal = ListedColormap([cmap(i % cmap.N) for i in range(max(K, 1))])
+        pal = display_prefs.class_palette(K)
         try:
             vm = max(float(self._gs_vmax.get()), 1e-6)
         except Exception:
@@ -357,7 +400,8 @@ class _ClusterMapViewer:
             img = np.clip(rec["avg"] / vm, 0.0, 1.0)
             if log_on:
                 img = np.log1p(img * 50)
-            ax_p.imshow(img, cmap="inferno", interpolation="nearest")
+            ax_p.imshow(img, cmap=display_prefs.get_diff_cmap_name(),
+                        interpolation="nearest")
             stag = "  log1p×50" if log_on else ""
             ax_p.set_title(f"grain-avg diffraction [vmax={vm:.3g}{stag}]",
                            fontsize=9)

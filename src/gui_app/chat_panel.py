@@ -585,7 +585,53 @@ class ChatPanel(ctk.CTkFrame):
         self.entry.delete(0, "end")
         self.add_message("user", text)
         self.messages.append({"role": "user", "content": text})
+        # Deterministic "show me / point me / where is …" → highlight the
+        # control directly, WITHOUT relying on the LLM to choose to call
+        # show_me_how (small local models often skip the tool call).  Only
+        # short-circuits when a control actually matches; otherwise the
+        # normal LLM turn runs.
+        if self._maybe_show_me(text):
+            return
         self._start_turn()
+
+    def _maybe_show_me(self, text: str) -> bool:
+        import re
+        t = " " + text.strip().lower() + " "
+        triggers = ("show me", "point me", "highlight", "where is",
+                    "where's", "which button", "where do i click",
+                    "where can i", "point to", "take me to")
+        if not any(k in t for k in triggers):
+            return False
+        target = text.strip()
+        for pat in (
+            r"^(please\s+)?show me (how to |how do i |where (is|are|do) "
+            r"i\s+|the |me )?",
+            r"^(please\s+)?point me (to|at) (the )?",
+            r"^(please\s+)?take me to (the )?",
+            r"^where\s*(is|are|'s)?\s+(the )?",
+            r"^which button (do i |to )?(press|click|use)?\s*(to|for)?\s*",
+            r"^where (do i click|can i)\s*(to|for)?\s*",
+            r"^highlight (the )?",
+        ):
+            target = re.sub(pat, "", target, flags=re.I)
+        target = target.strip(" ?.!:")
+        if not target or len(target) > 90:
+            return False
+        from gui_app import chat_tools
+        try:
+            ok, info = chat_tools._highlight_target(self.app, target)
+        except Exception:
+            return False
+        if not ok:
+            return False              # no control matched → let the LLM try
+        label = str(info)
+        shown = label if len(label) <= 70 else target
+        reply = (f"Here you go — I highlighted **{shown}** in the GUI "
+                 f"(it's blinking red with a '👉 Click here' tip). "
+                 f"Ask me anything else about it.")
+        self.add_message("assistant", reply)
+        self.messages.append({"role": "assistant", "content": reply})
+        return True
 
     def _on_cancel(self):
         if not self._busy:
