@@ -1771,19 +1771,231 @@ _PARAM_GLOSSARY = {
     "crystallinity": "SYNTH: domain crystallinity class — crystalline (sharp spots), "
             "partial (weak spots + mild diffuse), or amorphous (diffuse rings), via "
             "frozen-phonon disorder. A separate ground-truth class axis.",
+    # --- Pre-processing tab (extra controls) ---
+    "log_stretch": "Pre-processing display/model log stretch: applies "
+            "log1p(I*50)/log1p(50) AFTER vmax, compressing dynamic range so weak "
+            "rings/Bragg peaks contribute more. Forwarded to all downstream tabs.",
+    "bin_factor": "Binning factor n -> writes a NEW .cube.npy. real-space = average "
+            "every n*n block of SCAN positions (fewer, higher-SNR patterns); q-space "
+            "= average every n*n block of DETECTOR pixels (coarser reciprocal "
+            "sampling). The original cube file is never modified.",
+    "ellipticity_ratio": "Elliptical-distortion correction: the a/b axis ratio used to "
+            "warp each pattern back to circular (fixes detector/lens ellipticity). "
+            "Auto-fit from the BF disk or an amorphous ring, or set manually.",
+    "ellipticity_theta": "Elliptical-distortion correction: the ellipse major-axis "
+            "angle (deg), paired with the a/b ratio.",
+    "hotpix_k": "Hot-/dead-pixel sensitivity (robust sigma). A pixel is flagged only if "
+            "it exceeds its local 3x3 median by > k sigma AND is far above/below it "
+            "(scale-relative), so the bright direct beam is never flagged. Lower k = "
+            "more aggressive.",
+    "search_radius": "NBED disk-finder: how far (raw px) to search for the direct-beam "
+            "disk when detecting/centering it.",
+    "bf_disk_radius": "NBED: expected bright-field (direct-beam) disk radius in raw px, "
+            "used to build the BF virtual detector and center the beam.",
+    "threshold_fraction": "NBED disk-finder: intensity threshold (fraction of max) for "
+            "deciding a pixel belongs to the direct-beam disk.",
+    "folder_qbin": "Load-folder: q-space down-sample factor applied to each image as "
+            "it's stacked into the cube (1 = full res). Big rendered frames (e.g. "
+            "1536px) should be binned (~6x -> 256px) to keep the cube tractable.",
+    # --- Viewing tab ---
+    "window_nm": "Viewing tab: the n(rows) x m(cols) real-space box you drag over the "
+            "virtual image; the right panel shows the MEAN diffraction pattern of the "
+            "probe positions inside it, live while you drag.",
+    "virtual_bf": "Bright-field virtual image: intensity summed INSIDE the central-beam "
+            "disk (r <= 0.06*H) at each scan position.",
+    "virtual_haadf": "High-angle annular dark-field virtual image: intensity summed in "
+            "an outer annulus (0.18-0.45 of the frame) at each scan position - "
+            "sensitive to scattered/crystalline intensity.",
+    "diffraction_exposure": "Viewing tab: a display gain on the virtual image or the "
+            "diffraction panel (multiplies the auto 99.5th-percentile level). Higher = "
+            "brighter. Per-panel; the diffraction panel also has a log toggle.",
+    "colormap": "Diffraction colormap (gray / viridis / inferno / ...). An app-wide "
+            "live setting shared with the diffraction popups; class maps have a "
+            "separate categorical palette (tab10/tab20/glasbey/...).",
+    "ring_r": "Viewing-tab azimuthal profile: the ring RADIUS r (px) at which to plot "
+            "intensity-vs-angle (reveals that ring's spottiness/texture).",
+    "ring_dr": "Viewing-tab azimuthal profile: the ring WIDTH dr (px) around r that is "
+            "averaged for the intensity-vs-angle plot.",
+    "recip_per_px": "Reciprocal calibration, inverse-Angstrom per detector pixel. Fill "
+            "it in to get peak-distance measurements in 1/A and d-spacing (A); "
+            "otherwise distances are reported in pixels.",
+    "icom": "iCOM / DPC: a whole-scan reconstruction - the center-of-mass shift of "
+            "every diffraction pattern is Fourier-integrated into a phase-like image "
+            "(like Dectris' Pantha Rhei).",
+    # --- Training tab (DINO) ---
+    "batch_size": "Per-step batch size. Lower it if the GPU runs out of memory.",
+    "lr": "AdamW learning rate. Paper recipe: 3e-4.",
+    "weight_decay": "AdamW weight decay. Paper recipe: 1e-6.",
+    "save_every": "Checkpoint cadence (epochs). The Eval tab refreshes its live class "
+            "map on every saved checkpoint. Minimum 5.",
+    "seed": "Random seed for reproducibility. Paper: 42.",
+    "t0": "Initial teacher softmax TEMPERATURE (paper 0.04). Lower = sharper teacher "
+            "targets early in training.",
+    "tfin": "Final teacher temperature after warmup (paper 0.07).",
+    "warmup_frac": "Fraction of total epochs spent ramping the teacher temperature from "
+            "T0 to Tfin (paper 0.2).",
+    "center_momentum": "EMA momentum on the DINO 'center' (anti-collapse). Paper 0.9; "
+            "higher (0.99) makes centering more sluggish. Left untuned in the recipe.",
+    "ema0": "Initial teacher EMA momentum (paper 0.990). Higher = teacher tracks the "
+            "student more slowly.",
+    "emafin": "Final teacher EMA momentum (paper 0.999).",
+    "n_layers": "How many ResNet18 stages to keep in the backbone: 1 = layer1 only "
+            "(paper recipe), up to 4 = full ResNet18 (overfits + slower - not "
+            "recommended).",
+    "variant": "DINO loss VARIANT - which extra loss terms are active (e.g. "
+            "polar+centroid, +spatial, +cluster1d, Contrastive1D). Defaults to the "
+            "validated paper recipe.",
+    "cluster1d_lambda_intra": "cluster1d INTRA weight: pulls each pattern's 1-D radial "
+            "profile toward its cluster's centroid (physics-baked). Paper 0.1.",
+    "cluster1d_lambda_inter": "cluster1d INTER weight: pushes cluster centroids apart "
+            "(margin-based). 0 lets weak prototypes die naturally to the data-driven "
+            "K. Paper 0.1.",
+    "cluster1d_margin": "Hinge margin for the inter-cluster centroid repulsion (only "
+            "used when cluster1d lambda inter > 0).",
+    "supcon_temperature": "InfoNCE temperature tau for the radial-gated SupCon loss.",
+    "spatial_tau_pos": "Spatial-loss PULL threshold: 4-neighbour pairs with 1-D radial "
+            "cosine ABOVE this are forced together. Sentinel -2 = auto-load from "
+            "gate_thresholds.json.",
+    "spatial_tau_neg": "Spatial-loss PUSH threshold: 4-neighbour pairs with 1-D radial "
+            "cosine BELOW this are forced apart. Pairs in the [tau_neg, tau_pos] dead "
+            "band do nothing. Sentinel -2 = auto.",
+    "lambda_pair": "Weight of the optional semi-supervised pair-assignment loss. 0 = "
+            "off. 0.05-0.2 nudges the unsupervised solution with pre-train labels "
+            "(<basename>.pair_labels.json).",
+    "pair_entropy_reg": "Entropy bonus on labelled pair members; counteracts the pair "
+            "loss's pull toward one-hot when labels are sparse (try 0.01).",
+    "pair_per_batch": "How many random labelled pairs to forward per batch (each adds 2 "
+            "forward passes). 32 is a good default.",
+    "cj_brightness": "Augmentation: random brightness jitter range (student view).",
+    "cj_contrast": "Augmentation: random contrast jitter range (student view).",
+    "blur_sigma_max": "Augmentation: maximum Gaussian-blur sigma sampled per step.",
+    "blur_kernel_max": "Augmentation: maximum (odd) Gaussian-blur kernel size.",
+    # --- Model : Eval ---
+    "checkpoint": "Eval: which training checkpoint (epoch) to run inference with. The "
+            "class map refreshes at each saved checkpoint.",
+    # --- Clustering : NMF ---
+    "n_clusters": "NMF clustering: number of clusters K the NMF weight maps are grouped "
+            "into - SEPARATE from n_components. Set manually or auto (silhouette).",
+    "methods": "NMF clustering methods run on the weight maps: kmeans, aglo "
+            "(agglomerative), hdbscan, fcm (fuzzy c-means), or 'all'. Only these four "
+            "exist.",
+    "auto_components": "NMF: auto-pick n_components from the reconstruction-error KNEE "
+            "instead of setting it by hand.",
+    "auto_clusters": "NMF: auto-pick K from the maximum SILHOUETTE score instead of "
+            "setting it by hand.",
+    # --- Diffraction (Blob / Strain / Crystallinity / ACOM) ---
+    "threshold": "Blob/peak detection: intensity threshold for accepting a Bragg "
+            "disk/peak - raise to reject noise, lower to catch weak reflections.",
+    "strain": "Strain mapping: fits Bragg-disk positions relative to a reference region "
+            "and reports the 2x2 strain tensor (exx, eyy, exy) + rotation across the "
+            "scan.",
+    "crystallinity_window": "Crystallinity map: the radial q-window (bins) over which "
+            "the crystallinity / azimuthal-spottiness metric is computed.",
+    "acom": "ACOM (orientation/phase mapping): template-matches each pattern against a "
+            "crystal (built-in ASE structure or a .cif) to recover orientation/phase; "
+            "needs the crystal + camera-length calibration.",
+}
+
+# Common short forms / synonyms -> canonical glossary key.  Checked BEFORE
+# any fuzzy matching so a single-letter name like "K" resolves exactly and
+# never substring-matches the 'k' inside e.g. 'mask'.
+_PARAM_ALIASES = {
+    "num_prototypes": "k", "n_prototypes": "k", "prototypes": "k",
+    "nprototypes": "k", "classes": "k", "n_classes": "k",
+    "num_classes": "k", "nclasses": "k",
+    "learning_rate": "lr", "learningrate": "lr", "adamw_lr": "lr",
+    "n_comp": "n_components", "ncomp": "n_components",
+    "components": "n_components", "num_components": "n_components",
+    "n_cluster": "n_clusters", "nclusters": "n_clusters",
+    "num_clusters": "n_clusters", "clusters": "n_clusters",
+    "crop": "center_crop_size", "center_crop": "center_crop_size",
+    "ccrop": "center_crop_size", "crop_size": "center_crop_size",
+    "fov": "center_crop_size", "field_of_view": "center_crop_size",
+    "beam_mask": "center_mask_radius", "mask_radius": "center_mask_radius",
+    "beam_mask_radius": "center_mask_radius", "mask": "center_mask_radius",
+    "central_mask": "center_mask_radius",
+    "polar_mask": "polar_mask_cols", "low_r_mask": "polar_mask_cols",
+    "com": "com_centering", "center_of_mass": "com_centering",
+    "com_center": "com_centering",
+    "sigma": "blur_sigma", "blur": "blur_sigma", "gaussian_blur": "blur_sigma",
+    "log": "log_stretch", "logstretch": "log_stretch",
+    "bin": "bin_factor", "binning": "bin_factor", "bin_n": "bin_factor",
+    "ellipticity": "ellipticity_ratio", "ab_ratio": "ellipticity_ratio",
+    "ellipse_ratio": "ellipticity_ratio", "ellipse": "ellipticity_ratio",
+    "ellipse_angle": "ellipticity_theta", "ellip_theta": "ellipticity_theta",
+    "hot_pixel": "hotpix_k", "hotpixel": "hotpix_k", "hot_pixels": "hotpix_k",
+    "dead_pixel": "hotpix_k", "dead_pixels": "hotpix_k", "k_sigma": "hotpix_k",
+    "sensitivity": "hotpix_k",
+    "temperature": "t0", "teacher_temp": "t0", "student_temp": "t0",
+    "temp": "t0", "tzero": "t0",
+    "ema": "ema0", "teacher_ema": "ema0", "momentum": "center_momentum",
+    "depth": "n_layers", "backbone_depth": "n_layers", "resnet_depth": "n_layers",
+    "gamma": "conf_weight_gamma", "conf_weight": "conf_weight_gamma",
+    "spatial": "lam_spatial", "spatial_lambda": "lam_spatial",
+    "potts": "lam_spatial",
+    "centroid": "centroid_lambda",
+    "cluster1d": "cluster1d_lambda_intra",
+    "cluster1d_lambda": "cluster1d_lambda_intra",
+    "cluster1d_intra": "cluster1d_lambda_intra",
+    "cluster1d_inter": "cluster1d_lambda_inter",
+    "supcon": "supcon_lambda", "supcon_temp": "supcon_temperature",
+    "supcon_tau": "supcon_temperature",
+    "theta_shift": "theta_shift_student", "theta_roll": "theta_shift_student",
+    "rotation_aug": "theta_shift_student",
+    "pair": "lambda_pair", "pair_lambda": "lambda_pair",
+    "brightness": "cj_brightness", "contrast": "cj_contrast",
+    "window": "window_nm", "roi": "window_nm", "running_window": "window_nm",
+    "bf": "virtual_bf", "bright_field": "virtual_bf", "brightfield": "virtual_bf",
+    "haadf": "virtual_haadf", "dark_field": "virtual_haadf", "adf": "virtual_haadf",
+    "exposure": "diffraction_exposure", "gain": "diffraction_exposure",
+    "cmap": "colormap", "color_scheme": "colormap", "colour_scheme": "colormap",
+    "palette": "colormap",
+    "ring": "ring_r", "ring_radius": "ring_r", "ring_width": "ring_dr",
+    "calibration": "recip_per_px", "calib": "recip_per_px",
+    "angstrom_per_px": "recip_per_px", "q_per_px": "recip_per_px",
+    "pixel_size": "recip_per_px", "reciprocal_calibration": "recip_per_px",
+    "dpc": "icom", "icom_dpc": "icom", "integrated_com": "icom",
+    "epoch_checkpoint": "checkpoint", "ckpt": "checkpoint",
+    "method": "methods", "clustering_method": "methods",
+    "clustering_methods": "methods",
+    "auto_n_components": "auto_components", "auto_ncomp": "auto_components",
+    "knee": "auto_components",
+    "auto_k": "auto_clusters", "silhouette": "auto_clusters",
+    "peak_threshold": "threshold", "blob_threshold": "threshold",
+    "detection_threshold": "threshold",
+    "strain_map": "strain", "strain_tensor": "strain",
+    "cif": "acom", "orientation": "acom", "index_pattern": "acom",
+    "zone_axis": "acom", "acom_mapping": "acom",
+    "bf_disk": "bf_disk_radius", "threshold_frac": "threshold_fraction",
+    "qbin": "folder_qbin", "q_bin": "folder_qbin",
+    "crystallinity_map": "crystallinity_window",
 }
 
 def _explain_parameter(ctx, args) -> str:
-    q = str(args.get("name", "")).strip().lower().replace(" ", "_")
-    if not q:
-        return ("Name a parameter, e.g. center_mask_radius, K, lam_spatial, "
-                "n_components.")
+    raw = str(args.get("name", "")).strip()
+    if not raw:
+        return ("Name a parameter or control, e.g. K, lr, center_mask_radius, "
+                "n_components, HAADF, colormap, hot pixel, iCOM.")
+    q = raw.lower().replace(" ", "_").replace("-", "_").strip("_")
+    # 1) exact key, or a known alias/short-form → canonical key.
+    q = _PARAM_ALIASES.get(q, q)
+    if q in _PARAM_GLOSSARY:
+        return f"{q}: {_PARAM_GLOSSARY[q]}"
+    # 2) whole-TOKEN match only (never a letter-substring): the query is a
+    #    full underscore-token of a key, e.g. 'epochs' or 'components'.  This
+    #    is what fixes 'K' wrongly matching the 'k' inside 'mas[k]'.
     for k, v in _PARAM_GLOSSARY.items():
-        if q == k or q in k or k in q:
+        if q in k.split("_"):
             return f"{k}: {v}"
-    return (f"I don't have a vetted glossary entry for '{q}', and I won't guess. "
-            "Try answer_from_docs (METHOD_GUIDE / the manual), or ask about the "
-            "control by its exact GUI label.")
+    # 3) multi-word query whose tokens are all contained in one key.
+    qtoks = [t for t in q.split("_") if t]
+    if len(qtoks) >= 2:
+        for k, v in _PARAM_GLOSSARY.items():
+            if set(qtoks) <= set(k.split("_")):
+                return f"{k}: {v}"
+    return (f"I don't have a vetted glossary entry for '{raw}', and I won't "
+            "guess. Try answer_from_docs (METHOD_GUIDE / the manual), or ask "
+            "about the control by its exact GUI label.")
 
 
 def _assess_run(ctx, args) -> str:
