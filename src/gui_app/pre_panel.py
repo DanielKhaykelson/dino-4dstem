@@ -926,30 +926,80 @@ class PrePanel(ctk.CTkFrame):
                 f"Writes:\n  {out}"):
             return
         self._folder_busy = True
+        self._folder_cancel = False
         self._folder_status.configure(text="folder: starting…")
+        self._folder_progress_popup(scan[0] * scan[1])
         threading.Thread(
             target=self._folder_worker,
             args=(info["files"], scan, out, int(qbin), bool(invert)),
             daemon=True).start()
+
+    def _folder_progress_popup(self, total):
+        """A visible, cancellable progress window for the folder build (the
+        toolbar status alone is easy to miss on a long decode)."""
+        win = ctk.CTkToplevel(self)
+        win.title("Building datacube from images…")
+        win.geometry("440x140")
+        try:
+            win.after(150, lambda: (win.winfo_exists()
+                                    and (win.lift(), win.focus_force())))
+        except Exception:
+            pass
+        ctk.CTkLabel(win, text=f"Decoding {total} images → datacube",
+                     font=("Segoe UI", 12, "bold")).pack(pady=(16, 6))
+        self._folder_prog_lbl = ctk.CTkLabel(win, text="starting…")
+        self._folder_prog_lbl.pack(pady=2)
+        self._folder_prog_bar = ctk.CTkProgressBar(win, width=380)
+        self._folder_prog_bar.set(0.0)
+        self._folder_prog_bar.pack(pady=6)
+
+        def _cancel():
+            self._folder_cancel = True
+            try: self._folder_prog_lbl.configure(text="cancelling…")
+            except Exception: pass
+        ctk.CTkButton(win, text="Cancel", width=90,
+                      command=_cancel).pack(pady=(4, 8))
+        win.protocol("WM_DELETE_WINDOW", _cancel)
+        self._folder_prog_win = win
+
+    def _folder_close_popup(self):
+        win = getattr(self, "_folder_prog_win", None)
+        if win is not None:
+            try: win.destroy()
+            except Exception: pass
+        self._folder_prog_win = None
 
     def _folder_worker(self, files, scan, out, qbin, invert):
         try:
             from data import build_folder_cube
 
             def prog(i, ntot, _m):
-                self.after(0, lambda i=i, ntot=ntot:
+                frac = i / max(ntot, 1)
+                def _upd(i=i, ntot=ntot, frac=frac):
                     self._folder_status.configure(
-                        text=f"folder: {i}/{ntot} "
-                             f"({100*i/max(ntot,1):.0f}%)"))
+                        text=f"folder: {i}/{ntot} ({100*frac:.0f}%)")
+                    try:
+                        self._folder_prog_bar.set(frac)
+                        self._folder_prog_lbl.configure(
+                            text=f"{i} / {ntot} images  ({100*frac:.0f}%)")
+                    except Exception:
+                        pass
+                self.after(0, _upd)
             build_folder_cube(files, scan, out, qbin=qbin, to_gray=True,
-                              invert=invert, progress=prog)
-            self.after(0, lambda: self._folder_finish(out, scan))
+                              invert=invert, progress=prog,
+                              cancel=lambda: self._folder_cancel)
+            self.after(0, lambda: (self._folder_close_popup(),
+                                   self._folder_finish(out, scan)))
         except Exception as e:
             err = repr(e)
-            self.after(0, lambda: messagebox.showerror(
-                "Folder load failed", err))
+            cancelled = "cancelled" in err.lower()
+            self.after(0, self._folder_close_popup)
+            if not cancelled:
+                self.after(0, lambda: messagebox.showerror(
+                    "Folder load failed", err))
             self.after(0, lambda: self._folder_status.configure(
-                text=f"folder failed: {err}"))
+                text="folder: cancelled" if cancelled
+                     else f"folder failed: {err}"))
         finally:
             self._folder_busy = False
 

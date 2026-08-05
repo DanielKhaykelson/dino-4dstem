@@ -99,6 +99,29 @@ def _clean_markup(s: str) -> str:
     return s
 
 
+# Scripts a multilingual local model (Qwen etc.) drifts into instead of
+# English — used to detect + auto-correct language drift.
+_DRIFT_RANGES = (
+    (0x0E00, 0x0E7F), (0x0E80, 0x0EFF),          # Thai, Lao
+    (0x4E00, 0x9FFF), (0x3400, 0x4DBF),          # CJK
+    (0x3040, 0x30FF),                            # Hiragana/Katakana
+    (0xAC00, 0xD7A3),                            # Hangul
+    (0x0400, 0x04FF),                            # Cyrillic
+    (0x0600, 0x06FF), (0x0590, 0x05FF),          # Arabic, Hebrew
+)
+
+
+def _drift_fraction(text: str) -> float:
+    """Fraction of alphabetic characters that are in a non-Latin 'drift'
+    script.  ~0 for English (Greek math symbols like θ/α are NOT counted)."""
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return 0.0
+    d = sum(1 for c in letters
+            if any(a <= ord(c) <= b for a, b in _DRIFT_RANGES))
+    return d / len(letters)
+
+
 class ChatPanel(ctk.CTkFrame):
     """Natural-language assistant tab.
 
@@ -664,11 +687,27 @@ class ChatPanel(ctk.CTkFrame):
             return GeminiBackend(model=model, api_key=gemini_get_key())
         return OllamaBackend(model=cfg["model"], device=cfg["device"])
 
+    def _active_panel_name(self):
+        """The tab/sub-tab the user currently has open in the main GUI, so
+        'the parameters I see' / 'this panel' can be resolved."""
+        app = self.app
+        try:
+            cur = app._tabs.get()
+            for _ in range(4):
+                tv = app._group_tabs.get(cur)
+                if tv is None:
+                    return cur
+                cur = tv.get()
+            return cur
+        except Exception:
+            return None
+
     def _system_prompt(self) -> str:
         s = getattr(self.app, "session", None)
         sample = getattr(s, "sample", None) or "(none)"
         run = getattr(s, "run_dir", None) or "(none)"
         has_inf = bool(getattr(s, "has_inference", lambda: False)())
+        open_panel = self._active_panel_name() or "(unknown)"
         base = (
             "You are the in-app assistant for DINO-4DSTEM: it trains a "
             "self-supervised DINO classifier on 4D-STEM electron "
@@ -805,7 +844,15 @@ class ChatPanel(ctk.CTkFrame):
             "first run, ask whether to set n_components/n_clusters or choose "
             "automatically (auto_components=knee, auto_clusters=silhouette).\n\n"
             f"CURRENT STATE: loaded_data={sample}, run={run}, "
-            f"inference_cached={has_inf}.")
+            f"inference_cached={has_inf}, open_panel={open_panel}.\n"
+            f"CONTEXT: the user is looking at the '{open_panel}' tab right "
+            f"now. When they say 'this panel', 'this tab', 'the parameters I "
+            f"see', 'these settings', 'here', or 'what I have open', they "
+            f"mean the controls on THAT tab — answer about those "
+            f"specifically (e.g. on a clustering tab that's "
+            f"n_components / n_clusters / the clustering methods; on Training "
+            f"it's K / epochs / lr / the pre-processing params). If it's "
+            f"genuinely unclear which control they mean, ask — don't guess.")
         # In-context learning: inject what the user has taught us.
         try:
             import gui_app.chat_kb as _kb
@@ -864,9 +911,21 @@ class ChatPanel(ctk.CTkFrame):
                     convo, tools=schemas,
                     on_token=self._stream_token,
                     cancel=lambda: self._cancel)
-                self._end_assistant()       # close any streamed bubble
                 text = result.get("text", "")
                 calls = result.get("tool_calls") or []
+                # LANGUAGE GUARD: a plain-text answer (no tool call) that
+                # drifted out of English → silently regenerate once in
+                # English and replace the streamed bubble.  Doesn't rely on
+                # the model obeying the "reply in English" prompt.
+                if (not calls and text.strip()
+                        and _drift_fraction(text) > 0.15
+                        and self._user_wrote_latin()):
+                    fixed = self._regen_english(backend, convo, schemas)
+                    if fixed:
+                        self._after(self._replace_stream_text, fixed)
+                        text = fixed
+                        result["text"] = fixed
+                self._end_assistant()       # close any streamed bubble
 
                 # Fallback: the model may have emitted a tool call as JSON
                 # text instead of a real function call — recover it.
@@ -1210,6 +1269,55 @@ class ChatPanel(ctk.CTkFrame):
             self._assistant_open = False
             self._assistant_buf = ""
             self._assistant_start = None
+
+    # ------------------------------------------------------------------
+    # Language guard — keep the assistant in English even when a local
+    # multilingual model (Qwen etc.) drifts into Thai/Chinese/…
+    # ------------------------------------------------------------------
+    def _user_wrote_latin(self) -> bool:
+        for m in reversed(self.messages):
+            if m.get("role") == "user":
+                return _drift_fraction(str(m.get("content", ""))) < 0.30
+        return True
+
+    def _regen_english(self, backend, convo, schemas):
+        """Ask the model to rewrite its last answer in English (once). Returns
+        the English text, or a safe fallback note if it still drifts."""
+        try:
+            convo2 = list(convo) + [{
+                "role": "system",
+                "content": ("Your previous reply was NOT in English. Rewrite "
+                            "the same answer in clear, plain English. Output "
+                            "English ONLY — no other language.")}]
+            r2 = backend.chat(convo2, tools=schemas, on_token=None,
+                              cancel=lambda: self._cancel)
+            t2 = (r2.get("text") or "").strip()
+            if t2 and _drift_fraction(t2) <= 0.15:
+                return t2
+        except Exception:
+            pass
+        return ("(The local model replied in a non-English language. Try "
+                "again, pick a larger Ollama model, or switch the Assistant "
+                "backend to Gemini for reliable English.)")
+
+    def _replace_stream_text(self, new_text):
+        """Replace the currently-open streamed assistant bubble's text (Tk
+        thread).  Used by the language guard to swap drifted text for the
+        English retry before the bubble is closed."""
+        start = getattr(self, "_assistant_start", None)
+        if not self._assistant_open or start is None:
+            self.add_message("assistant", new_text)
+            return
+        cleaned = _clean_markup(new_text)
+        try:
+            tb = self.transcript._textbox
+            self.transcript.configure(state="normal")
+            tb.delete(start, "end-1c")
+            tb.insert(start, cleaned, "assistant")
+            self.transcript.configure(state="disabled")
+            self._assistant_buf = cleaned
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Busy / cancel UI state
