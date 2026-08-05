@@ -107,6 +107,9 @@ class PrePanel(ctk.CTkFrame):
         self._blur_busy = False
         self._bin_busy = False
         self._ellip_busy = False
+        self._hotpix_busy = False
+        self._hotpix_mask = None        # last detected bad-pixel mask (H, W)
+        self._folder_busy = False       # image-folder → cube build in progress
         self._nbed_overlay_center: "tuple[float, float] | None" = None
         # Last-fit ellipse for the raw-pane overlay.  None if no fit
         # has been run yet for the current frame.  (cx, cy, axis_minor,
@@ -139,6 +142,8 @@ class PrePanel(ctk.CTkFrame):
         self.log_stretch = ctk.BooleanVar(value=False)   # display only
         self.use_blur    = ctk.BooleanVar(value=False)   # display only
         self.blur_sigma  = ctk.DoubleVar(value=1.0)      # px in display frame
+        self.hotpix_k    = ctk.DoubleVar(value=8.0)      # sensitivity (sigmas)
+        self.hotpix_dead = ctk.BooleanVar(value=True)    # also remove dead px
         # Ellipticity correction state.  ``ellip_mode`` selects the
         # auto-fit strategy: "BF disk edge" works for any 4D-STEM
         # dataset (the bright-field disk has an elliptical boundary
@@ -239,6 +244,11 @@ class PrePanel(ctk.CTkFrame):
         ctk.CTkButton(tb, text="Browse multi…", width=130,
                        command=self._browse_multi).pack(side="left",
                                                             padx=2)
+        ctk.CTkButton(tb, text="Load folder…", width=110,
+                       command=self._load_folder).pack(side="left", padx=2)
+        self._folder_status = ctk.CTkLabel(
+            tb, text="", font=("Consolas", 9), text_color=("#444", "#aaa"))
+        self._folder_status.pack(side="left", padx=8)
 
         # main split: figure (left) + controls (right)
         body = ctk.CTkFrame(self)
@@ -391,6 +401,50 @@ class PrePanel(ctk.CTkFrame):
             font=("Consolas", 9), justify="left",
             text_color=("#444", "#aaa"))
         self._blur_status.pack(anchor="w", padx=10, pady=(0, 4))
+
+        # ---- Hot-/dead-pixel removal --------------------------------
+        hp_box = ctk.CTkFrame(ctrl, border_width=1)
+        hp_box.pack(fill="x", padx=6, pady=(8, 4))
+        hp_t = ctk.CTkFrame(hp_box, fg_color="transparent")
+        hp_t.pack(fill="x", padx=4, pady=(4, 0))
+        ctk.CTkLabel(hp_t, text="Hot-/dead-pixel removal",
+                      font=("Segoe UI", 11, "bold")).pack(side="left")
+        add_help_button(hp_t,
+            "Finds detector-fixed hot pixels (isolated spikes) and dead "
+            "pixels (stuck-low) from the scan-mean pattern, then replaces "
+            "each with the median of its good neighbours in EVERY frame.\n\n"
+            "Detection is spatially adaptive and scale-relative, so the "
+            "bright direct beam is never flagged — only pixels that are "
+            "> k robust-σ AND far above/below their local 3×3 median.\n\n"
+            "'Detect + preview' samples the scan and shows the flagged "
+            "pixels; 'Apply to entire cube' writes a new corrected "
+            ".cube.npy (like the blur/binning bakes) and switches to it. "
+            "The original file is untouched.").pack(side="left", padx=(6, 0))
+        hp_row = ctk.CTkFrame(hp_box, fg_color="transparent")
+        hp_row.pack(fill="x", padx=8, pady=(4, 2))
+        ctk.CTkLabel(hp_row, text="sensitivity k (σ):").pack(side="left",
+                                                             padx=(2, 4))
+        ctk.CTkSlider(hp_row, from_=3.0, to=20.0, variable=self.hotpix_k,
+                      width=150).pack(side="left")
+        self._hotpix_k_lbl = ctk.CTkLabel(hp_row, text="8.0", width=34)
+        self._hotpix_k_lbl.pack(side="left", padx=(4, 8))
+        self.hotpix_k.trace_add(
+            "write",
+            lambda *_: self._hotpix_k_lbl.configure(
+                text=f"{float(self.hotpix_k.get()):.1f}"))
+        ctk.CTkCheckBox(hp_row, text="also dead pixels",
+                        variable=self.hotpix_dead).pack(side="left", padx=8)
+        hp_row2 = ctk.CTkFrame(hp_box, fg_color="transparent")
+        hp_row2.pack(fill="x", padx=8, pady=(0, 4))
+        ctk.CTkButton(hp_row2, text="Detect + preview", width=140,
+                      command=self._hotpix_detect_preview).pack(side="left")
+        ctk.CTkButton(hp_row2,
+            text="Apply to entire cube…  (write new .cube.npy)", width=320,
+            command=self._hotpix_apply_all).pack(side="left", padx=8)
+        self._hotpix_status = ctk.CTkLabel(ctrl, text="",
+            font=("Consolas", 9), justify="left",
+            text_color=("#444", "#aaa"))
+        self._hotpix_status.pack(anchor="w", padx=10, pady=(0, 4))
 
         # Push current crop / beam-mask / polar-mask / COM into the Training tab.
         load_row = ctk.CTkFrame(ctrl, fg_color="transparent")
@@ -745,12 +799,14 @@ class PrePanel(ctk.CTkFrame):
     def _browse(self):
         p = filedialog.askopenfilename(
             filetypes=[("Cube files",
-                          "*.prz *.npz *.npy *.h5 *.hdf5 *.dm4 *.dm3 *.raw"),
+                          "*.prz *.npz *.npy *.h5 *.hdf5 *.dm4 *.dm3 "
+                          "*.raw *.mib"),
                         ("PRZ/NPZ", "*.prz *.npz"),
                         ("Numpy", "*.npy"),
                         ("HDF5", "*.h5 *.hdf5"),
                         ("Gatan DM", "*.dm4 *.dm3"),
                         ("EMPAD raw", "*.raw"),
+                        ("Merlin/Medipix", "*.mib"),
                         ("All", "*.*")])
         if p:
             self._path_var.set(p); self._load()
@@ -797,6 +853,129 @@ class PrePanel(ctk.CTkFrame):
             f"Training (DINO) will use ALL {len(paths)} cubes via "
             f"LoadPRZMulti — the Training tab is already set to «{key}».\n\n"
             f"(This preview pane shows only the first cube.)")
+
+    # ------------------------------------------------------------------
+    # Load a FOLDER of numbered images (tif/png/…) → a 4D datacube.
+    # The number in each filename is the 1-D scan order; the grid is
+    # inferred square or asked (like a 3D HDF5 master).  Frames are
+    # greyscaled + optionally q-binned and streamed to a .cube.npy.
+    # ------------------------------------------------------------------
+    def _load_folder(self):
+        if self._folder_busy:
+            messagebox.showinfo("Image folder",
+                "A folder load is already in progress."); return
+        from tkinter import filedialog, simpledialog
+        d = filedialog.askdirectory(
+            title="Select a folder of numbered images (filename = scan order)")
+        if not d:
+            return
+        try:
+            from data import folder_probe
+            info = folder_probe(d)
+        except Exception as e:
+            messagebox.showerror("Image folder",
+                f"Could not read images from {os.path.basename(d)}:\n{e}")
+            return
+        n = info["nframes"]; H = info["H"]; W = info["W"]
+        ss = info["scan_shape"]
+        msg = (f"Found {n} images in {os.path.basename(d)}\n"
+               f"   frame = {H} × {W}   ({info['mode']})\n")
+        scan = None
+        if ss is not None:
+            if messagebox.askyesno(
+                    "Confirm folder load",
+                    msg + f"   inferred scan grid = {ss[0]} × {ss[1]} "
+                    f"(Ny × Nx)\n\nUse this grid?\n"
+                    f"  Yes → use it.   No → enter it manually."):
+                scan = (int(ss[0]), int(ss[1]))
+        else:
+            messagebox.showinfo("Folder load",
+                msg + f"\n{n} is not a perfect square — enter the scan "
+                f"grid on the next dialog.")
+        if scan is None:
+            from gui_app._dialogs import ask_scan_shape
+            scan = ask_scan_shape(self, n, H, W)
+            if scan is None:
+                return
+            scan = (int(scan[0]), int(scan[1]))
+        # q-space down-sample (essential for large rendered frames).
+        sugg = max(1, int(round(max(H, W) / 256.0)))
+        qbin = simpledialog.askinteger(
+            "Down-sample frames",
+            f"Frames are {H} × {W}.\n\nq-space bin factor "
+            f"(1 = full resolution; {sugg} → ≈{max(H, W)//sugg}px):\n\n"
+            f"Large frames × many positions can be huge — binning is "
+            f"recommended.",
+            parent=self, initialvalue=sugg, minvalue=1, maxvalue=min(H, W))
+        if qbin is None:
+            return
+        invert = messagebox.askyesno(
+            "Invert intensity?",
+            "Invert intensity?\n\nUse this if the pattern is dark-on-white "
+            "(e.g. a rendered plot with a white background) and you want "
+            "high counts to be bright.\n\n  Yes → invert   No → keep as-is")
+        Hh, Ww = H // int(qbin), W // int(qbin)
+        est = scan[0] * scan[1] * Hh * Ww * (4 if int(qbin) > 1 else 1)
+        out = os.path.normpath(d) + ".cube.npy"
+        if not messagebox.askyesno(
+                "Build datacube",
+                f"Build a {scan[0]} × {scan[1]} × {Hh} × {Ww} cube "
+                f"(~{est/1e9:.2f} GB) from {n} images?\n\n"
+                f"Greyscale{', inverted' if invert else ''}"
+                f"{f', q-binned {qbin}×' if int(qbin) > 1 else ''}.\n\n"
+                f"Writes:\n  {out}"):
+            return
+        self._folder_busy = True
+        self._folder_status.configure(text="folder: starting…")
+        threading.Thread(
+            target=self._folder_worker,
+            args=(info["files"], scan, out, int(qbin), bool(invert)),
+            daemon=True).start()
+
+    def _folder_worker(self, files, scan, out, qbin, invert):
+        try:
+            from data import build_folder_cube
+
+            def prog(i, ntot, _m):
+                self.after(0, lambda i=i, ntot=ntot:
+                    self._folder_status.configure(
+                        text=f"folder: {i}/{ntot} "
+                             f"({100*i/max(ntot,1):.0f}%)"))
+            build_folder_cube(files, scan, out, qbin=qbin, to_gray=True,
+                              invert=invert, progress=prog)
+            self.after(0, lambda: self._folder_finish(out, scan))
+        except Exception as e:
+            err = repr(e)
+            self.after(0, lambda: messagebox.showerror(
+                "Folder load failed", err))
+            self.after(0, lambda: self._folder_status.configure(
+                text=f"folder failed: {err}"))
+        finally:
+            self._folder_busy = False
+
+    def _folder_finish(self, out_path, scan):
+        try:
+            self.cube = np.load(out_path, mmap_mode="r", allow_pickle=True)
+            Ny, Nx, _H, _W = self.cube.shape
+            self.path = out_path
+            self._path_var.set(out_path)
+            self.sample_key = register_runtime_sample(
+                out_path, scan_shape=(Ny, Nx),
+                vmax=float(self.vmax.get()),
+                center_mask_radius=self._effective_center_mask_radius())
+        except Exception as e:
+            messagebox.showerror("reload failed",
+                f"Cube built at:\n{out_path}\n\nbut reload failed: {e}")
+            return
+        self._refresh()
+        self._folder_status.configure(
+            text=f"folder loaded: {Ny}×{Nx}  → {self.sample_key}")
+        try:
+            if self.on_state_change is not None:
+                self.on_state_change("loaded", sample_key=self.sample_key,
+                                     path=out_path)
+        except Exception:
+            pass
 
     def _load(self):
         p = self._path_var.get().strip()
@@ -864,6 +1043,41 @@ class PrePanel(ctk.CTkFrame):
         # and pop a scan-shape dialog. For 4D HDF5 / .prz / .npy, no
         # prompt is needed.
         scan_shape_override = None
+        # Merlin/Medipix .mib: peek the per-frame header for the detector
+        # geometry.  The scan grid is usually NOT stored, so confirm the
+        # detected/inferred (Ny, Nx) or prompt for it.
+        if p.lower().endswith(".mib"):
+            try:
+                from data import mib_probe
+                info = mib_probe(p)
+            except Exception as e:
+                messagebox.showerror(
+                    "Merlin .mib",
+                    f"Could not read {os.path.basename(p)} as a Quantum "
+                    f"Detectors Merlin/Medipix .mib:\n{e}")
+                return
+            H_, W_, nfr = info["H"], info["W"], info["nframes"]
+            ss = info["scan_shape"]
+            if ss is not None:
+                msg = (f"Detected a Merlin/Medipix cube in "
+                       f"{os.path.basename(p)}:\n\n"
+                       f"   frames    = {nfr}\n"
+                       f"   detector  = {H_} × {W_}   "
+                       f"({info['fmt']}, assembly {info['assembly']})\n"
+                       f"   scan grid = {ss[0]} × {ss[1]}  (Ny × Nx)\n\n"
+                       f"Load with this scan grid?\n"
+                       f"  Yes → use it.\n"
+                       f"  No  → enter the grid manually.")
+                if messagebox.askyesno("Confirm Merlin load", msg):
+                    scan_shape_override = (int(ss[0]), int(ss[1]))
+                else:
+                    ss = None
+            if ss is None:
+                from gui_app._dialogs import ask_scan_shape
+                ss = ask_scan_shape(self, nfr, H_, W_)
+                if ss is None:
+                    return
+                scan_shape_override = (int(ss[0]), int(ss[1]))
         if p.lower().endswith((".h5", ".hdf5")):
             try:
                 import h5py
@@ -927,6 +1141,19 @@ class PrePanel(ctk.CTkFrame):
                         shape4d = (oy, ox, H_, W_)
             except Exception as e:
                 messagebox.showerror("Error", f"HDF5 peek failed:\n{e}")
+                return
+        elif p.lower().endswith(".mib"):
+            # Scan grid came from the confirm/prompt above; combine it with
+            # the detector geometry from the header.
+            try:
+                from data import mib_probe
+                info = mib_probe(p, scan_shape=scan_shape_override)
+                oy, ox = scan_shape_override
+                shape4d = (oy, ox, info["H"], info["W"])
+                peek_dtype = info["dtype"]; lazy = True
+            except Exception as e:
+                messagebox.showerror("Error",
+                    f"Merlin .mib peek failed:\n{e}")
                 return
         else:
             try:
@@ -1750,6 +1977,196 @@ class PrePanel(ctk.CTkFrame):
                 self.on_state_change(
                     "loaded", sample_key=self.sample_key,
                     path=final_path)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Hot-/dead-pixel removal.  Detect detector-fixed bad pixels from the
+    # scan-mean pattern, replace with the neighbour median in every frame,
+    # and bake a new .cube.npy (like blur/binning); original untouched.
+    # ------------------------------------------------------------------
+    def _hotpix_sample_ref(self, max_frames=256):
+        """Scan-mean reference pattern from an evenly-spaced frame sample."""
+        Ny, Nx, H, W = self.cube.shape
+        N = Ny * Nx
+        step = max(1, N // int(max_frames))
+        acc = np.zeros((H, W), dtype=np.float64)
+        cnt = 0
+        for flat in range(0, N, step):
+            y, x = divmod(flat, Nx)
+            acc += np.asarray(self.cube[y, x], dtype=np.float64)
+            cnt += 1
+        return acc / max(cnt, 1)
+
+    def _hotpix_detect_preview(self):
+        if self.cube is None:
+            messagebox.showinfo("cube", "Load a cube first."); return
+        if self._hotpix_busy:
+            messagebox.showinfo("hot-pixel", "Already working."); return
+        self._hotpix_busy = True
+        self._hotpix_status.configure(
+            text="hot-pixel: sampling scan for reference…")
+        k = float(self.hotpix_k.get()); dead = bool(self.hotpix_dead.get())
+
+        def work():
+            try:
+                from data import detect_hot_pixels
+                ref = self._hotpix_sample_ref()
+                mask = detect_hot_pixels(ref, k=k, include_dead=dead)
+                self._hotpix_mask = mask
+                self.after(0, lambda: self._hotpix_show_preview(ref, mask, k))
+            except Exception as e:
+                err = repr(e)
+                self.after(0, lambda: self._hotpix_status.configure(
+                    text=f"hot-pixel detect failed: {err}"))
+            finally:
+                self._hotpix_busy = False
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _hotpix_show_preview(self, ref, mask, k):
+        n = int(mask.sum()); H, W = mask.shape
+        self._hotpix_status.configure(
+            text=f"hot-pixel: {n} flagged (k={k:g}) of {H*W} px.  "
+                 f"Click 'Apply…' to bake a corrected cube.")
+        win = ctk.CTkToplevel(self)
+        win.title(f"Hot-/dead-pixel preview — {n} flagged")
+        try:
+            win.after(200, lambda: (win.lift(), win.focus_force()))
+        except Exception:
+            pass
+        fig = Figure(figsize=(6, 6), dpi=100)
+        ax = fig.add_subplot(111)
+        ax.imshow(np.log1p(np.clip(ref, 0, None)), cmap="gray",
+                  interpolation="nearest")
+        ys, xs = np.where(mask)
+        ax.scatter(xs, ys, s=14, facecolors="none", edgecolors="r",
+                   linewidths=0.8)
+        ax.set_title(f"{n} flagged pixels (red)   —   k = {k:g}, "
+                     f"scan-mean (log)", fontsize=11)
+        ax.set_xticks([]); ax.set_yticks([])
+        canvas = FigureCanvasTkAgg(fig, master=win)
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+        canvas.draw()
+
+    def _hotpix_apply_all(self):
+        if self.cube is None:
+            messagebox.showinfo("cube", "Load a cube first."); return
+        if (self._hotpix_busy or self._blur_busy or self._nbed_busy
+                or self._ellip_busy or self._bin_busy):
+            messagebox.showinfo("hot-pixel",
+                "Another full-cube op is in progress — wait first."); return
+        k = float(self.hotpix_k.get()); dead = bool(self.hotpix_dead.get())
+        Ny, Nx, H, W = self.cube.shape
+        if not messagebox.askyesno(
+                "Apply hot-/dead-pixel removal",
+                f"Detect hot{'/dead' if dead else ''} pixels (k = {k:g}) "
+                f"from the scan-mean pattern and replace each with its "
+                f"neighbour median in every pattern of this {Ny}×{Nx} scan "
+                f"(H×W={H}×{W})?\n\n"
+                f"Writes a new .cube.npy alongside the original.  You'll be "
+                f"asked whether to save permanently after."):
+            return
+        self._hotpix_busy = True
+        self._hotpix_status.configure(text="hot-pixel: starting…")
+        threading.Thread(target=self._hotpix_worker,
+                         args=(k, dead), daemon=True).start()
+
+    def _hotpix_worker(self, k: float, dead: bool):
+        try:
+            from data import (detect_hot_pixels, build_hotpix_neighbors,
+                              apply_hotpix_block)
+            Ny, Nx, H, W = self.cube.shape
+            ref = self._hotpix_sample_ref()
+            mask = detect_hot_pixels(ref, k=k, include_dead=dead)
+            nbad = int(mask.sum())
+            bad_flat, nbr = build_hotpix_neighbors(mask)
+            base = os.path.splitext(self.path)[0]
+            base = base[:-5] if base.endswith(".cube") else base
+            new_basename = os.path.basename(base) + "_hotpix"
+            tmp_dir = tempfile.mkdtemp(prefix="dinosr_hotpix_")
+            tmp_path = os.path.join(tmp_dir, new_basename + ".cube.npy")
+            out = np.lib.format.open_memmap(
+                tmp_path, mode="w+", dtype=np.float32,
+                shape=(Ny, Nx, H, W))
+            reader = getattr(self.cube, "read_block", None)
+            t0 = time.time()
+            for y in range(Ny):
+                if reader is not None:
+                    row = np.asarray(reader(y, 1, 0, Nx)[0], dtype=np.float32)
+                else:
+                    try:
+                        row = np.asarray(self.cube[y], dtype=np.float32)
+                    except Exception:
+                        row = np.stack(
+                            [np.asarray(self.cube[y, x], dtype=np.float32)
+                             for x in range(Nx)], 0)
+                out[y] = apply_hotpix_block(row, bad_flat, nbr)
+                if (y + 1) % max(1, Ny // 40) == 0:
+                    dt = time.time() - t0
+                    eta = dt * (Ny - y - 1) / max(y + 1, 1)
+                    self.after(0, lambda y=y, eta=eta, nb=nbad:
+                        self._hotpix_status.configure(
+                            text=f"hot-pixel ({nb} px): "
+                                 f"{y+1}/{Ny} rows  "
+                                 f"({100*(y+1)/Ny:.0f}%)  eta {eta:.0f}s"))
+            out.flush(); del out
+            self.after(0, lambda: self._hotpix_finish(
+                tmp_path, nbad, base, new_basename))
+        except Exception as e:
+            err = repr(e)
+            self.after(0, lambda: messagebox.showerror("hot-pixel failed",
+                                                       err))
+            self.after(0, lambda: self._hotpix_status.configure(
+                text=f"hot-pixel failed: {err}"))
+        finally:
+            self._hotpix_busy = False
+
+    def _hotpix_finish(self, tmp_path, nbad, original_base, new_basename):
+        permanent_path = original_base + "_hotpix.cube.npy"
+        save = messagebox.askyesno(
+            "Save corrected cube?",
+            f"{nbad} hot/dead pixels removed from every pattern.\n\n"
+            f"Save permanently to:\n  {permanent_path}\n\n"
+            f"  Yes → keep file (re-loadable in future sessions).\n"
+            f"  No  → keep this run only; temp file deleted on exit.")
+        if save:
+            try:
+                shutil.move(tmp_path, permanent_path)
+                final_path = permanent_path
+                try: os.rmdir(os.path.dirname(tmp_path))
+                except Exception: pass
+            except Exception as e:
+                messagebox.showerror("save failed",
+                    f"Could not move temp file:\n{e}\n"
+                    f"Cube usable from: {tmp_path}")
+                final_path = tmp_path
+                _register_atexit_cleanup(tmp_path)
+        else:
+            final_path = tmp_path
+            _register_atexit_cleanup(
+                tmp_path, cleanup_dir=os.path.dirname(tmp_path))
+        try:
+            self.cube = np.load(final_path, mmap_mode="r", allow_pickle=True)
+            Ny, Nx, _H, _W = self.cube.shape
+            self.path = final_path
+            self._path_var.set(final_path)
+            self.sample_key = register_runtime_sample(
+                final_path, scan_shape=(Ny, Nx),
+                vmax=float(self.vmax.get()),
+                center_mask_radius=self._effective_center_mask_radius())
+        except Exception as e:
+            messagebox.showerror("reload failed",
+                f"Corrected cube is at:\n{final_path}\n\nbut reload "
+                f"failed: {e}"); return
+        self._refresh()
+        self._hotpix_status.configure(
+            text=f"hot-pixel done: {nbad} px removed.  "
+                 f"active sample: {self.sample_key}")
+        try:
+            if self.on_state_change is not None:
+                self.on_state_change("loaded", sample_key=self.sample_key,
+                                     path=final_path)
         except Exception:
             pass
 

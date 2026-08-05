@@ -40,7 +40,7 @@ assistant that can run the whole thing for you.
 - **Comparisons** — NMF and ACOM baselines, plus an interpretation report that
   explains *why* the classes split.
 
-Bring your own data (`.prz` / `.npz` / `.h5` master / `.npy` / `.dm4` / EMPAD `.raw`). Nothing is uploaded.
+Bring your own data (`.prz` / `.npz` / `.h5` master / `.npy` / `.dm4` / EMPAD `.raw` / Merlin/Medipix `.mib`). Nothing is uploaded.
 
 ---
 

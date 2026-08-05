@@ -1346,7 +1346,20 @@ def _floating_tip(app, w, caption, ms=8000):
     sw = app.winfo_screenwidth()
     if x + tw > sw:                         # overflow → place to the left
         x = max(0, w.winfo_rootx() - tw - 12)
-    tip.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+    # Clamp on-screen (bottom too) and force the borderless tip to actually
+    # surface — over RDP / on a projector an overrideredirect window can
+    # otherwise stay hidden.
+    sh = app.winfo_screenheight()
+    th = tip.winfo_reqheight()
+    y = min(max(y, 0), max(0, sh - th))
+    tip.geometry(f"+{max(x, 0)}+{y}")
+    try:
+        tip.deiconify()
+        tip.lift()
+        tip.attributes("-topmost", True)
+        tip.update_idletasks()
+    except Exception:
+        pass
     app._howto_tip = tip
     tip.after(ms, lambda: (tip.winfo_exists() and tip.destroy()))
 
@@ -1392,6 +1405,19 @@ def _curated(app, query):
 
 def _do_highlight(app, w, caption):
     _reveal_widget(app, w)
+    # Bring the MAIN GUI window to the front first.  The Assistant is a
+    # separate (often top-most) window, so during a demo the blinking
+    # control can be hidden behind it — surface the main window so the
+    # highlight is actually visible, then drop top-most so it's not sticky.
+    try:
+        root = app.winfo_toplevel()
+        root.deiconify()
+        root.lift()
+        root.attributes("-topmost", True)
+        root.after(800, lambda: (root.winfo_exists()
+                                 and root.attributes("-topmost", False)))
+    except Exception:
+        pass
     try:
         w.focus_set()
     except Exception:

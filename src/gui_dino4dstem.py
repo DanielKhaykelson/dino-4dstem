@@ -142,9 +142,36 @@ def _ellipsize(s: str, n: int = 32) -> str:
     return s[:head] + "…" + (s[-tail:] if tail > 0 else "")
 
 
+def _is_remote_session() -> bool:
+    """True inside a Windows Remote Desktop / Terminal Services session.
+
+    Over RDP the reported monitor DPI shifts, which makes CustomTkinter's
+    automatic DPI-rescale loop flip the window to ``-alpha`` 0.15 and — when
+    the RDP-side GDI redraw throws — leave it stuck there, so the whole GUI
+    looks transparent.  We use this to switch that loop off."""
+    try:
+        if not sys.platform.startswith("win"):
+            return False
+        from ctypes import windll
+        return bool(windll.user32.GetSystemMetrics(0x1000))  # SM_REMOTESESSION
+    except Exception:
+        return False
+
+
 class App(ctk.CTk):
 
     def __init__(self):
+        # MUST run before super().__init__() registers the window with
+        # CustomTkinter's ScalingTracker: if we're already in an RDP session,
+        # disable the automatic DPI-rescale loop that would otherwise make
+        # the window transparent (see _is_remote_session).
+        self._dpi_deactivated = False
+        if _is_remote_session():
+            try:
+                ctk.deactivate_automatic_dpi_awareness()
+                self._dpi_deactivated = True
+            except Exception:
+                pass
         super().__init__()
         ctk.set_appearance_mode("System")
         ctk.set_default_color_theme("blue")
@@ -529,6 +556,7 @@ class App(ctk.CTk):
                                             command=self._on_tab_change)
         pre_subtabs.pack(fill="both", expand=True)
         pre_load_tab  = pre_subtabs.add("Load + Pre-process")
+        viewing_tab   = pre_subtabs.add("Viewing")
         synth_tab     = pre_subtabs.add("Synthetic")
         self._group_tabs["Pre-processing"] = pre_subtabs
         model_frames, self._group_tabs["Model"] = _grp(g_model,
@@ -611,13 +639,53 @@ class App(ctk.CTk):
         self.blob = None
         self.transfer = None
         self.synth = None
+        self.viewing = None
         self._lazy_tab_frames = {
             "SAM": sam_tab,
             "Blob": blob_tab,
             "Transfer": transfer_tab,
             "Synthetic": synth_tab,
+            "Viewing": viewing_tab,
         }
         self._lazy_tab_built = set()
+        # Guard against the RDP "transparent window" bug even when the GUI
+        # was launched at the console and an RDP session connects later.
+        self.after(1500, self._opacity_watchdog)
+
+    def _opacity_watchdog(self):
+        """Keep the app opaque under Remote Desktop.
+
+        If an RDP session becomes active after launch, turn off
+        CustomTkinter's DPI-rescale loop (its ``-alpha`` toggling is what
+        makes the window transparent over RDP), and restore full opacity on
+        the main window and any popups that got left semi-transparent."""
+        try:
+            if not self._dpi_deactivated and _is_remote_session():
+                try:
+                    ctk.deactivate_automatic_dpi_awareness()
+                except Exception:
+                    pass
+                self._dpi_deactivated = True
+            wins = [self]
+
+            def _collect(w):
+                for c in w.winfo_children():
+                    if isinstance(c, ctk.CTkToplevel):
+                        wins.append(c)
+                    _collect(c)
+            _collect(self)
+            for w in wins:
+                try:
+                    if float(w.attributes("-alpha")) < 0.95:
+                        w.attributes("-alpha", 1.0)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            self.after(1500, self._opacity_watchdog)
+        except Exception:
+            pass
 
     def _on_tab_change(self):
         # Walk down the group hierarchy until we hit a leaf.  Outer
@@ -636,6 +704,11 @@ class App(ctk.CTk):
                 name = cur
         except Exception:
             return
+        # The Viewing tab auto-syncs to the currently-loaded cube every
+        # time it is shown (it may have been built before a cube existed).
+        if name == "Viewing" and getattr(self, "viewing", None) is not None:
+            try: self.viewing.on_show()
+            except Exception: pass
         if not name or name in self._lazy_tab_built:
             return
         if name == "SAM":
@@ -681,6 +754,13 @@ class App(ctk.CTk):
             self.synth = SynthPanel(self._lazy_tab_frames["Synthetic"],
                                        app=self)
             self.synth.pack(fill="both", expand=True)
+        elif name == "Viewing":
+            from gui_app.viewing_panel import ViewingPanel
+            self.viewing = ViewingPanel(self._lazy_tab_frames["Viewing"],
+                                          app=self)
+            self.viewing.pack(fill="both", expand=True)
+            try: self.viewing.on_show()
+            except Exception: pass
         else:
             return  # nothing lazy to build for this tab
         self._lazy_tab_built.add(name)

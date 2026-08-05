@@ -12,6 +12,7 @@ from sklearn.preprocessing import StandardScaler
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.patches import Rectangle
+import matplotlib.patheffects as pe
 
 F = r"docs/explainer/figs"
 CUBE = r"D:/DINOSR/data/Na007b_nbed.cube.npy"
@@ -112,6 +113,10 @@ def diff(ax, m):
     o = a[a > 0]
     ax.imshow(a, cmap="inferno", vmax=(np.percentile(o, 99.5) if o.size else 1), interpolation="nearest", aspect="equal")
     ax.set_xticks([]); ax.set_yticks([])
+    n = a.shape[0]; sb = 2.0 / 0.0185   # 2 nm^-1 bar at 0.0185 nm^-1 per detector pixel
+    ax.add_patch(Rectangle((12, n - 16), sb, max(3.0, n * 0.014), color="white", ec="black", lw=0.4, zorder=12))
+    ax.text(12, n - 20, "2 nm$^{-1}$", color="white", ha="left", va="bottom", fontsize=9, fontweight="bold",
+            zorder=12, path_effects=[pe.withStroke(linewidth=1.8, foreground="black")])
 
 rows = [("SAM", sam_line, flake & ~sam_line, "SAM_line", "SAM_rest"),
         ("NMF (polar+θ-shift)", nmf_line, nmf_rest, "NMF_line", "NMF_rest"),
