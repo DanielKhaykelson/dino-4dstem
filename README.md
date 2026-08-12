@@ -15,7 +15,7 @@ structural regions — and shows you **why**. No labels. No coding.
 
 <br>
 
-<img src="assets/hero.svg" alt="A diffraction pattern is classified into a colored class map" width="820">
+<img src="assets/hero.png" alt="A real NaPHI diffraction pattern is classified into a colored class map" width="820">
 
 <br><br>
 
@@ -48,7 +48,7 @@ hand-tuning**. Just load a scan and go.
 ### 🧭 Interpretable
 
 See *why* each region is its own class: the **average diffraction per class**,
-attribution maps, and **NMF / ACOM** baselines to check the answer.
+attribution maps, and an **NMF** baseline to check the answer.
 
 </td>
 <td width="33%" valign="top">

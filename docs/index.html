@@ -184,27 +184,10 @@
     <p class="micro">Free · Windows · one-time <b>~15&nbsp;min</b> setup · no programming required</p>
   </div>
 
-  <figure class="viz" style="margin:0">
-    <svg class="diff" viewBox="0 0 200 200" aria-label="diffraction pattern">
-      <defs><radialGradient id="beam" cx="50%" cy="50%" r="50%">
-        <stop offset="0%" stop-color="#fff3d6"/><stop offset="14%" stop-color="#f08c00"/>
-        <stop offset="42%" stop-color="#7a1e00"/><stop offset="100%" stop-color="#0b0e15"/>
-      </radialGradient></defs>
-      <rect width="200" height="200" fill="#0b0e15"/>
-      <g class="ring" stroke="#f7a33d" fill="none" opacity=".55">
-        <circle cx="100" cy="100" r="34" stroke-width="1.1"/>
-        <circle cx="100" cy="100" r="56" stroke-width=".9" opacity=".7"/>
-        <circle cx="100" cy="100" r="78" stroke-width=".7" opacity=".45"/>
-      </g>
-      <circle cx="100" cy="100" r="16" fill="url(#beam)"/>
-      <g id="spots" fill="#ffd9a3"></g>
-    </svg>
-    <div class="arrow" aria-hidden="true">
-      <svg width="34" height="18" viewBox="0 0 34 18"><path d="M2 9h27M22 3l7 6-7 6" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      <span class="mono">classify</span>
-    </div>
-    <div class="cmap" id="cmap" aria-label="class map"></div>
-    <figcaption>every probe position → a structural class</figcaption>
+  <figure class="viz" style="margin:0; display:block; padding:14px">
+    <img src="../assets/hero.png" alt="A real NaPHI diffraction pattern classified into a class map"
+         style="width:100%; display:block; border-radius:10px">
+    <figcaption>real NaPHI data — every probe position → a structural class</figcaption>
   </figure>
 </div></section>
 
@@ -223,7 +206,7 @@
     <div class="pillar">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="11" cy="11" r="7"/><path d="M16 16l5 5" stroke-linecap="round"/></svg>
       <h3>Interpretable</h3>
-      <p>See <em>why</em> each region is its own class: the average diffraction per class, attribution maps, and NMF / ACOM baselines to check the answer.</p>
+      <p>See <em>why</em> each region is its own class: the average diffraction per class, attribution maps, and an NMF baseline to check the answer.</p>
     </div>
     <div class="pillar">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8M12 18v3" stroke-linecap="round"/></svg>
