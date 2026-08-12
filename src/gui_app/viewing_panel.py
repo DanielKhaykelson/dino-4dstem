@@ -279,35 +279,30 @@ class ViewingPanel(ctk.CTkFrame):
 
         def work():
             try:
-                bm = _radial_mask(H, W, 0.0, 0.06 * H)
-                ham = _radial_mask(H, W, 0.18 * H, 0.45 * H)
+                # Boolean detector masks flattened once; summing ONLY the
+                # masked pixels (a gather) is far cheaper than multiplying the
+                # whole frame by the mask and reducing all of it.
+                bmr = _radial_mask(H, W, 0.0, 0.06 * H).ravel()
+                hamr = _radial_mask(H, W, 0.18 * H, 0.45 * H).ravel()
                 BF = np.zeros((R, C), dtype=np.float32)
                 HA = np.zeros((R, C), dtype=np.float32)
-                CX = np.zeros((R, C), dtype=np.float32)
-                CY = np.zeros((R, C), dtype=np.float32)
-                yc = (H - 1) / 2.0; xc = (W - 1) / 2.0
-                yr = np.arange(H, dtype=np.float32)
-                xr = np.arange(W, dtype=np.float32)
+                # publish the arrays now so the map can be drawn as it fills.
+                self._BF = BF; self._HA = HA
+                self._COMx = None; self._COMy = None
                 for y in range(R):
-                    block = np.asarray(cube[y]).astype(np.float32)
-                    BF[y] = (block * bm).sum(axis=(1, 2))
-                    HA[y] = (block * ham).sum(axis=(1, 2))
-                    # centre-of-mass per frame (vectorised over the row)
-                    tot = block.sum(axis=(1, 2))
-                    safe = np.maximum(tot, 1e-12)
-                    py = (block.sum(axis=2) * yr[None, :]).sum(axis=1)
-                    px = (block.sum(axis=1) * xr[None, :]).sum(axis=1)
-                    CY[y] = py / safe - yc
-                    CX[y] = px / safe - xc
+                    flat = np.asarray(cube[y]).astype(
+                        np.float32).reshape(C, H * W)
+                    BF[y] = flat[:, bmr].sum(axis=1)
+                    HA[y] = flat[:, hamr].sum(axis=1)
                     if (y % 16 == 0) or (y == R - 1):
                         self.after(0, self._set_status,
                                    f"Computing virtual images … "
                                    f"{y + 1}/{R} rows")
+                        # progressive: draw the map filling in top-to-bottom.
+                        self.after(0, self._render_virtual_progressive, y + 1)
             except Exception as e:            # noqa: BLE001
                 self.after(0, self._set_status, f"Virtual image failed: {e}")
                 return
-            self._BF = BF; self._HA = HA
-            self._COMx = CX; self._COMy = CY
             self.after(0, self._on_virtual_ready)
 
         threading.Thread(target=work, daemon=True).start()
@@ -349,6 +344,27 @@ class ViewingPanel(ctk.CTkFrame):
         self._ax_v.set_title(
             f"Virtual {self.kind.get()}", fontsize=10)
         self._ensure_rect()
+        self._canvas_v.draw_idle()
+
+    def _render_virtual_progressive(self, rows_done):
+        """Draw the virtual image while it is still being computed — stretched
+        over the rows filled so far so it doesn't look washed out."""
+        img = self._current_virtual()
+        if img is None:
+            return
+        sub = img[:max(1, int(rows_done))]
+        base = np.percentile(sub, 99.5)
+        if not np.isfinite(base) or base <= 0:
+            base = float(sub.max()) or 1.0
+        disp = np.clip(img / base * float(self.vi_gain.get()), 0.0, 1.0)
+        if self._im_v is None:
+            self._im_v = self._ax_v.imshow(disp, cmap="gray", vmin=0, vmax=1,
+                                           aspect="equal",
+                                           interpolation="nearest")
+        else:
+            self._im_v.set_data(disp)
+        self._ax_v.set_title(f"Virtual {self.kind.get()}  (computing…)",
+                             fontsize=10)
         self._canvas_v.draw_idle()
 
     def _render_virtual_image_only(self):
@@ -698,9 +714,48 @@ class ViewingPanel(ctk.CTkFrame):
         phi = np.fft.ifft2(-1j * (kx * gx + ky * gy) / k2).real
         return phi
 
+    def _compute_com_async(self, on_done):
+        """Compute per-frame centre-of-mass fields for iCOM/DPC (a full-cube
+        pass) in a worker, then call `on_done`.  Deferred here so the BF/HAADF
+        virtual maps stay fast — COM is only needed for iCOM."""
+        cube = self.cube
+        if cube is None:
+            return
+        R, C, H, W = cube.shape
+        self._set_status("Computing COM fields for iCOM (one-time) …")
+
+        def work():
+            try:
+                yc = (H - 1) / 2.0; xc = (W - 1) / 2.0
+                yr = np.arange(H, dtype=np.float32)
+                xr = np.arange(W, dtype=np.float32)
+                CX = np.zeros((R, C), dtype=np.float32)
+                CY = np.zeros((R, C), dtype=np.float32)
+                for y in range(R):
+                    block = np.asarray(cube[y]).astype(np.float32)
+                    sy = block.sum(axis=2)          # (C, H)
+                    sx = block.sum(axis=1)          # (C, W)
+                    safe = np.maximum(sy.sum(axis=1), 1e-12)
+                    CY[y] = (sy * yr).sum(axis=1) / safe - yc
+                    CX[y] = (sx * xr).sum(axis=1) / safe - xc
+                    if (y % 16 == 0) or (y == R - 1):
+                        self.after(0, self._set_status,
+                                   f"Computing COM … {y + 1}/{R} rows")
+            except Exception as e:                  # noqa: BLE001
+                self.after(0, self._set_status, f"COM failed: {e}")
+                return
+            self._COMx = CX; self._COMy = CY
+            self.after(0, on_done)
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _icom_popup(self):
-        if self._COMx is None or self._COMy is None:
+        if self._BF is None:
             self._set_status("Virtual image not ready — click Refresh first.")
+            return
+        if self._COMx is None or self._COMy is None:
+            # compute COM once, then re-enter to draw.
+            self._compute_com_async(self._icom_popup)
             return
         cx, cy = self._COMx, self._COMy
         cmag = np.sqrt(cx ** 2 + cy ** 2)

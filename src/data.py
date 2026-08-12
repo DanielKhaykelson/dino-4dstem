@@ -822,15 +822,42 @@ def folder_probe(folder):
             "mode": mode, "scan_shape": ss}
 
 
+def _decode_folder_frame(fp, to_gray, qbin, H, W, invert, dtype):
+    """Decode ONE image file → a processed (H, W) frame of `dtype`."""
+    from PIL import Image
+    with Image.open(fp) as im:
+        if to_gray and im.mode not in ("L", "I", "F"):
+            im = im.convert("L")
+        a = np.asarray(im)
+    if a.ndim == 3:                             # stray RGB(A) → luminance
+        a = a[..., :3].mean(axis=2)
+    a = a.astype(np.float32)
+    if qbin > 1:
+        a = (a[:H * qbin, :W * qbin]
+             .reshape(H, qbin, W, qbin).mean(axis=(1, 3)))
+    else:
+        a = a[:H, :W]
+    if invert:
+        a = float(a.max()) - a
+    return a.astype(dtype)
+
+
 def build_folder_cube(files, scan_shape, out_path, qbin=1, to_gray=True,
-                       invert=False, progress=None):
+                       invert=False, progress=None, workers=8, cancel=None):
     """Stack `files` (1-D scan order) into a (Ny, Nx, H, W) `.cube.npy`.
 
     Each image is greyscaled (unless already single-channel) and, if
     ``qbin`` > 1, block-mean down-sampled by that factor in the detector
-    plane (essential for large rendered images).  Streams one frame at a
-    time so RAM stays bounded regardless of folder size.  Returns out_path.
+    plane (essential for large rendered images).  Frames are written to a
+    memmap one at a time so RAM stays bounded regardless of folder size.
+
+    Decoding is the bottleneck for big folders, so images are decoded on a
+    THREAD pool (PIL's C decoders release the GIL → near-linear speed-up;
+    threads, not processes — this box's multiprocessing is fragile).  The
+    memmap is filled in scan order.  `cancel()` (optional) aborts and
+    deletes the partial file.  Returns out_path.
     """
+    from concurrent.futures import ThreadPoolExecutor
     from PIL import Image
     Ny, Nx = int(scan_shape[0]), int(scan_shape[1])
     n = Ny * Nx
@@ -848,29 +875,42 @@ def build_folder_cube(files, scan_shape, out_path, qbin=1, to_gray=True,
     dtype = np.float32 if qbin > 1 else np.uint8
     out = np.lib.format.open_memmap(out_path, mode="w+", dtype=dtype,
                                     shape=(Ny, Nx, H, W))
+    aborted = False
+
+    def _job(fp):
+        return _decode_folder_frame(fp, to_gray, qbin, H, W, invert, dtype)
+
     try:
-        for i, fp in enumerate(files):
-            with Image.open(fp) as im:
-                if to_gray and im.mode not in ("L", "I", "F"):
-                    im = im.convert("L")
-                a = np.asarray(im)
-            if a.ndim == 3:                     # stray RGB(A) → luminance
-                a = a[..., :3].mean(axis=2)
-            a = a.astype(np.float32)
-            if qbin > 1:
-                a = (a[:H * qbin, :W * qbin]
-                     .reshape(H, qbin, W, qbin).mean(axis=(1, 3)))
-            else:
-                a = a[:H, :W]
-            if invert:
-                a = float(a.max()) - a
-            y, x = divmod(i, Nx)
-            out[y, x] = a.astype(dtype)
-            if progress and (i % 64 == 0 or i == n - 1):
-                progress(i + 1, n, "loading images")
+        workers = max(1, int(workers))
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                # ex.map preserves input order → write straight to scan order.
+                for i, frame in enumerate(ex.map(_job, files)):
+                    y, x = divmod(i, Nx)
+                    out[y, x] = frame
+                    if progress and (i % 32 == 0 or i == n - 1):
+                        progress(i + 1, n, "loading images")
+                    if cancel is not None and cancel():
+                        aborted = True
+                        break
+        else:
+            for i, fp in enumerate(files):
+                y, x = divmod(i, Nx)
+                out[y, x] = _job(fp)
+                if progress and (i % 32 == 0 or i == n - 1):
+                    progress(i + 1, n, "loading images")
+                if cancel is not None and cancel():
+                    aborted = True
+                    break
     finally:
         out.flush()
         del out
+    if aborted:
+        try:
+            os.remove(out_path)
+        except Exception:
+            pass
+        raise RuntimeError("cancelled")
     return out_path
 
 
