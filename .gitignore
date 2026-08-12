@@ -114,3 +114,8 @@ desktop.ini
 
 # machine-specific env override
 env_name.txt
+
+# --- paper: keep working figures/drafts/pptx LOCAL only ---
+# The repo should carry ONLY the final main-text + SI PDFs (force-added
+# by name), never the figures, .tex, .aux, or slide decks.
+docs/paper/
