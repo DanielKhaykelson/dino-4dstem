@@ -47,8 +47,9 @@ hand-tuning**. Just load a scan and go.
 
 ### 🧭 Interpretable
 
-See *why* each region is its own class: the **average diffraction per class**,
-attribution maps, and an **NMF** baseline to check the answer.
+See *why* each region is its own class — its diffraction as a **single frame**,
+a **grain average**, or the **whole class** — plus attribution maps and an
+**NMF** baseline to check the answer.
 
 </td>
 <td width="33%" valign="top">
@@ -61,6 +62,18 @@ or just ask *“load this file, then train.”*
 </td>
 </tr>
 </table>
+
+---
+
+## See the evidence — at any scale
+
+Every class is checkable. Look at its diffraction as a **single frame**, a
+**grain average**, or the **whole-class average** — the noise falls away and
+the Bragg spots sharpen as you zoom out.
+
+<div align="center">
+<img src="assets/interpret.png" alt="The same NaPHI class as a single frame, a grain average, and a class average — progressively cleaner" width="920">
+</div>
 
 ---
 
