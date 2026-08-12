@@ -1,54 +1,113 @@
+<div align="center">
+
+<img src="assets/dino.png" alt="DINO-4DSTEM" width="72" height="72" style="image-rendering:pixelated">
+
 # DINO-4DSTEM
 
-**Find the distinct regions in your 4D-STEM data — automatically.**
-Point it at a scan, and it groups the diffraction patterns into structurally
-distinct classes (phases, crystallinity, texture) and shows them on a map — no
-labels, no hand-tuning required. There's a desktop app and a plain-English
-assistant that can run the whole thing for you.
+### See the phases hiding in your 4D-STEM scan.
+
+An unsupervised classifier that groups your diffraction patterns into distinct
+structural regions — and shows you **why**. No labels. No coding.
+
+![platform](https://img.shields.io/badge/platform-Windows-0a7bbd?style=flat-square)
+![coding](https://img.shields.io/badge/coding-not%20required-0ca678?style=flat-square)
+![setup](https://img.shields.io/badge/setup-~15%20min%2C%20once-e8590c?style=flat-square)
+
+<br>
+
+<img src="assets/hero.svg" alt="A diffraction pattern is classified into a colored class map" width="820">
+
+<br><br>
+
+### **[⬇  Download &amp; install →](INSTALL.md)**
+
+*Free · Windows · a one-time ~15-minute setup, then double-click to run.*
+
+</div>
 
 ---
 
-## ⬇️ Get it (Windows)
+## What it does
 
-**1. Download** the latest bundle:
-👉 **[Download dino-4dstem.zip](https://github.com/DanielKhaykelson/dino-4dstem/releases/latest)**
-(then right-click → *Extract All*)
+Point it at a scan. It groups every diffraction pattern into structurally
+distinct classes — phases, crystallinity, texture — paints them on a map of
+your sample, and gives you the evidence behind each class.
 
-**2. Install the environment** — double-click **`install_1_environment.bat`**
-(one time, several minutes).
+<table>
+<tr>
+<td width="33%" valign="top">
 
-**3. Install DINO-4DSTEM** — double-click **`install_2_dino4dstem.bat`**
-(fast; makes the Desktop icons). Updating the code later? Just re-run this one.
+### 🔍 Automatic
 
-**4. Run** — double-click the **DINO-4DSTEM** icon on your Desktop. 🦕
+Groups every diffraction pattern into distinct classes with **no labels and no
+hand-tuning**. Just load a scan and go.
 
-> In a hurry: `install.bat` runs steps 2 and 3 back-to-back.
+</td>
+<td width="33%" valign="top">
 
-> First time? The bundle includes **`GETTING_STARTED.docx`** — a picture-free,
-> click-by-click walkthrough. You need **Miniconda** installed first (free):
-> https://www.anaconda.com/download/success
+### 🧭 Interpretable
+
+See *why* each region is its own class: the **average diffraction per class**,
+attribution maps, and **NMF / ACOM** baselines to check the answer.
+
+</td>
+<td width="33%" valign="top">
+
+### 🖱️ No code
+
+A **desktop app** plus a **plain-English assistant**. Double-click to launch —
+or just ask *“load this file, then train.”*
+
+</td>
+</tr>
+</table>
 
 ---
 
-## What you get
+## Bring your own data
 
-- **GUI app** — load data, preprocess, train, and view the class map + the average
-  diffraction pattern of each class.
-- **Assistant** — ask in plain English ("load this file, then train", "is my model
-  good?", "I think it over-clustered — how do I fix it?"). Runs locally and free
-  (or with a free Google Gemini key for speed without a GPU).
-- **Comparisons** — NMF and ACOM baselines, plus an interpretation report that
-  explains *why* the classes split.
+Point it at the files you already have — **nothing is uploaded**, everything
+stays on your machine.
 
-Bring your own data (`.prz` / `.npz` / `.h5` master / `.npy` / `.dm4` / EMPAD `.raw` / Merlin/Medipix `.mib`). Nothing is uploaded.
+| Format | Source / detector | Notes |
+|---|---|---|
+| `.prz` · `.npz` · `.npy` | py4DSTEM / NumPy cubes | memory-mapped, low RAM |
+| `.h5` · `.hdf5` master | Dectris / Eiger / EMPAD masters | stitches external links; asks scan shape if 3-D |
+| `.dm4` · `.dm3` | Gatan | reads calibration from metadata |
+| `.raw` | EMPAD | metadata rows cropped automatically |
+| `.mib` (+ `.hdr`) | Quantum Detectors **Merlin / Medipix3** | counting mode |
+| **folder of images** | `.tif` / `.png` / `.jpg` / … | numbered by scan order → cube (greyscale + optional binning) |
+
+---
+
+## Get started — two ways
+
+Both need **[Miniconda](https://www.anaconda.com/download/success)** (free)
+installed first. Full step-by-step with screenshots: **[INSTALL.md](INSTALL.md)**.
+
+**① Download &amp; run — for everyone (no git):**
+Download the ZIP → double-click `install_1_environment.bat` → double-click
+`install_2_dino4dstem.bat` → launch from the Desktop icon.
+
+**② Install with git — for one-command updates:**
+```bash
+git clone https://github.com/DanielKhaykelson/dino-4dstem
+```
+then run the two installers. Update anytime with `git pull`.
+
+> First time? The download bundle includes **`GETTING_STARTED.docx`** — a
+> picture-by-picture, click-by-click walkthrough.
 
 ---
 
 ## Learn more
 
-- 📘 **How to use it:** [`GETTING_STARTED.docx`](GETTING_STARTED.docx) · detailed [`INSTALL.md`](INSTALL.md)
-- 🧭 **What it does / results:** [`PROJECT_SUMMARY.md`](PROJECT_SUMMARY.md)
-- 🧠 **The methods explained (NMF, DINO, clustering, PCA):** [`docs/assistant/CONCEPTS.md`](docs/assistant/CONCEPTS.md)
-- 📕 **Full manual:** [`docs/USER_MANUAL.pdf`](docs/USER_MANUAL.pdf)
+- 🧭 **What it does &amp; results** — [`PROJECT_SUMMARY.md`](PROJECT_SUMMARY.md)
+- 🧠 **The methods explained** (DINO, NMF, clustering, PCA) — [`docs/assistant/CONCEPTS.md`](docs/assistant/CONCEPTS.md)
+- 📕 **Full manual** — [`docs/USER_MANUAL.pdf`](docs/USER_MANUAL.pdf)
+- 🛠️ **Install guide** — [`INSTALL.md`](INSTALL.md)
 
-Windows only. Companion code for ongoing 4D-STEM / electron-diffraction research.
+<div align="center">
+<br>
+<sub>🦕 Windows only · companion code for ongoing 4D-STEM / electron-diffraction research.</sub>
+</div>
