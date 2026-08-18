@@ -46,5 +46,8 @@ echo  DINO-4DSTEM is installed.
 echo.
 echo  Launch it from the Desktop icon "DINO-4DSTEM GUI",
 echo  or run  launch_gui.bat  in this folder.
+echo.
+echo  Tutorial notebooks: the "DINO-4DSTEM Notebooks" Desktop icon
+echo  (or run  launch_notebooks.bat).
 echo ============================================================
 pause
