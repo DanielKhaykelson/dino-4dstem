@@ -133,7 +133,9 @@ def make_phantom(out_dir: str, spec: dict | None = None, save: bool = True):
         p.out_basename.set("WS2_phantom")
         try: p._sim_stop_requested = False
         except Exception: pass
-        cube, classmaps, meta = p._run_simulation(out_dir)
+        import io, contextlib
+        with contextlib.redirect_stdout(io.StringIO()):   # hush the [synth] logs
+            cube, classmaps, meta = p._run_simulation(out_dir)
     finally:
         # Drain the panel's queued Tk `after(...)` status callbacks so none
         # dangle past destroy() (avoids "invalid command name" noise), then
@@ -389,6 +391,41 @@ def align_and_score(gt2d, pred2d):
                 per_class=per, confusion=conf,
                 pred_aligned=aligned.reshape(np.asarray(gt2d).shape),
                 K_gt=Kg, K_pred=Kp)
+
+
+def plot_errors(cube, class_map, gt2d, max_px=200):
+    """Show *all* predicted clusters, where they disagree with the ground
+    truth, and the diffraction of any extra (unmatched) cluster.  Returns
+    ``(fig, score)`` where score is the :func:`align_and_score` dict."""
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import ListedColormap
+    gt = np.asarray(gt2d)
+    s = align_and_score(gt, class_map)
+    pred = s["pred_aligned"]
+    err = (pred != gt)
+    extra = (pred == -1)                       # clusters matched to no GT class
+    K = int(np.asarray(class_map).max()) + 1
+    Kg = int(gt.max()) + 1
+    fig, ax = plt.subplots(1, 4, figsize=(15.5, 3.8))
+    ax[0].imshow(class_map, cmap=class_palette(K), vmin=-.5, vmax=K - .5,
+                 interpolation="nearest")
+    ax[0].set_title(f"DINO — all {K} clusters")
+    ax[1].imshow(gt, cmap=class_palette(Kg), vmin=-.5, vmax=Kg - .5,
+                 interpolation="nearest")
+    ax[1].set_title(f"Ground truth ({Kg} classes)")
+    em = np.zeros_like(gt); em[err] = 1; em[extra] = 2
+    ax[2].imshow(em, cmap=ListedColormap(["#dddddd", "#d62728", "#7b2cbf"]),
+                 vmin=-.5, vmax=2.5, interpolation="nearest")
+    ax[2].set_title(f"errors: {int(err.sum())} px ({100*err.mean():.1f}%)\n"
+                    "red = wrong · purple = extra cluster")
+    sizes = np.bincount(np.asarray(class_map).ravel())
+    extra_cls = int(np.argmin(sizes))
+    dp = class_mean_diffraction(cube, class_map, max_per_class=max_px)[extra_cls]
+    logshow(ax[3], dp); ax[3].set_title(f"smallest cluster {extra_cls} — diffraction")
+    for a in ax[:3]:
+        a.set_xticks([]); a.set_yticks([])
+    fig.tight_layout()
+    return fig, s
 
 
 def class_mean_diffraction(cube, labels2d, max_per_class=300, seed=0):
