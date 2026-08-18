@@ -90,11 +90,11 @@ for d0, i0, lab in refs:
     ax.vlines(q0, 0, 0.18 + 0.82 * i0, color="#b2182b", lw=1.0 + 2.2 * i0, alpha=0.5, zorder=0)
     if i0 > 0.45:
         ax.text(q0, 0.20 + 0.82 * i0, f"{lab}\n{d0:.2f}Å", ha="center", va="bottom", fontsize=7, color="#b2182b")
-ax.plot(qP, pP, lw=2.0, color="#8c510a", label=f"precursor (SI3 c{cP}, spottiness {svP:.2f})")
-ax.plot(qN, pN, lw=2.0, color="#01665e", label=f"mature needle (SI4 c{cN}, spottiness {svN:.2f})")
+ax.plot(qP, pP, lw=2.0, color="#8c510a", label=f"precursor (interface c{cP}, spottiness {svP:.2f})")
+ax.plot(qN, pN, lw=2.0, color="#01665e", label=f"mature needle (needles c{cN}, spottiness {svN:.2f})")
 ax.set_xlim(QMIN, QMAX); ax.set_ylim(0, 1.35)
 ax.set_xlabel("q = 1/d  (Å⁻¹)"); ax.set_ylabel("azimuthally-averaged intensity (norm.)")
-ax.set_title("Precursor and needle index to α-indomethacin (reflections from alpha.cif)", fontsize=10.5)
+ax.set_title("")
 secax = ax.secondary_xaxis("top", functions=(lambda q: 1.0 / np.clip(q, 1e-6, None),
                                              lambda d: 1.0 / np.clip(d, 1e-6, None)))
 secax.set_xlabel("d-spacing (Å)")

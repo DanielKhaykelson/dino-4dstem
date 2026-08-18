@@ -12,7 +12,7 @@ from matplotlib.colors import ListedColormap
 import matplotlib as mpl
 
 FIGS = "docs/paper/draft_v2/figs"; OUT = os.path.join(FIGS, "BorisEdits")
-NAMES = ["SI3", "SI4", "SI5"]; ROLE = {"SI3": "overview", "SI4": "needles", "SI5": "interface"}
+NAMES = ["SI3", "SI4", "SI5"]; ROLE = {"SI3": "interface", "SI4": "needles", "SI5": "magnified interface"}
 COLS = [("dino", "DINO (reference)"), ("hdbscan", "NMF + HDBSCAN"), ("fcm", "NMF + fuzzy c-means")]
 
 
@@ -26,16 +26,18 @@ def discrete(ax, lab):
     ax.set_xticks([]); ax.set_yticks([])
 
 
-fig = Figure(figsize=(2.15 * 3, 2.15 * 3 + 0.5), facecolor="white")
+fig = Figure(figsize=(2.15 * 3 + 0.7, 2.15 * 3 + 0.6), facecolor="white")
+row_axes = []
 for ri, n in enumerate(NAMES):
     z = np.load(os.path.join(FIGS, f"boris_nmf_cache_{n}.npz"))
     for ci, (key, title) in enumerate(COLS):
         ax = fig.add_subplot(3, 3, ri * 3 + ci + 1); discrete(ax, z[key])
-        if ci == 0:
-            ax.set_ylabel(f"{n}\n{ROLE[n]}", fontsize=11, fontweight="bold", rotation=0, labelpad=20, va="center")
+        if ci == 0: row_axes.append((ROLE[n], ax))
         if ri == 0: ax.set_title(title, fontsize=10)
-fig.suptitle("NMF clustered by HDBSCAN and fuzzy c-means (with the DINO map for reference), for the three IMC samples. "
-             "HDBSCAN collapses to very few clusters; both differ from the DINO map and from the other NMF variants in Fig. 3.", fontsize=9.5)
-fig.tight_layout(rect=[0, 0, 1, 0.94]); FigureCanvasAgg(fig)
+fig.tight_layout(rect=[0.13, 0, 1, 0.98]); FigureCanvasAgg(fig)
+# row labels centred in the left gutter (vertical, clear of both frame and canvas edge)
+for lbl, ax in row_axes:
+    bb = ax.get_position(); yc = (bb.y0 + bb.y1) / 2
+    fig.text(bb.x0 - 0.045, yc, lbl, rotation=90, ha="center", va="center", fontsize=12, fontweight="bold")
 p = os.path.join(OUT, "nmf_hdbscan_fcm.png"); fig.savefig(p, dpi=170, facecolor="white")
 print(f"wrote {p}", flush=True)

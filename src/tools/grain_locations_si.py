@@ -49,9 +49,13 @@ def pick(rows, lowest, frac=0.35, min_n=60):
 
 
 gid3, r3 = grain_table("SI3"); gid5, r5 = grain_table("SI5"); gid4, r4 = grain_table("SI4")
-SEL = [("less-ordered matrix grain (SI3)", "SI3", gid3, pick(r3, True)),
-       ("crystallization-front grain (SI5)", "SI5", gid5, pick(r5, False)),
-       ("highly-ordered needle grain (SI4)", "SI4", gid4, pick(r4, False))]
+# grains pinned to the original (deliberately-chosen) figure: matrix=SI3 g54 (397 px),
+# crystallization front=SI5 g31 (104 px), mature needle=SI4 g57 (152 px). Sizes are stable
+# across cache versions, so these ids reproduce the same three grains as the first figure.
+def _byg(rows, g): return next(d for d in rows if d["g"] == g)
+SEL = [("less-ordered matrix grain (interface)", "SI3", gid3, _byg(r3, 54)),
+       ("crystallization-front grain (magnified interface)", "SI5", gid5, _byg(r5, 31)),
+       ("highly-ordered needle grain (needles)", "SI4", gid4, _byg(r4, 57))]
 COL = ["#39FF14", "#FFD24D", "#FF3B3B"]
 
 
@@ -85,9 +89,7 @@ for ci, (label, name, gid, sel) in enumerate(SEL):
     axd.set_title("its grain-average diffraction", fontsize=9)
     for s in axd.spines.values():
         s.set_edgecolor(COL[ci]); s.set_linewidth(2)
-fig.suptitle("Provenance of the Fig. 5 diffraction patterns: location of each selected grain on the scan (top, scattered-intensity / HAADF-like map; "
-             "coloured footprint) and its grain-average diffraction (bottom). Same grains and ordering as Fig. 5.", fontsize=10)
-fig.tight_layout(rect=[0, 0, 1, 0.95]); FigureCanvasAgg(fig)
+fig.tight_layout(); FigureCanvasAgg(fig)
 p = os.path.join(OUT, "grain_locations_si.png"); fig.savefig(p, dpi=170, facecolor="white")
 import shutil; os.makedirs(REVIEW, exist_ok=True); shutil.copy(p, os.path.join(REVIEW, "grain_locations_si.png"))
 print(f"wrote grain_locations_si.png  grains: matrix g={SEL[0][3]['g']} front g={SEL[1][3]['g']} needle g={SEL[2][3]['g']}", flush=True)
