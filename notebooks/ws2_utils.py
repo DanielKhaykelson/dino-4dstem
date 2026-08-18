@@ -243,6 +243,99 @@ def interactive_roi(cube, virtual_img=None, roi=(8, 8), cmap="inferno"):
     return fig
 
 
+def interactive_click(cube, base_img=None, class_map=None, cmap="inferno",
+                      max_px=300):
+    """A GUI-style click inspector (needs ``%matplotlib widget``).
+
+    **Left-click** a point on the left image -> that single diffraction
+    pattern.  **Right-click** -> the average diffraction over its *grain*
+    (the connected component of the same class it belongs to).  Returns the
+    figure.
+    """
+    import matplotlib.pyplot as plt
+    from scipy.ndimage import label as _label
+    Ny, Nx, H, W = cube.shape
+    fig, (axL, axR) = plt.subplots(1, 2, figsize=(9.6, 4.4))
+    if class_map is not None:
+        axL.imshow(class_map, cmap=class_palette(int(class_map.max()) + 1),
+                   interpolation="nearest")
+    else:
+        b = base_img if base_img is not None else virtual_bf_haadf(cube)[0]
+        lo, hi = np.percentile(b, [1, 99]); axL.imshow(np.clip(b, lo, hi), cmap="gray")
+    axL.set_title("LEFT-click = one pattern   |   RIGHT-click = grain average")
+    axL.set_xticks([]); axL.set_yticks([])
+    dp0 = np.asarray(cube[Ny // 2, Nx // 2], np.float32)
+    imR = axR.imshow(np.log1p(dp0), cmap=cmap, interpolation="nearest")
+    axR.set_xticks([]); axR.set_yticks([]); axR.set_title("click a point")
+    marker, = axL.plot([], [], "+", ms=13, mew=1.7, color="#39ff14")
+
+    def _show(d, title):
+        o = d[d > 0]; vmax = np.percentile(o, 99.7) if o.size else 1.0
+        imR.set_data(np.log1p(np.clip(d, 0, vmax) / max(vmax, 1e-6) * 60))
+        imR.set_clim(0, np.log1p(60)); axR.set_title(title)
+        fig.canvas.draw_idle()
+
+    def _onclick(e):
+        if e.inaxes is not axL or e.xdata is None:
+            return
+        x = min(max(int(round(e.xdata)), 0), Nx - 1)
+        y = min(max(int(round(e.ydata)), 0), Ny - 1)
+        marker.set_data([x], [y])
+        if e.button == 3 and class_map is not None:
+            cls = int(class_map[y, x])
+            lab, _ = _label(class_map == cls)
+            ys, xs = np.where(lab == lab[y, x])
+            sel = np.random.RandomState(0).permutation(len(ys))[:max_px]
+            d = np.mean([np.asarray(cube[ys[i], xs[i]], np.float32)
+                         for i in sel], axis=0)
+            _show(d, f"grain average — class {cls}, {len(ys)} px")
+        else:
+            _show(np.asarray(cube[y, x], np.float32), f"single frame ({y}, {x})")
+
+    fig._click_cid = fig.canvas.mpl_connect("button_press_event", _onclick)
+    fig.tight_layout()
+    return fig
+
+
+def show_domains(cube, class_map, per_class=1, max_px=300, seed=0):
+    """Pick the largest ``per_class`` grain(s) of every class, outline them on
+    the class map, and show each grain's average diffraction.  Returns the
+    figure.  (The static counterpart of :func:`interactive_click`.)"""
+    import matplotlib.pyplot as plt
+    from scipy.ndimage import label as _label
+    Ny, Nx, H, W = cube.shape
+    rng = np.random.RandomState(seed)
+    grains = []
+    for cls in np.unique(class_map):
+        lab, n = _label(class_map == cls)
+        if n == 0:
+            continue
+        sizes = np.bincount(lab.ravel()); sizes[0] = 0
+        for gid in np.argsort(sizes)[::-1][:per_class]:
+            if sizes[gid] == 0:
+                continue
+            mask = (lab == gid); ys, xs = np.where(mask)
+            sel = rng.permutation(len(ys))[:max_px]
+            avg = np.mean([np.asarray(cube[ys[i], xs[i]], np.float32)
+                           for i in sel], axis=0)
+            grains.append((int(cls), mask, int(ys.mean()), int(xs.mean()), avg))
+    n = len(grains)
+    fig = plt.figure(figsize=(3.0 * (n + 1), 3.1))
+    axm = fig.add_subplot(1, n + 1, 1)
+    axm.imshow(class_map, cmap=class_palette(int(class_map.max()) + 1),
+               interpolation="nearest")
+    for cls, mask, cy, cx, _ in grains:
+        axm.contour(mask, levels=[.5], colors="white", linewidths=1.2)
+        axm.text(cx, cy, str(cls), color="white", ha="center", va="center",
+                 fontweight="bold", fontsize=11)
+    axm.set_title("selected domains"); axm.set_xticks([]); axm.set_yticks([])
+    for i, (cls, mask, cy, cx, avg) in enumerate(grains):
+        a = fig.add_subplot(1, n + 1, 2 + i)
+        logshow(a, avg); a.set_title(f"class {cls} domain")
+    fig.tight_layout()
+    return fig
+
+
 # --------------------------------------------------------------------------
 # metrics vs ground truth
 # --------------------------------------------------------------------------
