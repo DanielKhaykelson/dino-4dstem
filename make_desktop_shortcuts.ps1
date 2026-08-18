@@ -1,5 +1,5 @@
-# Creates two Desktop shortcuts (GUI + Assistant) pointing at this folder's
-# launchers. Portable: uses its own location, no hardcoded paths.
+# Creates three Desktop shortcuts (GUI + Assistant + Notebooks) pointing at
+# this folder's launchers. Portable: uses its own location, no hardcoded paths.
 #
 # Run from this folder:
 #     powershell -ExecutionPolicy Bypass -File make_desktop_shortcuts.ps1
@@ -40,5 +40,6 @@ function New-AppShortcut($name, $bat) {
 
 New-AppShortcut "DINO-4DSTEM GUI"        "launch_gui.bat"
 New-AppShortcut "DINO-4DSTEM Assistant"  "launch_assistant.bat"
+New-AppShortcut "DINO-4DSTEM Notebooks"  "launch_notebooks.bat"
 Write-Host ""
-Write-Host "Done. Two icons are on your Desktop."
+Write-Host "Done. Three icons are on your Desktop."
