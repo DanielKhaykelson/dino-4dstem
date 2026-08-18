@@ -14,6 +14,7 @@ from gui_app.crystallinity_panel import _radial_mean_var, _snip_baseline
 FIGS = "docs/paper/draft_v2/figs"; OUT = "docs/explainer/figs"; REVIEW = os.path.join(FIGS, "latest_review")
 INV = 0.00185; KMAX = 0.35; FOV = {"SI3": 187, "SI4": 160, "SI5": 160}; NAMES = ["SI3", "SI4", "SI5"]
 CLR = {"SI3": "#2E86C1", "SI4": "#28B463", "SI5": "#CA6F1E"}
+DISP = {"SI3": "interface", "SI4": "needles", "SI5": "magnified interface"}
 
 
 def eta2(v, lab):
@@ -64,11 +65,8 @@ for ri, name in enumerate(NAMES):
                        s=9, color="#333", alpha=0.55, zorder=3, linewidths=0)
         ax.set_xticklabels([f"c{c}\n(n={len(v[lab==c])})" for c in order], fontsize=6.5)
         ax.set_ylabel(f"per-grain {pname}", fontsize=9)
-        ax.set_title(f"{name}: {pname} by DINO class (ordered)   η²={e2:.2f}", fontsize=9.5, color=CLR[name])
-fig.suptitle("Per-class distribution of the per-grain crystallization descriptors (IMC), with the peak/halo ratio χ added. Each box = one DINO class; dots = its grains; classes ordered by median.\n"
-             "Measured per grain INDEPENDENTLY of the class label, the classes emerge as tight, separated, monotonic strata. η² = fraction of the descriptor's variance explained by the class label.",
-             fontsize=10)
-fig.tight_layout(rect=[0, 0, 1, 0.94]); FigureCanvasAgg(fig)
+        ax.set_title(f"{DISP[name]}: {pname} by DINO class (ordered)   η²={e2:.2f}", fontsize=9.5, color=CLR[name])
+fig.tight_layout(); FigureCanvasAgg(fig)
 p = os.path.join(OUT, "imc_class_boxplots_3col.png"); fig.savefig(p, dpi=160, facecolor="white")
 import shutil; os.makedirs(REVIEW, exist_ok=True); shutil.copy(p, os.path.join(REVIEW, "imc_class_boxplots_3col.png"))
 print("wrote imc_class_boxplots_3col.png", flush=True)

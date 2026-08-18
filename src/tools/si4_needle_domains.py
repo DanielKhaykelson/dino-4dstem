@@ -28,7 +28,7 @@ REGIONS = {
     "SI3": ([("1", 26), ("2", 27), ("3", 5)],  44.0, 1000, "needle domains (SI3, left needle)", "si3_domains"),
     "SI5": ([("1", 12), ("2", 23), ("3", 37)], 16.0, 500,  "domains (SI5, right side)", "si5_domains"),
     # SAME DINO class (class 2), three grains, orientation/mosaic varies (sorted by spottiness 0.83/1.08/4.14)
-    "SAME": ([("1", 24), ("2", 23), ("3", 21)], 16.0, 500, "one class, three grains (SI5)", "si5_sameclass_grains", "SI5"),
+    "SAME": ([("1", 24), ("2", 23), ("3", 21)], 16.0, 500, "", "si5_sameclass_grains", "SI5"),
     # THREE different DINO classes at three locations (class 9/2/3 = grains 69/23/33)
     "DIFF": ([("1", 33), ("2", 23), ("3", 69)], 16.0, 500, "three classes (SI5)", "si5_diffclass_grains", "SI5"),
 }
@@ -60,7 +60,7 @@ def _recipbar(ax, H, bnm=2.0):
     ax.add_patch(Rectangle((x0 - 2, y - 2), bpx + 4, 8, facecolor="black", alpha=0.5, ec="none", zorder=24))
     ax.add_patch(Rectangle((x0, y), bpx, 3.2, color="white", ec="black", lw=0.5, zorder=26))
     ax.text(x0 + bpx / 2, y - 2.5, f"{int(bnm)} nm⁻¹", color="white", ha="center", va="bottom",
-            fontsize=9, fontweight="bold", zorder=27, bbox=dict(boxstyle="round,pad=0.15", fc="black", alpha=0.55, ec="none"))
+            fontsize=11.5, fontweight="bold", zorder=27, bbox=dict(boxstyle="round,pad=0.15", fc="black", alpha=0.55, ec="none"))
 
 
 def _lbl(ax, s):
@@ -229,14 +229,14 @@ def render_row(axes, region, log, letters="abcd", side_title=False, title_overri
         ax.text(xs.mean(), ys.mean(), tag, color="black", fontsize=11, fontweight="bold", ha="center", va="center",
                 bbox=dict(boxstyle="circle,pad=0.28", fc=col, ec="white", lw=1.0), zorder=20)
     if side_title:
-        ax.set_ylabel(title, fontsize=12, fontweight="bold", rotation=90, labelpad=8, va="center")
+        ax.set_ylabel(title, fontsize=14.5, fontweight="bold", rotation=90, labelpad=8, va="center")
     else:
         ax.set_title(title, fontsize=10)
     x0, y = 4, NY - 7; bpx = barnm / nmpx
     ax.add_patch(Rectangle((x0 - 1.5, y - 1.0), bpx + 3, 4.5, facecolor="black", alpha=0.5, ec="none", zorder=24))
     ax.add_patch(Rectangle((x0, y), bpx, max(2.2, NY * 0.018), color="white", ec="black", lw=0.5, zorder=26))
     lab = f"{barnm // 1000} µm" if barnm >= 1000 else f"{barnm} nm"
-    ax.text(x0 + bpx / 2, y - 2.5, lab, color="white", ha="center", va="bottom", fontsize=10, fontweight="bold",
+    ax.text(x0 + bpx / 2, y - 2.5, lab, color="white", ha="center", va="bottom", fontsize=12.5, fontweight="bold",
             zorder=27, bbox=dict(boxstyle="round,pad=0.15", fc="black", alpha=0.55, ec="none"))
     _lbl(ax, letters[0])
     hkl_rot = si4_hkl_rotations(gsum, gcnt) if (index_hkl and _HKL_OK) else {}
@@ -250,7 +250,7 @@ def render_row(axes, region, log, letters="abcd", side_title=False, title_overri
         for s in ax.spines.values():
             s.set_color(col); s.set_linewidth(3.5)
         _lbl(ax, letters[i + 1])
-        ax.set_title(f"domain {tag}", fontsize=10, color=col, fontweight="bold")
+        ax.set_title(f"domain {tag}", fontsize=13, color=col, fontweight="bold")
     return stub
 
 

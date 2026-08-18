@@ -62,40 +62,17 @@ def run(name):
     c = EXTRA[name]
     asg = np.load(os.path.join(c["run"], "eval", "inference.npz"))["assigns"].astype(int)
     asgmap = asg.reshape(NY, NX)
-    # grain segmentation: connected components per class, >=MINPIX
-    gid = np.full(NY * NX, -1, np.int32); grains = []
-    for k in sorted(set(asg.tolist())):
-        lab, n = ndimage.label(asgmap == k)
-        for gi in range(1, n + 1):
-            mm = (lab == gi).ravel()
-            if mm.sum() >= MINPIX:
-                gid[mm] = len(grains); grains.append(int(k))
-    G = len(grains)
-    cube = open_lazy_cube(c["cube"], scan_shape=(NY, NX)); _, _, H, Wd = cube.shape
-    cyx = (H - 1) / 2.0; beam = max(8, round(0.11 * H)); lo = beam + 1; hi = min(int(KMAX / INV), 160)
-    gsum = np.zeros((G, H, Wd), np.float32); gcnt = np.zeros(G); scat = np.zeros(NY * NX)
-    yy, xx = np.indices((H, Wd)); rr0 = np.sqrt((yy - cyx) ** 2 + (xx - cyx) ** 2); ring = rr0 > beam
-    for rx in range(NY):
-        blk = np.clip(np.asarray(cube[rx], np.float32), 0, VMAX)
-        for ry in range(NX):
-            p = blk[ry]; scat[rx * NX + ry] = float(p[ring].sum())
-            g = gid[rx * NX + ry]
-            if g >= 0: gsum[g] += p; gcnt[g] += 1
-    # NO total-scatter vacuum gate: gscat conflates THICKNESS with crystallinity, so a
-    # thin crystalline needle has low gscat and was wrongly thrown away. Instead measure
-    # every grain; a grain counts as "off-sample" only if it has no measurable ring
-    # signal at all (descriptors NaN). A very low absolute floor removes true holes.
-    SCAT_FLOOR = 2000.0
-    spot = np.full(G, np.nan); B = np.full(G, np.nan); chi = np.full(G, np.nan); vac = np.zeros(G, bool); gscat = np.zeros(G)
+    # Load the cached grain segmentation + grain-average diffraction (built on the first
+    # run) rather than re-reading the 17 GB cube: everything this figure needs is already
+    # in grain_acom_v2_<name>.npz. Descriptors are recomputed from the cached grain sums.
+    z = np.load(os.path.join(FIGS, f"grain_acom_v2_{name}.npz"))
+    gid = z["gid"]; vac = z["vac"].astype(bool); cls = z["cls"]; gsum = z["gsum"]; gcnt = z["gcnt"]; H = int(z["H"])
+    G = gsum.shape[0]; cyx = (H - 1) / 2.0; beam = max(8, round(0.11 * H)); lo = beam + 1; hi = min(int(KMAX / INV), 160)
+    spot = np.full(G, np.nan); B = np.full(G, np.nan); chi = np.full(G, np.nan)
     for g in range(G):
-        gscat[g] = float(np.median(scat[gid == g]))
+        if vac[g]: continue
         spot[g], B[g], chi[g] = descriptors(gsum[g] / max(gcnt[g], 1), cyx, beam, lo, hi)
-        if (not np.isfinite(spot[g])) or gscat[g] < SCAT_FLOOR:
-            vac[g] = True
-    cls = np.array(grains)
-    np.savez(os.path.join(FIGS, f"grain_acom_v2_{name}.npz"), gid=gid, vac=vac, gscat=gscat,
-             cls=cls, gate=SCAT_FLOOR, gsum=gsum, gcnt=gcnt, H=H)
-    print(f"[{name}] grains={G} off-sample={int(vac.sum())} painted={int((~vac).sum())} (floor={SCAT_FLOOR:.0f})", flush=True)
+    print(f"[{name}] grains={G} off-sample={int(vac.sum())} painted={int((~vac).sum())} (from cache)", flush=True)
 
     import shutil
     DATA = {"spottiness": spot, "Bragg excess B": B, "peak/halo χ": chi}
@@ -140,8 +117,7 @@ def run(name):
         cmap = mpl.cm.get_cmap("inferno").copy(); cmap.set_bad("#222")
         im = ax.imshow(mp, cmap=cmap, interpolation="nearest", vmin=vmin, vmax=vmax)
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02); ax.set_title(pname, fontsize=10)
-    fig.suptitle(f"IMC {name} ({c['role']}): per-grain crystallinity  [vmax={int(VMAX)}, {c['nm_px']:.0f} nm/px]", fontsize=11)
-    fig.tight_layout(rect=[0, 0, 1, 0.92]); FigureCanvasAgg(fig)
+    fig.tight_layout(); FigureCanvasAgg(fig)
     p = os.path.join(OUT, f"fig4_extra_{name}.png"); fig.savefig(p, dpi=170, facecolor="white")
     shutil.copy(p, os.path.join(REVIEW, f"fig4_extra_{name}.png")); print(f"wrote fig4_extra_{name}.png", flush=True)
 
@@ -167,9 +143,8 @@ def run(name):
             ax.scatter(np.full(len(gg), xi + 1) + np.linspace(-0.13, 0.13, len(gg)), gg, s=10, color="#333", alpha=0.6, linewidths=0, zorder=3)
         ax.set_xticklabels([f"c{k}\n(n={len(v[ok&(lab_g==k)])})" for k in ks], fontsize=7)
         ax.set_ylabel(f"per-grain {pname}", fontsize=9)
-        ax.set_title(f"{name}: {pname} by DINO class   η²={e2:.2f}", fontsize=9.5, color="#CA6F1E")
-    figb.suptitle(f"IMC {name} ({c['role']}): per-class distribution of per-grain crystallization descriptors (on-sample grains, ordered by median).", fontsize=10)
-    figb.tight_layout(rect=[0, 0, 1, 0.93]); FigureCanvasAgg(figb)
+        ax.set_title(f"{pname} by DINO class   η²={e2:.2f}", fontsize=9.5, color="#CA6F1E")
+    figb.tight_layout(); FigureCanvasAgg(figb)
     pb = os.path.join(OUT, f"boxplots_extra_{name}.png"); figb.savefig(pb, dpi=160, facecolor="white")
     shutil.copy(pb, os.path.join(REVIEW, f"boxplots_extra_{name}.png")); print(f"wrote boxplots_extra_{name}.png", flush=True)
 

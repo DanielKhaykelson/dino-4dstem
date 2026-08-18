@@ -74,7 +74,7 @@ ax.axvspan(4.2, 4.8, color="#A9DFBF", alpha=0.35); ax.text(4.5, ax.get_ylim()[1]
 ax.axvline(3.4, color="#E08A1E", ls="--", lw=1.2); ax.text(3.4, ax.get_ylim()[1]*0.78, " a-C (002) ~3.4Å\n(in-frame)", fontsize=7, color="#B5650F", va="top")
 ax.axvline(2.1, color="#999", ls=":", lw=1); ax.text(2.1, ax.get_ylim()[1]*0.6, " a-C ~2.1Å\n(off-frame)", fontsize=7, color="#777", va="top")
 ax.invert_xaxis(); ax.set_xlabel("d-spacing (Å)"); ax.set_ylabel("norm. radial intensity")
-ax.set_title("SI3: thick/high-scatter grains (blue) vs thinnest grains (red)\nIMC ring sits at 4.3-4.7Å, distinct from a-C (002) at 3.4Å", fontsize=9)
+ax.set_title("interface: thick/high-scatter grains (blue) vs thinnest grains (red)\nIMC ring sits at 4.3-4.7Å, distinct from a-C (002) at 3.4Å", fontsize=9)
 ax.plot([], [], color="#1F618D", label="thick (high scatter)"); ax.plot([], [], color="#C0392B", label="thin (low scatter)"); ax.legend(fontsize=8)
 ax2 = fig.add_subplot(1, 2, 2)
 ax2.plot(dd, rows[g54]["prof"], color="#1F618D", lw=2, label=f"matrix grain g{g54}")
@@ -84,9 +84,7 @@ ax2.invert_xaxis(); ax2.set_xlabel("d-spacing (Å)"); ax2.set_ylabel("norm. radi
 ax2.set_title(f"chosen matrix grain g{g54}: ring d={rows[g54]['d']:.1f}Å, 4.5Å-bump={rows[g54]['bump']:.2f}\n"
               f"scatter pctile {100*np.mean(scats<rows[g54]['gscat']):.0f}%, adjacent to needle: "
               f"{'yes' if any(rows[t]['spot']>1.0 for t in touch) else 'no'}", fontsize=9); ax2.legend(fontsize=8)
-fig.suptitle("Carbon vs IMC discriminator (diffraction only): amorphous carbon halos are ~3.4 (002), ~2.1, ~1.2 Å and NONE at 4.5 Å (literature); "
-             "the IMC organic ring sits at 4.3-4.7 Å, distinct from the a-C(002) 3.4 Å. (EELS would be definitive; not available here.)", fontsize=9.5)
-fig.tight_layout(rect=[0, 0, 1, 0.93]); FigureCanvasAgg(fig)
+fig.tight_layout(); FigureCanvasAgg(fig)
 p = os.path.join(OUT, "carbon_vs_imc_check.png"); fig.savefig(p, dpi=160, facecolor="white")
 import shutil; os.makedirs(REVIEW, exist_ok=True); shutil.copy(p, os.path.join(REVIEW, "carbon_vs_imc_check.png"))
 print("wrote carbon_vs_imc_check.png", flush=True)

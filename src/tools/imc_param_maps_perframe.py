@@ -34,6 +34,7 @@ PATH = {"SI3": r"D:/DINOSR/data/231228-IMC150nm-0p2apersec-anneal-70c-60min/EF-4
         "SI4": r"D:/DINOSR/data/231228-IMC150nm-0p2apersec-anneal-70c-60min/EF-4DSTEM/SI-004/Survey_CH2_0_1_nbed.cube.npy",
         "SI5": r"D:/DINOSR/data/IMC_150nm_SI5_nbed.cube.npy"}
 NAMES = ["SI3", "SI4", "SI5"]
+DISP = {"SI3": "interface", "SI4": "needles", "SI5": "magnified interface"}
 PARAMS = [("spot", "azimuthal spottiness"), ("B", "2D Bragg excess B"), ("chi", "radial peak/halo χ")]
 
 
@@ -80,16 +81,22 @@ DATA = {}
 for name in NAMES:
     t0 = time.time()
     asg = np.load(os.path.join(RUN[name], "eval", "inference.npz"))["assigns"].astype(int).reshape(NY, NX)
-    cube = open_lazy_cube(PATH[name], scan_shape=(NY, NX)); _, _, H, _ = cube.shape
-    Hb = (H // BIN) if BIN > 1 else H; invb = INV * BIN; fovb = FOV[name] // BIN if BIN > 1 else FOV[name]
-    cyx = (Hb - 1) / 2.0; beam = max(8, round(0.11 * Hb)); lo = beam + 1; hi = min(int(KMAX / invb), fovb)
-    yy, xx = np.indices((Hb, Hb)); rr = np.sqrt((yy - cyx) ** 2 + (xx - cyx) ** 2); band = (rr >= lo) & (rr <= hi)
-    spot = np.full((NY, NX), np.nan); B = np.full((NY, NX), np.nan); chi = np.full((NY, NX), np.nan)
-    for ry in range(NY):
-        blk = np.clip(np.asarray(cube[ry], np.float32), 0, VMAX)
-        for rx in range(NX):
-            spot[ry, rx], B[ry, rx], chi[ry, rx] = frame_descriptors(bin2(blk[rx], BIN), cyx, beam, lo, hi, rr, band)
-        if ry % 32 == 0: print(f"[{name}] row {ry}/{NY} ({time.time()-t0:.0f}s)", flush=True)
+    cache = os.path.join(FIGS, f"_perframe_cache_{name}_bin{BIN}.npz")
+    if os.path.exists(cache):
+        zz = np.load(cache); spot, B, chi = zz["spot"], zz["B"], zz["chi"]
+        print(f"[{name}] loaded per-frame cache {os.path.basename(cache)}", flush=True)
+    else:
+        cube = open_lazy_cube(PATH[name], scan_shape=(NY, NX)); _, _, H, _ = cube.shape
+        Hb = (H // BIN) if BIN > 1 else H; invb = INV * BIN; fovb = FOV[name] // BIN if BIN > 1 else FOV[name]
+        cyx = (Hb - 1) / 2.0; beam = max(8, round(0.11 * Hb)); lo = beam + 1; hi = min(int(KMAX / invb), fovb)
+        yy, xx = np.indices((Hb, Hb)); rr = np.sqrt((yy - cyx) ** 2 + (xx - cyx) ** 2); band = (rr >= lo) & (rr <= hi)
+        spot = np.full((NY, NX), np.nan); B = np.full((NY, NX), np.nan); chi = np.full((NY, NX), np.nan)
+        for ry in range(NY):
+            blk = np.clip(np.asarray(cube[ry], np.float32), 0, VMAX)
+            for rx in range(NX):
+                spot[ry, rx], B[ry, rx], chi[ry, rx] = frame_descriptors(bin2(blk[rx], BIN), cyx, beam, lo, hi, rr, band)
+            if ry % 32 == 0: print(f"[{name}] row {ry}/{NY} ({time.time()-t0:.0f}s)", flush=True)
+        np.savez(cache, spot=spot, B=B, chi=chi)
     DATA[name] = dict(asg=asg, spot=spot, B=B, chi=chi, rank=class_spot_rank(name, asg))
     print(f"[{name}] done ({time.time()-t0:.0f}s)", flush=True)
 
@@ -100,7 +107,7 @@ for ri, name in enumerate(NAMES):
     dcmap = ListedColormap([mpl.colormaps.get_cmap("Spectral_r").resampled(nC)(k) for k in range(nC)])
     ax.imshow(np.vectorize(lambda c: rank[int(c)])(asg).astype(float), cmap=dcmap,
               interpolation="nearest", vmin=0, vmax=max(nC - 1, 1))
-    ax.set_ylabel(name, fontsize=13, fontweight="bold", rotation=0, labelpad=20, va="center")
+    ax.set_ylabel(DISP[name], fontsize=12, fontweight="bold", rotation=90, labelpad=8, va="center")
     if ri == 0: ax.set_title("DINO classes\n(discrete, ordered by spottiness)", fontsize=10)
     for ci, (key, lab) in enumerate(PARAMS):
         mp = d[key]; ax = fig.add_subplot(3, 4, ri * 4 + ci + 2); ax.set_xticks([]); ax.set_yticks([])
@@ -117,10 +124,7 @@ for ri, name in enumerate(NAMES):
         im = ax.imshow(mp, cmap="inferno", interpolation="nearest", vmin=vmin, vmax=vmax)
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
         if ri == 0: ax.set_title(lab + ("\n(per frame, 2×2 binned)" if BIN > 1 else "\n(per frame)"), fontsize=10)
-binlbl = f" with {BIN}×{BIN} detector binning (to reduce shot noise)" if BIN > 1 else ""
-fig.suptitle(f"As in Fig. 4 but cols 2–4 are computed PER FRAME{binlbl} (one value per single diffraction pattern, no grain/class averaging); col 1 is the same "
-             "DINO class map. Per-image 2–98 percentile clip with a heavy-tail cap.  [heat: dark=amorphous, bright=crystalline]", fontsize=10.5)
-fig.tight_layout(rect=[0, 0, 1, 0.93]); FigureCanvasAgg(fig)
+fig.tight_layout(); FigureCanvasAgg(fig)
 fname = f"imc_param_maps_heat_perframe_bin{BIN}.png" if BIN > 1 else "imc_param_maps_heat_perframe.png"
 for d in (OUT, REVIEW, BORIS):
     fig.savefig(os.path.join(d, fname), dpi=160, facecolor="white")
