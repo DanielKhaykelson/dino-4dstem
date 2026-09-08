@@ -2333,6 +2333,36 @@ class PrePanel(ctk.CTkFrame):
     # Worker threads must drive it through self.after(0, ...) — Tk widgets
     # may only be touched from the UI thread.
     # ------------------------------------------------------------------
+    @staticmethod
+    def _undo_tempdir(base: str) -> str:
+        """Hoist a path out of one of our own temp dirs.
+
+        Chaining bakes (denoise -> flatten) after answering "No" to save leaves
+        the active cube inside a temp dir.  The next bake would then offer to
+        save *permanently* into a folder that is deleted on exit, so derive the
+        permanent path from the parent instead.
+        """
+        d, n = os.path.split(base)
+        while os.path.basename(d).startswith("dinosr_"):
+            d = os.path.dirname(d)
+        return os.path.join(d, n)
+
+    def _mktemp_beside(self, prefix: str) -> str:
+        """Temp dir on the SAME volume as the loaded cube.
+
+        A denoised/flattened copy of a large cube is as big as the original
+        (10 GB is routine).  Putting it in %TEMP% would fill the system drive
+        and turn "save" into a cross-volume 10 GB copy; beside the source it is
+        an instant rename.  Falls back to the default temp dir.
+        """
+        try:
+            d = os.path.dirname(os.path.abspath(self.path))
+            if d and os.path.isdir(d) and os.access(d, os.W_OK):
+                return tempfile.mkdtemp(prefix=prefix, dir=d)
+        except Exception:
+            pass
+        return tempfile.mkdtemp(prefix=prefix)
+
     def _progress_popup(self, key: str, title: str, heading: str):
         setattr(self, f"_{key}_cancel", False)
         win = ctk.CTkToplevel(self)
@@ -2427,17 +2457,30 @@ class PrePanel(ctk.CTkFrame):
         dev = "GPU (CUDA)" if torch.cuda.is_available() else "CPU"
         # Sanity-check the intensity regime on a middle frame: binomial
         # splitting is exact only for raw Poisson counts.
+        # Binomial thinning needs genuine integer counts.  Counting detectors
+        # (Dectris, Merlin) normally store gain-corrected values, where one
+        # electron is ~0.7 rather than 1 — that is fine, we recover the quantum
+        # and divide by it.  Only warn when the data are neither.
         try:
-            y0, x0 = Ny // 2, Nx // 2
-            counts_ok = looks_like_counts(
-                np.asarray(self.cube[y0, x0], dtype=np.float32))
+            from denoise_n2n import estimate_count_quantum
+            samp = [np.asarray(self.cube[y, x], dtype=np.float32)
+                    for y in range(0, Ny, max(1, Ny // 6))
+                    for x in range(0, Nx, max(1, Nx // 6))]
+            quantum = estimate_count_quantum(samp)
+            qc = np.stack(samp) / quantum
+            counts_ok = bool(np.mean(np.abs(qc - np.round(qc)) < 0.05) > 0.90)
         except Exception:
-            counts_ok = True
+            quantum, counts_ok = 1.0, True
+        qnote = ("" if abs(quantum - 1.0) < 1e-6 else
+                 f"\n\nDetected a gain-corrected counting detector: one "
+                 f"electron ≈ {quantum:.3f}.  Counts are recovered "
+                 f"automatically before the split, and the denoised cube is "
+                 f"written back in the original units.")
         warn = ("" if counts_ok else
-                "\n\n⚠ This cube does NOT look like raw integer counts "
-                "(it may already be normalised / blurred / binned).  The "
-                "binomial split is then only APPROXIMATE — for the exact "
-                "method, denoise the raw detector cube first.")
+                "\n\n⚠ This cube does not look like counting data even after "
+                "gain correction (it may already be normalised / blurred / "
+                "binned).  The binomial split is then only APPROXIMATE — for "
+                "the exact method, denoise the raw detector cube first.")
         if not messagebox.askyesno(
                 "Denoise (Noise2Noise, binomial)",
                 f"Self-supervised denoising of this {Ny}×{Nx} scan "
@@ -2452,7 +2495,7 @@ class PrePanel(ctk.CTkFrame):
                 f"one exposure is enough.  Writes a new .cube.npy alongside "
                 f"the original; you'll see a before/after preview and be "
                 f"asked whether to save permanently."
-                f"{warn}\n\n"
+                f"{qnote}{warn}\n\n"
                 f"{'This will be slow on CPU — GPU is recommended.' if dev=='CPU' else ''}"
                 f"\nProceed?"):
             return
@@ -2514,7 +2557,7 @@ class PrePanel(ctk.CTkFrame):
             base = os.path.splitext(self.path)[0]
             base = base[:-5] if base.endswith(".cube") else base
             new_basename = os.path.basename(base) + "_n2n"
-            tmp_dir = tempfile.mkdtemp(prefix="dinosr_n2n_")
+            tmp_dir = self._mktemp_beside("dinosr_n2n_")
             tmp_path = os.path.join(tmp_dir, new_basename + ".cube.npy")
             out = np.lib.format.open_memmap(
                 tmp_path, mode="w+", dtype=np.float32, shape=(Ny, Nx, H, W))
@@ -2528,7 +2571,13 @@ class PrePanel(ctk.CTkFrame):
                            f"({100*row/ntot:.0f}%)"
                            f"{self._eta_text(row, ntot, t0)}")
 
+            # Infer with the same geometry the network trained on: if it was
+            # trained on crops, apply it tile-by-tile (blended), otherwise a
+            # whole large frame is an input distribution it never saw.
+            _crop = hist.get("crop")
             denoise_cube_into(model, self.cube, out, device=dev,
+                              quantum=hist.get("quantum", 1.0),
+                              tile=int(_crop[0]) if _crop else 0,
                               progress=_infer_prog, cancel=cancelled)
             out.flush(); del out
             self._post(lambda: (self._progress_close("denoise"),
@@ -2595,13 +2644,36 @@ class PrePanel(ctk.CTkFrame):
     def _denoise_finish(self, tmp_path, original_base, new_basename, hist):
         # Before/after look first, so the save decision is informed.
         self._denoise_preview(tmp_path)
-        permanent_path = original_base + "_n2n.cube.npy"
+        permanent_path = self._undo_tempdir(original_base) + "_n2n.cube.npy"
         dev = hist.get("device", "?")
+        # Did the network actually beat doing nothing?  The honest check
+        # without a clean reference: predicting one half from the other must
+        # beat using that half as-is.  An under-trained run fails this and
+        # produces output WORSE than the raw data, so say so plainly.
+        vl = (hist.get("val_loss") or [float("nan")])[-1]
+        vi = hist.get("val_loss_identity", float("nan"))
+        try:
+            beat = vl < vi
+        except Exception:
+            beat = True
+        quality = ("" if beat else
+                   "\n\n⚠ WARNING: the network did NOT beat the no-op "
+                   "baseline (val %.4f vs %.4f). It was probably trained too "
+                   "briefly for this data, and the result may be WORSE than "
+                   "the raw cube. Recommend discarding this and re-running "
+                   "(a GPU, or a smaller detector crop, gives it more "
+                   "steps).\n" % (vl, vi))
+        steps = hist.get("epochs", 0) * hist.get("steps_per_epoch", 0)
         save = messagebox.askyesno(
             "Save denoised cube?",
             f"Noise2Noise (binomial) denoising complete.\n"
             f"  network: {hist.get('n_params', '?')} params, "
-            f"trained on {hist.get('n_train', '?')} patterns ({dev})\n\n"
+            f"trained on {hist.get('n_train', '?')} patterns ({dev})\n"
+            f"  {steps} steps"
+            f"{', crop %sx%s' % tuple(hist['crop']) if hist.get('crop') else ''}"
+            f"{', quantum %.3f' % hist['quantum'] if hist.get('quantum', 1.0) != 1.0 else ''}\n"
+            f"  val loss {vl:.4f}  (no-op baseline {vi:.4f})"
+            f"{quality}\n\n"
             f"Save permanently to:\n  {permanent_path}\n\n"
             f"  Yes → keep file (re-loadable in future sessions).\n"
             f"  No  → keep this run only; temp file deleted on exit.")
@@ -2703,7 +2775,7 @@ class PrePanel(ctk.CTkFrame):
             base = os.path.splitext(self.path)[0]
             base = base[:-5] if base.endswith(".cube") else base
             new_basename = os.path.basename(base) + "_flat"
-            tmp_dir = tempfile.mkdtemp(prefix="dinosr_flat_")
+            tmp_dir = self._mktemp_beside("dinosr_flat_")
             tmp_path = os.path.join(tmp_dir, new_basename + ".cube.npy")
             out = np.lib.format.open_memmap(
                 tmp_path, mode="w+", dtype=np.float32, shape=(Ny, Nx, H, W))
@@ -2790,7 +2862,7 @@ class PrePanel(ctk.CTkFrame):
 
     def _flatten_finish(self, tmp_path, original_base, new_basename, mode):
         self._flatten_preview(tmp_path, mode)
-        permanent_path = original_base + "_flat.cube.npy"
+        permanent_path = self._undo_tempdir(original_base) + "_flat.cube.npy"
         save = messagebox.askyesno(
             "Save flattened cube?",
             f"Radial-background flattening ({mode}) applied to every "
