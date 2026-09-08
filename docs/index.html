@@ -166,6 +166,8 @@
   <nav>
     <a href="#what">What it does</a>
     <a href="#data">Your data</a>
+    <a href="#denoise">Denoising</a>
+    <a href="#cite">Cite</a>
     <a href="#install">Install</a>
     <a href="#gallery">Gallery</a>
   </nav>
@@ -241,6 +243,38 @@
   </div>
 </div></section>
 
+<section id="denoise"><div class="wrap">
+  <div class="sec-head">
+    <span class="eyebrow">Low dose?</span>
+    <h2>Denoise it first — from a single exposure.</h2>
+    <p>Beam-sensitive samples force you below the dose that gives a clean pattern.
+       The Pre-processing tab denoises <b>self-supervised</b>: no clean reference,
+       no repeated acquisition, nothing to tune.</p>
+  </div>
+  <div class="formats">
+    <div class="fmt">
+      <div class="code mono"><span class="dot" style="background:var(--c1)"></span>Noise2Noise (binomial)</div>
+      <div class="src">A fair coin flip per electron splits each pattern into two
+        independent half-dose exposures of the same signal (Poisson thinning). A
+        small dose-equivariant network maps one half to the other, then runs on
+        the full exposure — counts preserved, no parameter to tune.</div>
+    </div>
+    <div class="fmt">
+      <div class="code mono"><span class="dot" style="background:var(--c2)"></span>Flatten (radial background)</div>
+      <div class="src">Removes the azimuthally-symmetric radial background — the
+        direct-beam skirt and amorphous halo — so the Bragg and orientation
+        signal stands out.</div>
+    </div>
+    <div class="fmt">
+      <div class="code mono"><span class="dot" style="background:var(--c3)"></span>The other algorithms</div>
+      <div class="src">The notebooks compare <b>Noise2Void</b>, <b>Noise2Self</b>
+        and scan-to-scan Noise2Noise against the binomial split — with the math,
+        and why the blind-spot methods need a hyperparameter and this one
+        doesn't.</div>
+    </div>
+  </div>
+</div></section>
+
 <section id="samples"><div class="wrap">
   <div class="sec-head">
     <span class="eyebrow">Made for real materials</span>
@@ -254,6 +288,21 @@
     <span class="tag"><b>·</b> Amorphous vs crystalline domains</span>
     <span class="tag"><b>·</b> Texture &amp; orientation</span>
     <span class="tag"><b>·</b> Grain &amp; domain analysis</span>
+  </div>
+</div></section>
+
+<section id="cite"><div class="wrap">
+  <div class="sec-head">
+    <span class="eyebrow">Citing</span>
+    <h2>Using it in your research? Please cite the paper.</h2>
+    <p><b>DINO4DSTEM: A self-supervised framework for structural discovery in
+       4D-STEM.</b><br>
+       Daniel Khaykelson, Lothar Houben, Boris Rybtchinski &middot;
+       arXiv:2608.15098 (2026)</p>
+    <p><a class="btn btn-primary"
+          href="https://arxiv.org/abs/2608.15098">Read the paper on arXiv</a></p>
+    <p style="margin-top:14px">On GitHub, <b>“Cite this repository”</b> in the
+       sidebar copies the BibTeX or APA entry for you.</p>
   </div>
 </div></section>
 

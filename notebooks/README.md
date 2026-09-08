@@ -25,6 +25,20 @@ top-to-bottom.
 
 Run them **in order** — each uses what the previous one produced.
 
+## Denoising methods
+
+| Notebook | What it covers |
+|---|---|
+| `n2_methods_demo.ipynb` | **self-supervised denoising of low-dose diffraction** — the Noise2Noise math (why two noisy images are enough), Poisson thinning for the **binomial** split, and how **Noise2Void** / **Noise2Self** differ from it and from each other, including the hyperparameter each one needs |
+
+The GUI's **Pre-processing ▸ Denoise (Noise2Noise, binomial)** button implements
+the binomial pairing only — it needs a single exposure and has nothing to tune.
+This notebook is where the *other* algorithms are explained and compared.
+
+> Reference notebook: it was written against the cellulose low-dose study and
+> its first cell points at that project's data (`D:\SU\Cellulose\denoise`), so
+> read it for the method and the results rather than running it here.
+
 `ws2_utils.py` holds the shared helpers (phantom generation, virtual images, a
 live drag-to-select ROI, and the metrics). Import it with
 `import ws2_utils as wu`.
