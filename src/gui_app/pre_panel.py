@@ -2367,19 +2367,25 @@ class PrePanel(ctk.CTkFrame):
         setattr(self, f"_{key}_cancel", False)
         win = ctk.CTkToplevel(self)
         win.title(title)
-        win.geometry("470x180")
+        win.geometry("500x235")
         try:
             win.after(150, lambda: (win.winfo_exists()
                                     and (win.lift(), win.focus_force())))
         except Exception:
             pass
         ctk.CTkLabel(win, text=heading,
-                     font=("Segoe UI", 12, "bold")).pack(pady=(16, 6))
+                     font=("Segoe UI", 12, "bold")).pack(pady=(14, 4))
+        # what the run actually decided to do (geometry, steps, estimate)
+        note = ctk.CTkLabel(win, text="", font=("Segoe UI", 9),
+                            justify="center", wraplength=460,
+                            text_color=("#555", "#aaa"))
+        note.pack(pady=(0, 4))
         lbl = ctk.CTkLabel(win, text="starting…", font=("Consolas", 10))
         lbl.pack(pady=2)
-        bar = ctk.CTkProgressBar(win, width=400)
+        bar = ctk.CTkProgressBar(win, width=430)
         bar.set(0.0)
         bar.pack(pady=8)
+        setattr(self, f"_{key}_prog_note", note)
 
         def _cancel():
             setattr(self, f"_{key}_cancel", True)
@@ -2416,6 +2422,13 @@ class PrePanel(ctk.CTkFrame):
         # the popup is closed
         try:
             getattr(self, f"_{key}_status").configure(text=f"{key}: {text}")
+        except Exception:
+            pass
+
+    def _progress_note(self, key: str, text: str):
+        """Persistent line in a progress popup saying what the run decided."""
+        try:
+            getattr(self, f"_{key}_prog_note").configure(text=text)
         except Exception:
             pass
 
@@ -2471,6 +2484,16 @@ class PrePanel(ctk.CTkFrame):
             counts_ok = bool(np.mean(np.abs(qc - np.round(qc)) < 0.05) > 0.90)
         except Exception:
             quantum, counts_ok = 1.0, True
+        # Whole frames are preferred; the run measures its own step time and
+        # only falls back to crops if whole frames are unaffordable.  Say so,
+        # since it changes what the network sees.
+        cropnote = ("" if max(H, W) <= 256 else
+                    f"\n\nThis detector is {H}×{W}.  Whole frames are tried "
+                    f"first; if they prove too slow, the network trains on "
+                    f"random 256×256 CROPS instead and is then applied "
+                    f"tile-by-tile (blended) so every pixel is still "
+                    f"denoised.  The progress window will tell you which was "
+                    f"chosen.")
         qnote = ("" if abs(quantum - 1.0) < 1e-6 else
                  f"\n\nDetected a gain-corrected counting detector: one "
                  f"electron ≈ {quantum:.3f}.  Counts are recovered "
@@ -2495,7 +2518,7 @@ class PrePanel(ctk.CTkFrame):
                 f"one exposure is enough.  Writes a new .cube.npy alongside "
                 f"the original; you'll see a before/after preview and be "
                 f"asked whether to save permanently."
-                f"{qnote}{warn}\n\n"
+                f"{cropnote}{qnote}{warn}\n\n"
                 f"{'This will be slow on CPU — GPU is recommended.' if dev=='CPU' else ''}"
                 f"\nProceed?"):
             return
@@ -2549,10 +2572,27 @@ class PrePanel(ctk.CTkFrame):
                 self._denoise_loss = (f"   epoch {ep}/{E}  "
                                       f"train {tl:.3f}  val {vl:.3f}")
 
+            def _on_plan(p):
+                # The whole-frame / crop choice is made by timing real steps,
+                # so it can only be reported once training is under way.
+                fr = p.get("frame") or [0, 0]
+                cp = p.get("crop")
+                if cp:
+                    geo = (f"{fr[0]}×{fr[1]} detector → training on "
+                           f"{cp[0]}×{cp[1]} crops (applied tile-by-tile)")
+                else:
+                    geo = f"training on whole {fr[0]}×{fr[1]} frames"
+                self._denoise_geo = geo
+                nsteps = p.get("epochs", 0) * p.get("steps_per_epoch", 0)
+                self._post(self._progress_note, "denoise",
+                           f"{geo}\n{nsteps} steps, "
+                           f"~{p.get('est_minutes', 0):.1f} min "
+                           f"({p.get('step_seconds', 0)*1000:.0f} ms/step)")
+
             model, hist = train_binomial_n2n(
                 self.cube, device=dev, progress=_train_prog,
                 load_progress=_load_prog, step_progress=_step_prog,
-                cancel=cancelled)
+                on_plan=_on_plan, cancel=cancelled)
 
             base = os.path.splitext(self.path)[0]
             base = base[:-5] if base.endswith(".cube") else base
@@ -2664,13 +2704,18 @@ class PrePanel(ctk.CTkFrame):
                    "(a GPU, or a smaller detector crop, gives it more "
                    "steps).\n" % (vl, vi))
         steps = hist.get("epochs", 0) * hist.get("steps_per_epoch", 0)
+        fr = hist.get("frame") or [0, 0]
+        cp = hist.get("crop")
+        geo = (f"  trained on {cp[0]}×{cp[1]} CROPS of the {fr[0]}×{fr[1]} "
+               f"frames, then applied tile-by-tile\n" if cp else
+               f"  trained on whole {fr[0]}×{fr[1]} frames\n")
         save = messagebox.askyesno(
             "Save denoised cube?",
             f"Noise2Noise (binomial) denoising complete.\n"
             f"  network: {hist.get('n_params', '?')} params, "
             f"trained on {hist.get('n_train', '?')} patterns ({dev})\n"
+            f"{geo}"
             f"  {steps} steps"
-            f"{', crop %sx%s' % tuple(hist['crop']) if hist.get('crop') else ''}"
             f"{', quantum %.3f' % hist['quantum'] if hist.get('quantum', 1.0) != 1.0 else ''}\n"
             f"  val loss {vl:.4f}  (no-op baseline {vi:.4f})"
             f"{quality}\n\n"

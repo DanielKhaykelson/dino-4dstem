@@ -275,7 +275,7 @@ def _sample_training_stack(cube, max_patterns: int, seed: int = 0,
 def train_binomial_n2n(cube, *, target_steps: int = 10000,
                        min_steps: int = 1500,
                        min_epochs: int = 20, max_epochs: int = 250,
-                       lr: float = 2e-3, crop: int = 192,
+                       lr: float = 2e-3, crop: int = 256,
                        max_seconds: float = 600.0,
                        batch_size: int = 16, base: int = 16, depth: int = 3,
                        input_transform: str = "anscombe",
@@ -288,6 +288,7 @@ def train_binomial_n2n(cube, *, target_steps: int = 10000,
                                                         None]] = None,
                        step_progress: Optional[Callable[[int, int],
                                                         None]] = None,
+                       on_plan: Optional[Callable[[dict], None]] = None,
                        cancel: Optional[Callable[[], bool]] = None):
     """Train a SmallUNet on binomially-split pairs drawn from ``cube``.
 
@@ -422,7 +423,21 @@ def train_binomial_n2n(cube, *, target_steps: int = 10000,
 
     # Try whole frames first; fall back to crops only if they are unaffordable
     # (too slow to reach min_steps in the budget) or do not fit in memory.
+    # Peak activation memory is linear in batch*pixels: measured 2.13 GB at
+    # batch 16 (doubled) on 192x192, hence ~15 GB at 512x512.  Don't even probe
+    # whole frames if that would claim most of the free VRAM -- it would risk
+    # an OOM here and could disrupt anything else sharing the GPU.
+    est_gb = 2.13 * (H * W) / (192.0 * 192.0) * (batch_size / 16.0)
+    too_big = False
+    if dev.type == "cuda":
+        try:
+            free_b, _tot = torch.cuda.mem_get_info()
+            too_big = est_gb > 0.6 * free_b / 1e9
+        except Exception:
+            too_big = False
     try:
+        if too_big:
+            raise RuntimeError("skip whole-frame probe: insufficient memory")
         step_s = _probe()
         oom = False
     except RuntimeError as e:                # typically CUDA out of memory
@@ -463,7 +478,13 @@ def train_binomial_n2n(cube, *, target_steps: int = 10000,
             "crop": [ch, cw] if cropping else None,
             "quantum": quantum,
             "step_seconds": step_s,
+            "frame": [H, W],
             "est_minutes": epochs * steps * step_s / 60.0}
+    # Tell the caller what geometry was actually chosen, as soon as it is
+    # known -- the decision is made by measurement, so it cannot be announced
+    # before training starts.
+    if on_plan is not None:
+        on_plan(dict(hist))
 
     total_steps = epochs * steps
     gstep = 0
