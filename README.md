@@ -93,6 +93,34 @@ stays on your machine.
 
 ---
 
+## Low dose? Denoise it first.
+
+Beam-sensitive samples force you below the dose that gives a clean pattern. The
+**Pre-processing** tab now has one-click **self-supervised denoising** — no clean
+reference, no repeated acquisition. **One exposure is enough.**
+
+**🌀 Denoise (Noise2Noise, binomial).** Every pattern is a Poisson draw, so a
+fair coin flip per electron deals its counts into two *independent* half-dose
+exposures of the same signal (Poisson thinning). A small, deliberately
+low-capacity **dose-equivariant** network learns to map one half to the other,
+then runs on the full exposure. Total counts are preserved — and there is
+**no parameter to tune**.
+
+**📉 Flatten (radial background).** Removes the azimuthally-symmetric radial
+background — the direct-beam skirt and the amorphous halo — so the Bragg and
+orientation signal stands out. Subtract the azimuthal median, or divide by the
+azimuthal mean.
+
+Both show a **before/after preview**, then bake a new cube alongside the
+original — your raw file is never modified.
+
+> **The other algorithms are in the notebooks.** `n2_methods_demo.ipynb`
+> compares **Noise2Void**, **Noise2Self** and **scan-to-scan Noise2Noise**
+> against the binomial split — with the math behind each, and why the
+> blind-spot methods carry a hyperparameter while the binomial split does not.
+
+---
+
 ## Get started — two ways
 
 Both need **[Miniconda](https://www.anaconda.com/download/success)** (free)
@@ -116,6 +144,7 @@ then run the two installers. Update anytime with `git pull`.
 ## Learn more
 
 - 🧭 **What it does &amp; results** — [`PROJECT_SUMMARY.md`](PROJECT_SUMMARY.md)
+- 📓 **Tutorial notebooks** — [`notebooks/`](notebooks/) — phantom → train → analyse → baselines, plus the **denoising methods** comparison (N2N binomial, Noise2Void, Noise2Self)
 - 🧠 **The methods explained** (DINO, NMF, clustering, PCA) — [`docs/assistant/CONCEPTS.md`](docs/assistant/CONCEPTS.md)
 - 📕 **Full manual** — [`docs/USER_MANUAL.pdf`](docs/USER_MANUAL.pdf)
 - 🛠️ **Install guide** — [`INSTALL.md`](INSTALL.md)

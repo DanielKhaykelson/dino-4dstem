@@ -108,6 +108,8 @@ class PrePanel(ctk.CTkFrame):
         self._bin_busy = False
         self._ellip_busy = False
         self._hotpix_busy = False
+        self._denoise_busy = False       # N2N binomial denoise in progress
+        self._flatten_busy = False       # radial-background flatten in progress
         self._hotpix_mask = None        # last detected bad-pixel mask (H, W)
         self._folder_busy = False       # image-folder → cube build in progress
         self._nbed_overlay_center: "tuple[float, float] | None" = None
@@ -155,6 +157,10 @@ class PrePanel(ctk.CTkFrame):
         self.ellip_theta = ctk.DoubleVar(value=0.0)      # deg
         self.idx = ctk.IntVar(value=0)
         self.cmap = ctk.StringVar(value="inferno")
+        # radial-background flatten mode: subtract azimuthal median (the
+        # N2N-pipeline flatten, signed) or divide by azimuthal mean
+        # (ratio, background -> ~1, non-negative).
+        self.flatten_mode = ctk.StringVar(value="subtract")
 
         self._build()
 
@@ -445,6 +451,108 @@ class PrePanel(ctk.CTkFrame):
             font=("Consolas", 9), justify="left",
             text_color=("#444", "#aaa"))
         self._hotpix_status.pack(anchor="w", padx=10, pady=(0, 4))
+
+        # ---- Self-supervised denoising (Noise2Noise, binomial) ------
+        # Trains a tiny dose-equivariant U-Net on binomially-split halves
+        # of each pattern (Poisson thinning → two independent half-dose
+        # exposures of the same signal), then applies it to the whole
+        # cube.  Needs no clean reference and no repeated acquisition —
+        # one exposure is enough.  Writes a new .cube.npy and switches to
+        # it (original untouched), like the blur / hot-pixel bakes.
+        dn_box = ctk.CTkFrame(ctrl, border_width=1)
+        dn_box.pack(fill="x", padx=6, pady=(8, 4))
+        dn_t = ctk.CTkFrame(dn_box, fg_color="transparent")
+        dn_t.pack(fill="x", padx=4, pady=(4, 0))
+        ctk.CTkLabel(dn_t, text="Denoising (self-supervised)",
+                      font=("Segoe UI", 11, "bold")).pack(side="left")
+        add_help_button(dn_t,
+            "Noise2Noise by BINOMIAL SPLITTING — self-supervised, needs "
+            "no clean reference.\n\n"
+            "Each low-dose diffraction pattern is a Poisson draw: every "
+            "pixel holds a count k ~ Poisson(λ), and λ is the noise-free "
+            "pattern.  Flip a fair coin for every electron and deal the "
+            "counts into two piles: h1 ~ Binomial(k, ½), h2 = k − h1.  By "
+            "Poisson thinning h1 and h2 are two INDEPENDENT half-dose "
+            "exposures of the SAME pattern — exactly the pair Noise2Noise "
+            "needs.  A network trained to map one noisy half to the other "
+            "converges to the signal, because the noise has zero "
+            "conditional mean.\n\n"
+            "A deliberately small, dose-equivariant U-Net is trained on a "
+            "fresh random split every step (it can never memorise a noise "
+            "realisation), then applied to the FULL exposure of every "
+            "pattern.  Writes a new <base>_n2n.cube.npy and switches to "
+            "it; the original file is untouched.  You are asked whether to "
+            "save permanently after a before/after preview.\n\n"
+            "Best on RAW integer-count data (Merlin, EMPAD, Dectris).  On "
+            "an already-normalised cube the split is only approximate and "
+            "you'll get a warning.").pack(side="left", padx=(6, 0))
+        ctk.CTkLabel(dn_box,
+            text="Binomial Noise2Noise — one exposure is enough; no clean "
+                 "reference needed.",
+            font=("Segoe UI", 9), wraplength=300, justify="left",
+            text_color=("#666", "#999")).pack(anchor="w", padx=8, pady=(2, 2))
+        dn_row = ctk.CTkFrame(dn_box, fg_color="transparent")
+        dn_row.pack(fill="x", padx=8, pady=(2, 4))
+        self._denoise_btn = ctk.CTkButton(dn_row,
+            text="Denoise (Noise2Noise, binomial)…",
+            width=300, fg_color=("#2D5FA8", "#1F4E8F"),
+            command=self._denoise_apply_all)
+        self._denoise_btn.pack(side="left")
+        self._denoise_status = ctk.CTkLabel(dn_box, text="",
+            font=("Consolas", 9), wraplength=300, justify="left",
+            text_color=("#444", "#aaa"))
+        self._denoise_status.pack(anchor="w", padx=10, pady=(0, 4))
+
+        # ---- Radial-background flattening ---------------------------
+        # Removes the smooth, azimuthally-symmetric radial background
+        # (direct-beam skirt + amorphous halo) from every pattern so the
+        # anisotropic Bragg / orientation signal stands out.  This is the
+        # "flatten" step of the low-dose N2N workflow.  Bakes a new
+        # .cube.npy and switches to it (original untouched).
+        fl_box = ctk.CTkFrame(ctrl, border_width=1)
+        fl_box.pack(fill="x", padx=6, pady=(8, 4))
+        fl_t = ctk.CTkFrame(fl_box, fg_color="transparent")
+        fl_t.pack(fill="x", padx=4, pady=(4, 0))
+        ctk.CTkLabel(fl_t, text="Flatten (radial background)",
+                      font=("Segoe UI", 11, "bold")).pack(side="left")
+        add_help_button(fl_t,
+            "Removes the smooth, azimuthally-symmetric radial background of "
+            "each diffraction pattern — the direct-beam skirt and amorphous "
+            "halo — leaving the anisotropic Bragg / orientation signal.\n\n"
+            "The pattern intensity is dominated by a steep isotropic falloff "
+            "with radius that is nearly identical in every frame and carries "
+            "no orientation information; it falls by orders of magnitude over "
+            "the first tens of pixels, so no single stretch shows both it and "
+            "the weak reflections.  We estimate the background at each radius "
+            "and remove it.  In the N2N workflow this is essential: without "
+            "it a network just learns the falloff.\n\n"
+            "Modes:\n"
+            "  • subtract — subtract the azimuthal MEDIAN at each radius "
+            "(robust to Bragg peaks; signed residual).  This is the flatten "
+            "used with N2N-binomial denoising.\n"
+            "  • divide — divide by the azimuthal MEAN at each radius "
+            "(background → ~1, stays non-negative; friendlier for NMF).\n\n"
+            "Flattening is taken about the frame centre — centre the beam "
+            "first (COM / NBED) for best results.  Bakes a new "
+            "<base>_flat.cube.npy and switches to it; original untouched.")\
+            .pack(side="left", padx=(6, 0))
+        fl_row = ctk.CTkFrame(fl_box, fg_color="transparent")
+        fl_row.pack(fill="x", padx=8, pady=(4, 2))
+        ctk.CTkLabel(fl_row, text="mode:").pack(side="left", padx=(2, 4))
+        ctk.CTkOptionMenu(fl_row, variable=self.flatten_mode,
+                           values=["subtract", "divide"], width=110
+                           ).pack(side="left", padx=2)
+        fl_row2 = ctk.CTkFrame(fl_box, fg_color="transparent")
+        fl_row2.pack(fill="x", padx=8, pady=(0, 4))
+        self._flatten_btn = ctk.CTkButton(fl_row2,
+            text="Flatten radial background…", width=300,
+            fg_color=("#2D5FA8", "#1F4E8F"),
+            command=self._flatten_apply_all)
+        self._flatten_btn.pack(side="left")
+        self._flatten_status = ctk.CTkLabel(fl_box, text="",
+            font=("Consolas", 9), wraplength=300, justify="left",
+            text_color=("#444", "#aaa"))
+        self._flatten_status.pack(anchor="w", padx=10, pady=(0, 4))
 
         # Push current crop / beam-mask / polar-mask / COM into the Training tab.
         load_row = ctk.CTkFrame(ctrl, fg_color="transparent")
@@ -2213,6 +2321,396 @@ class PrePanel(ctk.CTkFrame):
         self._hotpix_status.configure(
             text=f"hot-pixel done: {nbad} px removed.  "
                  f"active sample: {self.sample_key}")
+        try:
+            if self.on_state_change is not None:
+                self.on_state_change("loaded", sample_key=self.sample_key,
+                                     path=final_path)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Self-supervised denoising — Noise2Noise by binomial splitting.
+    # Trains a tiny dose-equivariant U-Net on binomially-split halves of
+    # each pattern, applies it to the whole cube, and bakes a new
+    # .cube.npy (original untouched), like the blur / hot-pixel bakes.
+    # ------------------------------------------------------------------
+    def _denoise_apply_all(self):
+        if self.cube is None:
+            messagebox.showinfo("cube", "Load a cube first."); return
+        if (self._denoise_busy or self._blur_busy or self._nbed_busy
+                or self._ellip_busy or self._bin_busy or self._hotpix_busy):
+            messagebox.showinfo("denoise",
+                "Another full-cube op is in progress — wait first."); return
+        try:
+            import torch
+            from denoise_n2n import looks_like_counts
+        except Exception as e:
+            messagebox.showerror("denoise",
+                f"PyTorch / denoise module unavailable:\n{e}"); return
+        Ny, Nx, H, W = self.cube.shape
+        dev = "GPU (CUDA)" if torch.cuda.is_available() else "CPU"
+        # Sanity-check the intensity regime on a middle frame: binomial
+        # splitting is exact only for raw Poisson counts.
+        try:
+            y0, x0 = Ny // 2, Nx // 2
+            counts_ok = looks_like_counts(
+                np.asarray(self.cube[y0, x0], dtype=np.float32))
+        except Exception:
+            counts_ok = True
+        warn = ("" if counts_ok else
+                "\n\n⚠ This cube does NOT look like raw integer counts "
+                "(it may already be normalised / blurred / binned).  The "
+                "binomial split is then only APPROXIMATE — for the exact "
+                "method, denoise the raw detector cube first.")
+        if not messagebox.askyesno(
+                "Denoise (Noise2Noise, binomial)",
+                f"Self-supervised denoising of this {Ny}×{Nx} scan "
+                f"(H×W = {H}×{W}), on {dev}.\n\n"
+                f"Step 1 — split every pattern's counts into two "
+                f"independent half-dose exposures (Poisson thinning) and "
+                f"train a small dose-equivariant U-Net to map one half to "
+                f"the other (training length adapts to the scan size).\n"
+                f"Step 2 — apply the trained network to the full exposure "
+                f"of all {Ny*Nx} patterns.\n\n"
+                f"No clean reference or repeated acquisition is needed — "
+                f"one exposure is enough.  Writes a new .cube.npy alongside "
+                f"the original; you'll see a before/after preview and be "
+                f"asked whether to save permanently."
+                f"{warn}\n\n"
+                f"{'This will be slow on CPU — GPU is recommended.' if dev=='CPU' else ''}"
+                f"\nProceed?"):
+            return
+        self._denoise_busy = True
+        try:
+            self._denoise_btn.configure(state="disabled")
+        except Exception:
+            pass
+        self._denoise_status.configure(text="denoise: starting…")
+        threading.Thread(target=self._denoise_worker,
+                         daemon=True).start()
+
+    def _denoise_worker(self):
+        tmp_path = None
+        try:
+            import torch
+            from denoise_n2n import train_binomial_n2n, denoise_cube_into
+            dev = "cuda" if torch.cuda.is_available() else "cpu"
+            Ny, Nx, H, W = self.cube.shape
+
+            def _train_prog(ep, E, tl, vl):
+                self.after(0, lambda ep=ep, E=E, tl=tl, vl=vl:
+                    self._denoise_status.configure(
+                        text=f"denoise: training epoch {ep}/{E}  "
+                             f"train {tl:.3f}  val {vl:.3f}"))
+
+            model, hist = train_binomial_n2n(
+                self.cube, device=dev, progress=_train_prog)
+
+            base = os.path.splitext(self.path)[0]
+            base = base[:-5] if base.endswith(".cube") else base
+            new_basename = os.path.basename(base) + "_n2n"
+            tmp_dir = tempfile.mkdtemp(prefix="dinosr_n2n_")
+            tmp_path = os.path.join(tmp_dir, new_basename + ".cube.npy")
+            out = np.lib.format.open_memmap(
+                tmp_path, mode="w+", dtype=np.float32, shape=(Ny, Nx, H, W))
+            t0 = time.time()
+
+            def _infer_prog(row, ntot):
+                dt = time.time() - t0
+                eta = dt * (ntot - row) / max(row, 1)
+                self.after(0, lambda row=row, ntot=ntot, eta=eta:
+                    self._denoise_status.configure(
+                        text=f"denoise: applying {row}/{ntot} rows  "
+                             f"({100*row/ntot:.0f}%)  eta {eta:.0f}s"))
+
+            denoise_cube_into(model, self.cube, out, device=dev,
+                              progress=_infer_prog)
+            out.flush(); del out
+            self.after(0, lambda: self._denoise_finish(
+                tmp_path, base, new_basename, hist))
+        except Exception as e:
+            err = repr(e)
+            if tmp_path:
+                _register_atexit_cleanup(
+                    tmp_path, cleanup_dir=os.path.dirname(tmp_path))
+            self.after(0, lambda: messagebox.showerror("denoise failed", err))
+            self.after(0, lambda: self._denoise_status.configure(
+                text=f"denoise failed: {err}"))
+            self.after(0, self._denoise_reenable)
+        finally:
+            self._denoise_busy = False
+
+    def _denoise_reenable(self):
+        try:
+            self._denoise_btn.configure(state="normal")
+        except Exception:
+            pass
+
+    def _denoise_preview(self, tmp_path: str):
+        """Before/after popup on the current frame (after = temp cube)."""
+        try:
+            after_cube = np.load(tmp_path, mmap_mode="r", allow_pickle=True)
+            Ny, Nx = self.cube.shape[:2]
+            idx = int(self.idx.get())
+            y, x = divmod(idx, Nx)
+            y = min(max(y, 0), Ny - 1); x = min(max(x, 0), Nx - 1)
+            before = np.asarray(self.cube[y, x], dtype=np.float32)
+            after = np.asarray(after_cube[y, x], dtype=np.float32)
+        except Exception:
+            return
+        win = ctk.CTkToplevel(self)
+        win.title(f"Denoise preview — position (y={y}, x={x})")
+        try:
+            win.after(200, lambda: (win.winfo_exists()
+                                    and (win.lift(), win.focus_force())))
+        except Exception:
+            pass
+        fig = Figure(figsize=(8.6, 4.4), dpi=100)
+        cmap = self.cmap.get()
+        vmax = float(np.percentile(before, 99.5)) or 1.0
+        for i, (im, ttl) in enumerate(
+                ((before, "raw (noisy)"), (after, "denoised (N2N binomial)"))):
+            ax = fig.add_subplot(1, 2, i + 1)
+            ax.imshow(np.log1p(np.clip(im, 0, None)), cmap=cmap,
+                      interpolation="nearest")
+            ax.set_title(ttl, fontsize=11)
+            ax.set_xticks([]); ax.set_yticks([])
+        fig.suptitle("log-scaled; total counts are preserved", fontsize=10)
+        fig.tight_layout()
+        canvas = FigureCanvasTkAgg(fig, master=win)
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+        canvas.draw()
+
+    def _denoise_finish(self, tmp_path, original_base, new_basename, hist):
+        # Before/after look first, so the save decision is informed.
+        self._denoise_preview(tmp_path)
+        permanent_path = original_base + "_n2n.cube.npy"
+        dev = hist.get("device", "?")
+        save = messagebox.askyesno(
+            "Save denoised cube?",
+            f"Noise2Noise (binomial) denoising complete.\n"
+            f"  network: {hist.get('n_params', '?')} params, "
+            f"trained on {hist.get('n_train', '?')} patterns ({dev})\n\n"
+            f"Save permanently to:\n  {permanent_path}\n\n"
+            f"  Yes → keep file (re-loadable in future sessions).\n"
+            f"  No  → keep this run only; temp file deleted on exit.")
+        if save:
+            try:
+                shutil.move(tmp_path, permanent_path)
+                final_path = permanent_path
+                try: os.rmdir(os.path.dirname(tmp_path))
+                except Exception: pass
+            except Exception as e:
+                messagebox.showerror("save failed",
+                    f"Could not move temp file:\n{e}\n"
+                    f"Cube usable from: {tmp_path}")
+                final_path = tmp_path
+                _register_atexit_cleanup(tmp_path)
+        else:
+            final_path = tmp_path
+            _register_atexit_cleanup(
+                tmp_path, cleanup_dir=os.path.dirname(tmp_path))
+        try:
+            self.cube = np.load(final_path, mmap_mode="r", allow_pickle=True)
+            Ny, Nx, _H, _W = self.cube.shape
+            self.path = final_path
+            self._path_var.set(final_path)
+            self.sample_key = register_runtime_sample(
+                final_path, scan_shape=(Ny, Nx),
+                vmax=float(self.vmax.get()),
+                center_mask_radius=self._effective_center_mask_radius())
+        except Exception as e:
+            messagebox.showerror("reload failed",
+                f"Denoised cube is at:\n{final_path}\n\nbut reload "
+                f"failed: {e}")
+            self._denoise_reenable(); return
+        self._refresh()
+        self._denoise_status.configure(
+            text=f"denoise done.  active sample: {self.sample_key}")
+        self._denoise_reenable()
+        try:
+            if self.on_state_change is not None:
+                self.on_state_change("loaded", sample_key=self.sample_key,
+                                     path=final_path)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Radial-background flattening — remove the azimuthally-symmetric
+    # radial background of every pattern (subtract azimuthal median, or
+    # divide by azimuthal mean).  Bakes a new .cube.npy and switches.
+    # ------------------------------------------------------------------
+    def _flatten_apply_all(self):
+        if self.cube is None:
+            messagebox.showinfo("cube", "Load a cube first."); return
+        if (self._flatten_busy or self._denoise_busy or self._blur_busy
+                or self._nbed_busy or self._ellip_busy or self._bin_busy
+                or self._hotpix_busy):
+            messagebox.showinfo("flatten",
+                "Another full-cube op is in progress — wait first."); return
+        try:
+            import radial_flatten  # noqa: F401  (vendored, self-contained)
+        except Exception as e:
+            messagebox.showerror("flatten",
+                f"flatten module unavailable:\n{e}"); return
+        mode = self.flatten_mode.get()
+        Ny, Nx, H, W = self.cube.shape
+        signed = " (output is a SIGNED residual)" if mode == "subtract" else \
+                 " (background → ~1, stays non-negative)"
+        how = ("subtract the azimuthal MEDIAN at each radius"
+               if mode == "subtract"
+               else "divide by the azimuthal MEAN at each radius")
+        if not messagebox.askyesno(
+                "Flatten radial background",
+                f"Flatten every pattern of this {Ny}×{Nx} scan "
+                f"(H×W = {H}×{W}) — {how}{signed}.\n\n"
+                f"Removes the smooth isotropic background (direct-beam skirt "
+                f"+ amorphous halo) so the Bragg / orientation signal stands "
+                f"out.  Taken about the frame centre — centre the beam first "
+                f"for best results.\n\n"
+                f"Writes a new .cube.npy alongside the original; you'll see a "
+                f"before/after preview and be asked whether to save.\n\n"
+                f"Proceed?"):
+            return
+        self._flatten_busy = True
+        try:
+            self._flatten_btn.configure(state="disabled")
+        except Exception:
+            pass
+        self._flatten_status.configure(text="flatten: starting…")
+        threading.Thread(target=self._flatten_worker,
+                         args=(mode,), daemon=True).start()
+
+    def _flatten_worker(self, mode: str):
+        tmp_path = None
+        try:
+            from radial_flatten import flatten_cube_into
+            Ny, Nx, H, W = self.cube.shape
+            base = os.path.splitext(self.path)[0]
+            base = base[:-5] if base.endswith(".cube") else base
+            new_basename = os.path.basename(base) + "_flat"
+            tmp_dir = tempfile.mkdtemp(prefix="dinosr_flat_")
+            tmp_path = os.path.join(tmp_dir, new_basename + ".cube.npy")
+            out = np.lib.format.open_memmap(
+                tmp_path, mode="w+", dtype=np.float32, shape=(Ny, Nx, H, W))
+            t0 = time.time()
+
+            def _prog(row, ntot):
+                dt = time.time() - t0
+                eta = dt * (ntot - row) / max(row, 1)
+                self.after(0, lambda row=row, ntot=ntot, eta=eta:
+                    self._flatten_status.configure(
+                        text=f"flatten ({mode}): {row}/{ntot} rows  "
+                             f"({100*row/ntot:.0f}%)  eta {eta:.0f}s"))
+
+            flatten_cube_into(self.cube, out, mode=mode, progress=_prog)
+            out.flush(); del out
+            self.after(0, lambda: self._flatten_finish(
+                tmp_path, base, new_basename, mode))
+        except Exception as e:
+            err = repr(e)
+            if tmp_path:
+                _register_atexit_cleanup(
+                    tmp_path, cleanup_dir=os.path.dirname(tmp_path))
+            self.after(0, lambda: messagebox.showerror("flatten failed", err))
+            self.after(0, lambda: self._flatten_status.configure(
+                text=f"flatten failed: {err}"))
+            self.after(0, self._flatten_reenable)
+        finally:
+            self._flatten_busy = False
+
+    def _flatten_reenable(self):
+        try:
+            self._flatten_btn.configure(state="normal")
+        except Exception:
+            pass
+
+    def _flatten_preview(self, tmp_path: str, mode: str):
+        try:
+            after_cube = np.load(tmp_path, mmap_mode="r", allow_pickle=True)
+            Ny, Nx = self.cube.shape[:2]
+            idx = int(self.idx.get()); y, x = divmod(idx, Nx)
+            y = min(max(y, 0), Ny - 1); x = min(max(x, 0), Nx - 1)
+            before = np.asarray(self.cube[y, x], dtype=np.float32)
+            after = np.asarray(after_cube[y, x], dtype=np.float32)
+        except Exception:
+            return
+        win = ctk.CTkToplevel(self)
+        win.title(f"Flatten preview ({mode}) — position (y={y}, x={x})")
+        try:
+            win.after(200, lambda: (win.winfo_exists()
+                                    and (win.lift(), win.focus_force())))
+        except Exception:
+            pass
+        fig = Figure(figsize=(8.6, 4.4), dpi=100)
+        cmap = self.cmap.get()
+        ax0 = fig.add_subplot(1, 2, 1)
+        ax0.imshow(np.log1p(np.clip(before, 0, None)), cmap=cmap,
+                   interpolation="nearest")
+        ax0.set_title("raw (log)", fontsize=11)
+        ax0.set_xticks([]); ax0.set_yticks([])
+        ax1 = fig.add_subplot(1, 2, 2)
+        if mode == "subtract":
+            # signed residual — symmetric limits about 0
+            lim = float(np.percentile(np.abs(after), 99.0)) or 1.0
+            ax1.imshow(after, cmap="RdBu_r", vmin=-lim, vmax=lim,
+                       interpolation="nearest")
+            ax1.set_title("flattened (median-subtracted)", fontsize=11)
+        else:
+            ax1.imshow(after, cmap=cmap, vmin=0,
+                       vmax=float(np.percentile(after, 99.0)) or 1.0,
+                       interpolation="nearest")
+            ax1.set_title("flattened (mean-divided)", fontsize=11)
+        ax1.set_xticks([]); ax1.set_yticks([])
+        fig.tight_layout()
+        canvas = FigureCanvasTkAgg(fig, master=win)
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+        canvas.draw()
+
+    def _flatten_finish(self, tmp_path, original_base, new_basename, mode):
+        self._flatten_preview(tmp_path, mode)
+        permanent_path = original_base + "_flat.cube.npy"
+        save = messagebox.askyesno(
+            "Save flattened cube?",
+            f"Radial-background flattening ({mode}) applied to every "
+            f"pattern.\n\n"
+            f"Save permanently to:\n  {permanent_path}\n\n"
+            f"  Yes → keep file (re-loadable in future sessions).\n"
+            f"  No  → keep this run only; temp file deleted on exit.")
+        if save:
+            try:
+                shutil.move(tmp_path, permanent_path)
+                final_path = permanent_path
+                try: os.rmdir(os.path.dirname(tmp_path))
+                except Exception: pass
+            except Exception as e:
+                messagebox.showerror("save failed",
+                    f"Could not move temp file:\n{e}\n"
+                    f"Cube usable from: {tmp_path}")
+                final_path = tmp_path
+                _register_atexit_cleanup(tmp_path)
+        else:
+            final_path = tmp_path
+            _register_atexit_cleanup(
+                tmp_path, cleanup_dir=os.path.dirname(tmp_path))
+        try:
+            self.cube = np.load(final_path, mmap_mode="r", allow_pickle=True)
+            Ny, Nx, _H, _W = self.cube.shape
+            self.path = final_path
+            self._path_var.set(final_path)
+            self.sample_key = register_runtime_sample(
+                final_path, scan_shape=(Ny, Nx),
+                vmax=float(self.vmax.get()),
+                center_mask_radius=self._effective_center_mask_radius())
+        except Exception as e:
+            messagebox.showerror("reload failed",
+                f"Flattened cube is at:\n{final_path}\n\nbut reload "
+                f"failed: {e}")
+            self._flatten_reenable(); return
+        self._refresh()
+        self._flatten_status.configure(
+            text=f"flatten ({mode}) done.  active sample: {self.sample_key}")
+        self._flatten_reenable()
         try:
             if self.on_state_change is not None:
                 self.on_state_change("loaded", sample_key=self.sample_key,
