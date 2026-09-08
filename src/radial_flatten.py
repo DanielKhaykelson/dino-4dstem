@@ -87,7 +87,8 @@ def flatten_frame(img: np.ndarray, mode: str = "subtract",
 
 def flatten_cube_into(cube, out, *, mode: str = "subtract",
                       center: Optional[Tuple[float, float]] = None,
-                      progress: Optional[Callable[[int, int], None]] = None):
+                      progress: Optional[Callable[[int, int], None]] = None,
+                      cancel: Optional[Callable[[], bool]] = None):
     """Flatten every pattern of ``cube`` (Ny,Nx,H,W) into ``out``.
 
     ``out`` supports ``out[y] = block`` (e.g. a ``np.lib.format.open_memmap``).
@@ -98,6 +99,8 @@ def flatten_cube_into(cube, out, *, mode: str = "subtract",
     H, W = cube.shape[-2], cube.shape[-1]
     bins, ridx, _ = build_radius_bins(H, W, center)
     for y in range(Ny):
+        if cancel is not None and cancel():
+            raise RuntimeError("cancelled")
         try:
             row = np.asarray(cube[y], dtype=np.float32)
         except Exception:

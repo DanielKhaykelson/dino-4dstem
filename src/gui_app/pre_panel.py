@@ -2329,6 +2329,82 @@ class PrePanel(ctk.CTkFrame):
             pass
 
     # ------------------------------------------------------------------
+    # Shared cancellable progress window for the long pre-processing bakes.
+    # Worker threads must drive it through self.after(0, ...) — Tk widgets
+    # may only be touched from the UI thread.
+    # ------------------------------------------------------------------
+    def _progress_popup(self, key: str, title: str, heading: str):
+        setattr(self, f"_{key}_cancel", False)
+        win = ctk.CTkToplevel(self)
+        win.title(title)
+        win.geometry("470x180")
+        try:
+            win.after(150, lambda: (win.winfo_exists()
+                                    and (win.lift(), win.focus_force())))
+        except Exception:
+            pass
+        ctk.CTkLabel(win, text=heading,
+                     font=("Segoe UI", 12, "bold")).pack(pady=(16, 6))
+        lbl = ctk.CTkLabel(win, text="starting…", font=("Consolas", 10))
+        lbl.pack(pady=2)
+        bar = ctk.CTkProgressBar(win, width=400)
+        bar.set(0.0)
+        bar.pack(pady=8)
+
+        def _cancel():
+            setattr(self, f"_{key}_cancel", True)
+            try: lbl.configure(text="cancelling — finishing current step…")
+            except Exception: pass
+
+        ctk.CTkButton(win, text="Cancel", width=90,
+                      command=_cancel).pack(pady=(2, 10))
+        win.protocol("WM_DELETE_WINDOW", _cancel)
+        setattr(self, f"_{key}_prog_win", win)
+        setattr(self, f"_{key}_prog_lbl", lbl)
+        setattr(self, f"_{key}_prog_bar", bar)
+
+    def _post(self, fn, *args):
+        """Schedule a UI update from a worker thread, never fatally.
+
+        Tk calls from a non-main thread can fail (window torn down, no main
+        loop yet).  A progress update must never be able to abort the work it
+        is only reporting on, so failures here are swallowed.
+        """
+        try:
+            self.after(0, fn, *args)
+        except Exception:
+            pass
+
+    def _progress_update(self, key: str, frac: float, text: str):
+        """Move a progress popup's bar/label (UI thread only)."""
+        try:
+            getattr(self, f"_{key}_prog_bar").set(max(0.0, min(1.0, frac)))
+            getattr(self, f"_{key}_prog_lbl").configure(text=text)
+        except Exception:
+            pass
+        # mirror into the panel's inline status line so it's visible after
+        # the popup is closed
+        try:
+            getattr(self, f"_{key}_status").configure(text=f"{key}: {text}")
+        except Exception:
+            pass
+
+    def _progress_close(self, key: str):
+        win = getattr(self, f"_{key}_prog_win", None)
+        if win is not None:
+            try: win.destroy()
+            except Exception: pass
+        setattr(self, f"_{key}_prog_win", None)
+
+    @staticmethod
+    def _eta_text(done: int, total: int, t0: float) -> str:
+        dt = time.time() - t0
+        if done <= 0:
+            return ""
+        eta = dt * (total - done) / done
+        return f"  eta {eta/60:.1f} min" if eta > 90 else f"  eta {eta:.0f}s"
+
+    # ------------------------------------------------------------------
     # Self-supervised denoising — Noise2Noise by binomial splitting.
     # Trains a tiny dose-equivariant U-Net on binomially-split halves of
     # each pattern, applies it to the whole cube, and bakes a new
@@ -2386,6 +2462,9 @@ class PrePanel(ctk.CTkFrame):
         except Exception:
             pass
         self._denoise_status.configure(text="denoise: starting…")
+        self._progress_popup(
+            "denoise", "Denoising (Noise2Noise, binomial)…",
+            f"Denoising {Ny*Nx} patterns on {dev}")
         threading.Thread(target=self._denoise_worker,
                          daemon=True).start()
 
@@ -2397,14 +2476,40 @@ class PrePanel(ctk.CTkFrame):
             dev = "cuda" if torch.cuda.is_available() else "cpu"
             Ny, Nx, H, W = self.cube.shape
 
+            cancelled = lambda: bool(getattr(self, "_denoise_cancel", False))
+            self._denoise_loss = ""
+            self._post(self._progress_update, "denoise", 0.01,
+                       "reading training patterns off the cube…")
+
+            # phase 1 (0-10%): read the training patterns off the cube.
+            # On a lazy/compressed cube this is the slowest part, so it
+            # reports per-frame rather than sitting silently on "starting".
+            t_load = time.time()
+
+            def _load_prog(i, n):
+                self._post(self._progress_update, "denoise",
+                           0.02 + 0.08 * i / n,
+                           f"loading training patterns  {i}/{n}"
+                           f"{self._eta_text(i, n, t_load)}")
+
+            # phase 2 (10-70%): training, ~200 updates over the whole run
+            t_tr = time.time()
+
+            def _step_prog(done, total):
+                self._post(self._progress_update, "denoise",
+                           0.10 + 0.60 * done / total,
+                           f"training  step {done}/{total}"
+                           f"{self._eta_text(done, total, t_tr)}"
+                           f"{self._denoise_loss}")
+
             def _train_prog(ep, E, tl, vl):
-                self.after(0, lambda ep=ep, E=E, tl=tl, vl=vl:
-                    self._denoise_status.configure(
-                        text=f"denoise: training epoch {ep}/{E}  "
-                             f"train {tl:.3f}  val {vl:.3f}"))
+                self._denoise_loss = (f"   epoch {ep}/{E}  "
+                                      f"train {tl:.3f}  val {vl:.3f}")
 
             model, hist = train_binomial_n2n(
-                self.cube, device=dev, progress=_train_prog)
+                self.cube, device=dev, progress=_train_prog,
+                load_progress=_load_prog, step_progress=_step_prog,
+                cancel=cancelled)
 
             base = os.path.splitext(self.path)[0]
             base = base[:-5] if base.endswith(".cube") else base
@@ -2413,30 +2518,36 @@ class PrePanel(ctk.CTkFrame):
             tmp_path = os.path.join(tmp_dir, new_basename + ".cube.npy")
             out = np.lib.format.open_memmap(
                 tmp_path, mode="w+", dtype=np.float32, shape=(Ny, Nx, H, W))
+            # phase 3 (70-100%): apply the network to every pattern
             t0 = time.time()
 
             def _infer_prog(row, ntot):
-                dt = time.time() - t0
-                eta = dt * (ntot - row) / max(row, 1)
-                self.after(0, lambda row=row, ntot=ntot, eta=eta:
-                    self._denoise_status.configure(
-                        text=f"denoise: applying {row}/{ntot} rows  "
-                             f"({100*row/ntot:.0f}%)  eta {eta:.0f}s"))
+                self._post(self._progress_update, "denoise",
+                           0.70 + 0.30 * row / ntot,
+                           f"applying to cube  row {row}/{ntot}  "
+                           f"({100*row/ntot:.0f}%)"
+                           f"{self._eta_text(row, ntot, t0)}")
 
             denoise_cube_into(model, self.cube, out, device=dev,
-                              progress=_infer_prog)
+                              progress=_infer_prog, cancel=cancelled)
             out.flush(); del out
-            self.after(0, lambda: self._denoise_finish(
-                tmp_path, base, new_basename, hist))
+            self._post(lambda: (self._progress_close("denoise"),
+                                   self._denoise_finish(
+                                       tmp_path, base, new_basename, hist)))
         except Exception as e:
             err = repr(e)
+            was_cancel = "Cancelled" in err or "cancelled" in err.lower()
             if tmp_path:
                 _register_atexit_cleanup(
                     tmp_path, cleanup_dir=os.path.dirname(tmp_path))
-            self.after(0, lambda: messagebox.showerror("denoise failed", err))
-            self.after(0, lambda: self._denoise_status.configure(
-                text=f"denoise failed: {err}"))
-            self.after(0, self._denoise_reenable)
+            self._post(lambda: self._progress_close("denoise"))
+            if not was_cancel:
+                self._post(lambda: messagebox.showerror("denoise failed",
+                                                        err))
+            self._post(lambda: self._denoise_status.configure(
+                text="denoise: cancelled" if was_cancel
+                     else f"denoise failed: {err}"))
+            self._post(self._denoise_reenable)
         finally:
             self._denoise_busy = False
 
@@ -2578,6 +2689,9 @@ class PrePanel(ctk.CTkFrame):
         except Exception:
             pass
         self._flatten_status.configure(text="flatten: starting…")
+        self._progress_popup(
+            "flatten", "Flattening radial background…",
+            f"Flattening {Ny*Nx} patterns  ({mode})")
         threading.Thread(target=self._flatten_worker,
                          args=(mode,), daemon=True).start()
 
@@ -2596,26 +2710,33 @@ class PrePanel(ctk.CTkFrame):
             t0 = time.time()
 
             def _prog(row, ntot):
-                dt = time.time() - t0
-                eta = dt * (ntot - row) / max(row, 1)
-                self.after(0, lambda row=row, ntot=ntot, eta=eta:
-                    self._flatten_status.configure(
-                        text=f"flatten ({mode}): {row}/{ntot} rows  "
-                             f"({100*row/ntot:.0f}%)  eta {eta:.0f}s"))
+                self._post(self._progress_update, "flatten",
+                           row / ntot,
+                           f"{mode}  row {row}/{ntot}  "
+                           f"({100*row/ntot:.0f}%)"
+                           f"{self._eta_text(row, ntot, t0)}")
 
-            flatten_cube_into(self.cube, out, mode=mode, progress=_prog)
+            flatten_cube_into(
+                self.cube, out, mode=mode, progress=_prog,
+                cancel=lambda: bool(getattr(self, "_flatten_cancel", False)))
             out.flush(); del out
-            self.after(0, lambda: self._flatten_finish(
-                tmp_path, base, new_basename, mode))
+            self._post(lambda: (self._progress_close("flatten"),
+                                   self._flatten_finish(
+                                       tmp_path, base, new_basename, mode)))
         except Exception as e:
             err = repr(e)
+            was_cancel = "cancelled" in err.lower()
             if tmp_path:
                 _register_atexit_cleanup(
                     tmp_path, cleanup_dir=os.path.dirname(tmp_path))
-            self.after(0, lambda: messagebox.showerror("flatten failed", err))
-            self.after(0, lambda: self._flatten_status.configure(
-                text=f"flatten failed: {err}"))
-            self.after(0, self._flatten_reenable)
+            self._post(lambda: self._progress_close("flatten"))
+            if not was_cancel:
+                self._post(lambda: messagebox.showerror("flatten failed",
+                                                        err))
+            self._post(lambda: self._flatten_status.configure(
+                text="flatten: cancelled" if was_cancel
+                     else f"flatten failed: {err}"))
+            self._post(self._flatten_reenable)
         finally:
             self._flatten_busy = False
 

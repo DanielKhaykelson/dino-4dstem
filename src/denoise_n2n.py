@@ -178,25 +178,59 @@ def looks_like_counts(sample: np.ndarray) -> bool:
 # Training
 # ==========================================================================
 
-def _sample_training_stack(cube, max_patterns: int, seed: int = 0):
+class Cancelled(Exception):
+    """Raised when a ``cancel()`` callback asks the run to stop."""
+
+
+def _sample_training_stack(cube, max_patterns: int, seed: int = 0,
+                           progress: Optional[Callable[[int, int], None]] = None,
+                           cancel: Optional[Callable[[], bool]] = None):
     """Even-ish random subsample of scan positions as an (n, H, W) float32 stack.
 
-    Works for both 4-D .npy cubes and 3-D-backed lazy wrappers by indexing
-    per-frame with the universal 2-tuple ``cube[y, x]``.
+    Read in **bulk, one scan row at a time**, not frame by frame.  On a lazy or
+    compressed cube (HDF5, .mib, memmap) a single ``cube[y, x]`` can pull and
+    decompress a whole chunk, so gathering a few thousand scattered frames is
+    the slowest part of the entire run -- minutes of apparent hang.  Reading
+    whole rows turns that into a few dozen sequential bulk reads.
+
+    Coverage is kept by spreading the sampled rows evenly down the scan and the
+    sampled columns evenly across each one, rather than taking one contiguous
+    block.  Works for 4-D .npy cubes, ``read_block`` lazy wrappers and
+    3-D-backed h5 wrappers, falling back to per-frame indexing if needed.
     """
     Ny, Nx = cube.shape[:2]
     H, W = cube.shape[-2], cube.shape[-1]
-    n_all = Ny * Nx
-    rng = np.random.default_rng(seed)
-    if n_all > max_patterns:
-        flat = rng.choice(n_all, size=max_patterns, replace=False)
-    else:
-        flat = np.arange(n_all)
-    out = np.empty((len(flat), H, W), dtype=np.float32)
-    for i, f in enumerate(flat):
-        y, x = divmod(int(f), Nx)
-        out[i] = np.asarray(cube[y, x], dtype=np.float32)
-    return out
+
+    # up to 64 bulk row reads, evenly spaced down the scan
+    rows = np.unique(np.linspace(0, Ny - 1, min(Ny, 64)).astype(int))
+    per_row = int(min(Nx, max(1, int(np.ceil(max_patterns / len(rows))))))
+    cols = np.unique(np.linspace(0, Nx - 1, per_row).astype(int))
+
+    reader = getattr(cube, "read_block", None)
+    chunks = []
+    n_tot = len(rows) * len(cols)
+    got = 0
+    for k, y in enumerate(rows):
+        if cancel is not None and cancel():
+            raise Cancelled("cancelled while loading training patterns")
+        y = int(y)
+        if reader is not None:
+            row = np.asarray(reader(y, 1, 0, Nx)[0], dtype=np.float32)
+        else:
+            try:
+                row = np.asarray(cube[y], dtype=np.float32)
+            except Exception:
+                row = np.stack([np.asarray(cube[y, x], dtype=np.float32)
+                                for x in cols], 0)
+                chunks.append(row); got += len(cols)
+                if progress is not None:
+                    progress(got, n_tot)
+                continue
+        chunks.append(row[cols])
+        got += len(cols)
+        if progress is not None:
+            progress(got, n_tot)
+    return np.concatenate(chunks, 0).astype(np.float32, copy=False)
 
 
 def train_binomial_n2n(cube, *, target_steps: int = 10000,
@@ -207,7 +241,12 @@ def train_binomial_n2n(cube, *, target_steps: int = 10000,
                        max_patterns: int = 4096, val_frac: float = 0.15,
                        device: Optional[str] = None, seed: int = 0,
                        progress: Optional[Callable[[int, int, float, float],
-                                                   None]] = None):
+                                                   None]] = None,
+                       load_progress: Optional[Callable[[int, int],
+                                                        None]] = None,
+                       step_progress: Optional[Callable[[int, int],
+                                                        None]] = None,
+                       cancel: Optional[Callable[[], bool]] = None):
     """Train a SmallUNet on binomially-split pairs drawn from ``cube``.
 
     A fresh binomial split is sampled every step, so the network never sees the
@@ -222,14 +261,19 @@ def train_binomial_n2n(cube, *, target_steps: int = 10000,
     comparable number of weight updates and converge equally.  The epoch count
     is clamped to ``[min_epochs, max_epochs]``.
 
-    ``progress(epoch, n_epochs, train_loss, val_loss)`` is called once per epoch.
+    Progress callbacks (all optional):
+    ``load_progress(i, n)`` while the training patterns are read off the cube,
+    ``step_progress(done, total)`` during training (throttled to ~200 calls),
+    ``progress(epoch, n_epochs, train_loss, val_loss)`` once per epoch.
+    ``cancel()`` is polled throughout; returning True raises :class:`Cancelled`.
 
     Returns ``(model, history)``.
     """
     dev = torch.device(device or ("cuda" if torch.cuda.is_available()
                                   else "cpu"))
     torch.manual_seed(seed)
-    stack = _sample_training_stack(cube, max_patterns, seed=seed)
+    stack = _sample_training_stack(cube, max_patterns, seed=seed,
+                                   progress=load_progress, cancel=cancel)
     n = len(stack)
     rng = np.random.default_rng(seed)
     perm = rng.permutation(n)
@@ -257,11 +301,17 @@ def train_binomial_n2n(cube, *, target_steps: int = 10000,
             "n_train": int(len(tr_idx)), "device": str(dev),
             "epochs": epochs, "steps_per_epoch": steps}
 
+    total_steps = epochs * steps
+    report_every = max(1, total_steps // 200)
+    gstep = 0
+
     for ep in range(epochs):
         model.train()
         order = torch.randperm(len(tr_idx), device=dev)
         tl, seen = 0.0, 0
         for s in range(steps):
+            if cancel is not None and cancel():
+                raise Cancelled("cancelled during training")
             sel = order[s * batch_size:(s + 1) * batch_size]
             if sel.numel() == 0:
                 continue
@@ -280,6 +330,10 @@ def train_binomial_n2n(cube, *, target_steps: int = 10000,
             scaler.update()
             tl += float(loss) * x.shape[0]
             seen += x.shape[0]
+            gstep += 1
+            if step_progress is not None and (gstep % report_every == 0
+                                              or gstep == total_steps):
+                step_progress(gstep, total_steps)
         sched.step()
 
         vloss = float("nan")
@@ -304,7 +358,8 @@ def train_binomial_n2n(cube, *, target_steps: int = 10000,
 @torch.no_grad()
 def denoise_cube_into(model, cube, out, *, device: Optional[str] = None,
                       batch_size: int = 32,
-                      progress: Optional[Callable[[int, int], None]] = None):
+                      progress: Optional[Callable[[int, int], None]] = None,
+                      cancel: Optional[Callable[[], bool]] = None):
     """Apply ``model`` to every pattern of ``cube`` -> ``out`` (Ny,Nx,H,W).
 
     ``out`` is any array-like that supports ``out[y, x0:x1] = block`` (e.g. a
@@ -322,6 +377,8 @@ def denoise_cube_into(model, cube, out, *, device: Optional[str] = None,
     H, W = cube.shape[-2], cube.shape[-1]
     use_amp = dev.type == "cuda"
     for y in range(Ny):
+        if cancel is not None and cancel():
+            raise Cancelled("cancelled while applying to the cube")
         try:
             row = np.asarray(cube[y], dtype=np.float32)
         except Exception:
