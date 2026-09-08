@@ -345,23 +345,24 @@ def train_binomial_n2n(cube, *, target_steps: int = 10000,
     tr_idx = perm[n_val:]
 
     # The training stack stays in CPU memory; only the current batch goes to
-    # the device.  Preloading thousands of full frames onto the GPU costs GB
-    # and leaves too little room for activations -- measured on an RTX 4080, a
-    # batch-32 step at 256x256 takes 5.0 s that way versus 0.13 s at 192x192.
+    # the device (preloading thousands of full frames costs GB of VRAM that
+    # the activations need).
     tr_cpu = torch.from_numpy(np.ascontiguousarray(stack[tr_idx]))
     va_cpu = (torch.from_numpy(np.ascontiguousarray(stack[val_idx]))
               if n_val else None)
     del stack
     gen = torch.Generator(device=dev).manual_seed(seed)
 
-    # Train on random CROPS when the detector is large.  The network is fully
-    # convolutional, so it still applies to the full frame at inference, and
-    # the cost per step becomes independent of detector size.  A third of the
-    # crops are centred near the frame middle so the direct beam's very
-    # different intensity regime is represented too.
+    # Whole frames are PREFERRED: training and inference then share the same
+    # geometry, with no tiling and no distribution shift.  Cropping is a
+    # fallback used only when whole frames cannot be afforded, decided by
+    # measurement below rather than by a size rule.  Measured on an RTX 4080
+    # (batch 16, doubled): 33 ms at 192, 62 ms at 256, 146 ms at 384, but
+    # 646 ms and 15.1 GB of 16 GB at 512 -- so only 512-class detectors
+    # actually need it.
     H, W = int(tr_cpu.shape[-2]), int(tr_cpu.shape[-1])
-    ch, cw = min(int(crop), H), min(int(crop), W)
-    cropping = (ch < H) or (cw < W)
+    ch, cw = H, W
+    cropping = False
 
     def _draw(src, idx):
         b = src[idx]
@@ -406,16 +407,43 @@ def train_binomial_n2n(cube, *, target_steps: int = 10000,
     # size the run to the wall-clock budget.  Without this, a large detector
     # silently turns a 7-minute job into a 14-hour one.
     probe_idx = torch.arange(min(batch_size, len(tr_cpu)))
-    for _ in range(3):                       # warm-up: lazy init, autotune
-        _one_step(probe_idx)                 # (timing these overestimates ~20x)
-    if dev.type == "cuda":
-        torch.cuda.synchronize()
-    t_probe = time.time()
-    for _ in range(5):
-        _one_step(probe_idx)
-    if dev.type == "cuda":
-        torch.cuda.synchronize()
-    step_s = max((time.time() - t_probe) / 5.0, 1e-6)
+
+    def _probe():
+        for _ in range(3):                   # warm-up: lazy init, autotune
+            _one_step(probe_idx)             # (timing these overestimates ~25x)
+        if dev.type == "cuda":
+            torch.cuda.synchronize()
+        t = time.time()
+        for _ in range(5):
+            _one_step(probe_idx)
+        if dev.type == "cuda":
+            torch.cuda.synchronize()
+        return max((time.time() - t) / 5.0, 1e-6)
+
+    # Try whole frames first; fall back to crops only if they are unaffordable
+    # (too slow to reach min_steps in the budget) or do not fit in memory.
+    try:
+        step_s = _probe()
+        oom = False
+    except RuntimeError as e:                # typically CUDA out of memory
+        if "memory" not in str(e).lower():
+            raise
+        oom = True
+        step_s = float("inf")
+    want_crop = int(crop) if crop else 0
+    if ((oom or max_seconds / step_s < min_steps) and want_crop
+            and (want_crop < H or want_crop < W)):
+        ch, cw = min(want_crop, H), min(want_crop, W)
+        cropping = True
+        if dev.type == "cuda":
+            torch.cuda.empty_cache()
+        # rebuild the optimiser state so the discarded probe steps at the other
+        # geometry do not carry over
+        model = SmallUNet(base=base, depth=depth,
+                          input_transform=input_transform).to(dev)
+        opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
+        scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+        step_s = _probe()
 
     affordable = int(max_seconds / step_s)
     planned = int(np.clip(min(target_steps, affordable), min_steps,
