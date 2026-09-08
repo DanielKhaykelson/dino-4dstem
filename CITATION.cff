@@ -1,0 +1,36 @@
+cff-version: 1.2.0
+title: DINO-4DSTEM
+message: >-
+  If you use this software in your research, please cite the paper below.
+type: software
+authors:
+  - given-names: Daniel
+    family-names: Khaykelson
+  - given-names: Lothar
+    family-names: Houben
+  - given-names: Boris
+    family-names: Rybtchinski
+repository-code: 'https://github.com/DanielKhaykelson/dino-4dstem'
+abstract: >-
+  A self-supervised classifier for 4D-STEM / scanning electron diffraction that
+  groups diffraction patterns into structurally distinct classes without labels
+  or predefined models, and shows the evidence behind each class.
+license: MIT
+preferred-citation:
+  type: article
+  title: >-
+    DINO4DSTEM: A self-supervised framework for structural discovery in 4D-STEM
+  authors:
+    - given-names: Daniel
+      family-names: Khaykelson
+    - given-names: Lothar
+      family-names: Houben
+    - given-names: Boris
+      family-names: Rybtchinski
+  year: 2026
+  journal: arXiv
+  identifiers:
+    - type: other
+      value: 'arXiv:2608.15098'
+      description: arXiv preprint identifier
+  url: 'https://arxiv.org/abs/2608.15098'

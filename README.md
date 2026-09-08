@@ -9,6 +9,7 @@
 An unsupervised classifier that groups your diffraction patterns into distinct
 structural regions — and shows you **why**. No labels. No coding.
 
+[![paper](https://img.shields.io/badge/paper-arXiv%3A2608.15098-b31b1b?style=flat-square)](https://arxiv.org/abs/2608.15098)
 ![platform](https://img.shields.io/badge/platform-Windows-0a7bbd?style=flat-square)
 ![coding](https://img.shields.io/badge/coding-not%20required-0ca678?style=flat-square)
 ![setup](https://img.shields.io/badge/setup-~15%20min%2C%20once-e8590c?style=flat-square)
@@ -141,8 +142,32 @@ then run the two installers. Update anytime with `git pull`.
 
 ---
 
+## Citing
+
+If DINO-4DSTEM contributes to work you publish, please cite the paper:
+
+> **DINO4DSTEM: A self-supervised framework for structural discovery in 4D-STEM**<br>
+> Daniel Khaykelson, Lothar Houben, Boris Rybtchinski<br>
+> arXiv:2608.15098 (2026) — **[read it →](https://arxiv.org/abs/2608.15098)**
+
+```bibtex
+@article{khaykelson2026dino4dstem,
+  title  = {DINO4DSTEM: A self-supervised framework for structural discovery in 4D-STEM},
+  author = {Khaykelson, Daniel and Houben, Lothar and Rybtchinski, Boris},
+  journal = {arXiv preprint arXiv:2608.15098},
+  year   = {2026},
+  url    = {https://arxiv.org/abs/2608.15098}
+}
+```
+
+> GitHub also builds this for you: use **“Cite this repository”** on the
+> repo sidebar (it reads [`CITATION.cff`](CITATION.cff)) to copy BibTeX or APA.
+
+---
+
 ## Learn more
 
+- 📄 **The paper** — [arXiv:2608.15098](https://arxiv.org/abs/2608.15098)
 - 🧭 **What it does &amp; results** — [`PROJECT_SUMMARY.md`](PROJECT_SUMMARY.md)
 - 📓 **Tutorial notebooks** — [`notebooks/`](notebooks/) — phantom → train → analyse → baselines, plus the **denoising methods** comparison (N2N binomial, Noise2Void, Noise2Self)
 - 🧠 **The methods explained** (DINO, NMF, clustering, PCA) — [`docs/assistant/CONCEPTS.md`](docs/assistant/CONCEPTS.md)
