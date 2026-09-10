@@ -4,10 +4,13 @@
 
 # DINO-4DSTEM
 
-### See the phases hiding in your 4D-STEM scan.
+### A self-supervised deep-learning pipeline for 4D-STEM data analysis.
 
-An unsupervised classifier that groups your diffraction patterns into distinct
-structural regions — and shows you **why**. No labels. No coding.
+Unsupervised classification and **phase mapping** for **4D-STEM** (4DSTEM,
+four-dimensional STEM) and **scanning electron diffraction (SED)** — also
+nanobeam electron diffraction (NBED) and nanodiffraction. It groups your
+diffraction patterns into distinct structural regions and shows you **why** —
+**no labels, no coding**.
 
 [![paper](https://img.shields.io/badge/paper-arXiv%3A2608.15098-b31b1b?style=flat-square)](https://arxiv.org/abs/2608.15098)
 ![platform](https://img.shields.io/badge/platform-Windows-0a7bbd?style=flat-square)
