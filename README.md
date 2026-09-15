@@ -172,6 +172,12 @@ Double-click `install_1_…bat` then `install_2_…bat`, launch from the Desktop
 > run the installer for your OS. The Windows bundle also includes
 > **`GETTING_STARTED.docx`**, a picture-by-picture walkthrough.
 
+> ⚠️ **Windows is the primary, fully tested platform.** The **Linux** and
+> **macOS** builds share the same code and their installers have been checked,
+> but they have **not yet been fully tested end-to-end** on those systems. If
+> you hit a problem on Linux or macOS, please [get in touch](#help--contact) —
+> reports are very welcome.
+
 ---
 
 ## Citing
@@ -206,7 +212,24 @@ If DINO-4DSTEM contributes to work you publish, please cite the paper:
 - 📕 **Full manual** — [`docs/USER_MANUAL.pdf`](docs/USER_MANUAL.pdf)
 - 🛠️ **Install guide** — [`INSTALL.md`](INSTALL.md)
 
+---
+
+## Help &amp; contact
+
+Questions, bug reports, feature requests, or help getting it running on your
+data — including **Linux/macOS** issues — are all welcome. Two ways to reach us:
+
+- 🐛 **Bug reports &amp; feature requests:** open a
+  **[GitHub issue](https://github.com/DanielKhaykelson/dino-4dstem/issues)**
+  (click **New issue**). Best for anything reproducible — it's searchable and
+  others can follow along.
+- 📧 **Direct questions / inquiries:** email Daniel Khaykelson at
+  **[daniel.kh@weizmann.ac.il](mailto:daniel.kh@weizmann.ac.il)**.
+
+When reporting a problem, it helps to include your **operating system**, what
+you did, and the **full error message** (copy the text from the console window).
+
 <div align="center">
 <br>
-<sub>🦕 Windows only · companion code for ongoing 4D-STEM / electron-diffraction research.</sub>
+<sub>🦕 Windows · Linux · macOS · companion code for ongoing 4D-STEM / electron-diffraction research.</sub>
 </div>
