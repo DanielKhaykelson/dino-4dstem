@@ -4,13 +4,16 @@
 
 # DINO-4DSTEM
 
-### See the phases hiding in your 4D-STEM scan.
+### A self-supervised deep-learning pipeline for 4D-STEM data analysis.
 
-An unsupervised classifier that groups your diffraction patterns into distinct
-structural regions — and shows you **why**. No labels. No coding.
+Unsupervised classification and **phase mapping** for **4D-STEM** (4DSTEM,
+four-dimensional STEM) and **scanning electron diffraction (SED)** — also
+nanobeam electron diffraction (NBED) and nanodiffraction. It groups your
+diffraction patterns into distinct structural regions and shows you **why** —
+**no labels, no coding**.
 
 [![paper](https://img.shields.io/badge/paper-arXiv%3A2608.15098-b31b1b?style=flat-square)](https://arxiv.org/abs/2608.15098)
-![platform](https://img.shields.io/badge/platform-Windows-0a7bbd?style=flat-square)
+![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0a7bbd?style=flat-square)
 ![coding](https://img.shields.io/badge/coding-not%20required-0ca678?style=flat-square)
 ![setup](https://img.shields.io/badge/setup-~15%20min%2C%20once-e8590c?style=flat-square)
 
@@ -122,23 +125,58 @@ original — your raw file is never modified.
 
 ---
 
-## Get started — two ways
+## Get started — pick your platform
 
-Both need **[Miniconda](https://www.anaconda.com/download/success)** (free)
-installed first. Full step-by-step with screenshots: **[INSTALL.md](INSTALL.md)**.
+Each bundle is the whole app with the right launchers for your OS. All three
+need free **[Miniconda / Miniforge](https://github.com/conda-forge/miniforge#install)**
+installed first.
 
-**① Download &amp; run — for everyone (no git):**
-Download the ZIP → double-click `install_1_environment.bat` → double-click
-`install_2_dino4dstem.bat` → launch from the Desktop icon.
+<table>
+<tr>
+<th align="center">🪟 Windows</th>
+<th align="center">🐧 Linux</th>
+<th align="center">🍎 macOS</th>
+</tr>
+<tr valign="top">
+<td align="center">
 
-**② Install with git — for one-command updates:**
-```bash
-git clone https://github.com/DanielKhaykelson/dino-4dstem
-```
-then run the two installers. Update anytime with `git pull`.
+**[⬇ Download for Windows](https://github.com/DanielKhaykelson/dino-4dstem/releases/latest/download/dino-4dstem-windows.zip)**
 
-> First time? The download bundle includes **`GETTING_STARTED.docx`** — a
-> picture-by-picture, click-by-click walkthrough.
+Double-click `install_1_…bat` then `install_2_…bat`, launch from the Desktop icon.
+
+**[Install guide →](INSTALL.md)**
+
+</td>
+<td align="center">
+
+**[⬇ Download for Linux](https://github.com/DanielKhaykelson/dino-4dstem/releases/latest/download/dino-4dstem-linux.zip)**
+
+`chmod +x *.sh` → `./install.sh` → `./launch_gui.sh`. NVIDIA-GPU ready.
+
+**[Install guide →](INSTALL.md#linux--macos)**
+
+</td>
+<td align="center">
+
+**[⬇ Download for macOS](https://github.com/DanielKhaykelson/dino-4dstem/releases/latest/download/dino-4dstem-macos.zip)**
+
+`chmod +x *.sh` → `./install.sh` → `./launch_gui.sh`. Runs on CPU.
+
+**[Install guide →](INSTALL.md#linux--macos)**
+
+</td>
+</tr>
+</table>
+
+> Prefer git? `git clone https://github.com/DanielKhaykelson/dino-4dstem`, then
+> run the installer for your OS. The Windows bundle also includes
+> **`GETTING_STARTED.docx`**, a picture-by-picture walkthrough.
+
+> ⚠️ **Windows is the primary, fully tested platform.** The **Linux** and
+> **macOS** builds share the same code and their installers have been checked,
+> but they have **not yet been fully tested end-to-end** on those systems. If
+> you hit a problem on Linux or macOS, please [get in touch](#help--contact) —
+> reports are very welcome.
 
 ---
 
@@ -174,7 +212,24 @@ If DINO-4DSTEM contributes to work you publish, please cite the paper:
 - 📕 **Full manual** — [`docs/USER_MANUAL.pdf`](docs/USER_MANUAL.pdf)
 - 🛠️ **Install guide** — [`INSTALL.md`](INSTALL.md)
 
+---
+
+## Help &amp; contact
+
+Questions, bug reports, feature requests, or help getting it running on your
+data — including **Linux/macOS** issues — are all welcome. Two ways to reach us:
+
+- 🐛 **Bug reports &amp; feature requests:** open a
+  **[GitHub issue](https://github.com/DanielKhaykelson/dino-4dstem/issues)**
+  (click **New issue**). Best for anything reproducible — it's searchable and
+  others can follow along.
+- 📧 **Direct questions / inquiries:** email Daniel Khaykelson at
+  **[daniel.kh@weizmann.ac.il](mailto:daniel.kh@weizmann.ac.il)**.
+
+When reporting a problem, it helps to include your **operating system**, what
+you did, and the **full error message** (copy the text from the console window).
+
 <div align="center">
 <br>
-<sub>🦕 Windows only · companion code for ongoing 4D-STEM / electron-diffraction research.</sub>
+<sub>🦕 Windows · Linux · macOS · companion code for ongoing 4D-STEM / electron-diffraction research.</sub>
 </div>

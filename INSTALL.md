@@ -1,4 +1,7 @@
-# Installing DINO-4DSTEM (Windows)
+# Installing DINO-4DSTEM
+
+**Windows** users: follow the guide below (no programming or “git” needed).
+**Linux / macOS** users: jump to **[Linux &amp; macOS](#linux--macos)** at the end.
 
 **You don’t need to know anything about programming or “git.”**
 Pick one of the two methods below and copy-paste the lines exactly.
@@ -193,3 +196,53 @@ conda activate dino4dstem; pip install torch==2.7.1 torchvision==0.22.1 --index-
 
 > **Pip-only (no conda, advanced):** make a Python 3.10 environment, then
 > `pip install -r requirements.txt`, and run `python src\gui_dino4dstem.py`.
+
+<br>
+
+---
+
+<br>
+
+## Linux &amp; macOS
+
+The same app runs on Linux and macOS — the only difference is that the
+launchers are shell scripts (`.sh`) instead of `.bat` files.
+
+**1. Install Miniforge** (free conda) if you don’t have conda already:
+[github.com/conda-forge/miniforge](https://github.com/conda-forge/miniforge#install).
+
+**2. Get the code** — download the ZIP and unzip it, or:
+
+```bash
+git clone https://github.com/DanielKhaykelson/dino-4dstem
+cd dino-4dstem
+```
+
+**3. Install** (creates the `dino4dstem` conda env, ~10–15 min):
+
+```bash
+chmod +x *.sh
+./install.sh
+```
+
+**4. Run:**
+
+```bash
+./launch_gui.sh
+```
+
+Also available: `./launch_assistant.sh`, `./launch_notebooks.sh`, and
+`./make_desktop_shortcuts.sh` (adds menu/Desktop launchers — `.desktop` on
+Linux, double-clickable `.command` files on macOS).
+
+**GPU.** On **Linux** with an NVIDIA card, install the CUDA build of PyTorch
+into the env for a big speed-up (the installer prints the exact command when it
+detects a GPU). On **macOS** there is no CUDA, so it runs on **CPU** — fully
+functional, just slower for training the denoiser.
+
+| Problem | Fix |
+|---|---|
+| `Could not find conda` | Install Miniforge (step 1), then open a new terminal. |
+| `permission denied: ./install.sh` | Run `chmod +x *.sh` first. |
+| macOS blocks a `.command` file | Right-click it → **Open** once to allow it. |
+| Training is slow | Expected on CPU/macOS — use an NVIDIA GPU on Linux for speed. |

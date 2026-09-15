@@ -1,4 +1,9 @@
-<title>DINO-4DSTEM — landing page mockup</title>
+<title>DINO-4DSTEM — self-supervised 4D-STEM / scanning electron diffraction (SED) analysis</title>
+<meta name="description" content="DINO-4DSTEM: a self-supervised deep-learning pipeline for 4D-STEM (4DSTEM) and scanning electron diffraction (SED / NBED / nanodiffraction) data analysis — unsupervised classification and phase mapping, no labels, no coding.">
+<meta name="keywords" content="4D-STEM, 4DSTEM, scanning electron diffraction, SED, nanobeam electron diffraction, NBED, nanodiffraction, electron microscopy, phase mapping, unsupervised classification, self-supervised learning, materials science, crystallography, py4DSTEM">
+<meta property="og:title" content="DINO-4DSTEM — self-supervised 4D-STEM analysis">
+<meta property="og:description" content="Unsupervised classification and phase mapping for 4D-STEM / scanning electron diffraction. No labels, no coding.">
+<meta property="og:type" content="website">
 <style>
   :root{
     --bg:#f4f4f1; --surface:#ffffff; --surface-2:#fbfaf7;
@@ -176,9 +181,9 @@
 
 <section class="hero"><div class="wrap">
   <div>
-    <span class="eyebrow">4D-STEM · unsupervised phase mapping</span>
-    <h1 style="margin-top:14px">See the phases hiding in your 4D-STEM scan.</h1>
-    <p class="lede">An unsupervised classifier that groups your diffraction patterns into distinct structural regions — and shows you <em>why</em>. No labels. No coding.</p>
+    <span class="eyebrow">4D-STEM · scanning electron diffraction · unsupervised phase mapping</span>
+    <h1 style="margin-top:14px">A self-supervised pipeline for 4D-STEM data analysis.</h1>
+    <p class="lede">Unsupervised classification and phase mapping for <strong>4D-STEM</strong> (4DSTEM) and <strong>scanning electron diffraction (SED)</strong> — also NBED and nanodiffraction. It groups your diffraction patterns into distinct structural regions and shows you <em>why</em>. No labels. No coding.</p>
     <div class="cta-row">
       <a class="btn btn-primary" href="#install">⬇&nbsp; Download for Windows</a>
       <a class="btn btn-ghost" href="#what">See how it works</a>
@@ -308,9 +313,37 @@
 
 <section id="install" style="background:var(--surface-2); border-block:1px solid var(--line)"><div class="wrap">
   <div class="sec-head">
-    <span class="eyebrow">Get started — two ways</span>
+    <span class="eyebrow">Get started</span>
     <h2>Install in about 15 minutes. You only do it once.</h2>
-    <p>Both ways need <b>Miniconda</b> (free) installed first. Pick the one that fits you.</p>
+    <p>Pick your operating system, download the bundle, and follow its guide.
+       All three need free <b>Miniconda / Miniforge</b> installed first.</p>
+  </div>
+
+  <div class="formats" style="margin-bottom:30px">
+    <div class="fmt">
+      <div class="code mono"><span class="dot" style="background:var(--c1)"></span>Windows</div>
+      <div class="src">Double-click installers, Desktop icons — no terminal.</div>
+      <p style="margin:12px 0 4px"><a class="btn btn-primary" href="https://github.com/DanielKhaykelson/dino-4dstem/releases/latest/download/dino-4dstem-windows.zip">⬇&nbsp; Download for Windows</a></p>
+      <p class="micro"><a href="https://github.com/DanielKhaykelson/dino-4dstem/blob/master/INSTALL.md">Windows install guide →</a></p>
+    </div>
+    <div class="fmt">
+      <div class="code mono"><span class="dot" style="background:var(--c2)"></span>Linux</div>
+      <div class="src"><code>./install.sh</code> then <code>./launch_gui.sh</code>. NVIDIA-GPU ready.</div>
+      <p style="margin:12px 0 4px"><a class="btn btn-primary" href="https://github.com/DanielKhaykelson/dino-4dstem/releases/latest/download/dino-4dstem-linux.zip">⬇&nbsp; Download for Linux</a></p>
+      <p class="micro"><a href="https://github.com/DanielKhaykelson/dino-4dstem/blob/master/INSTALL.md#linux--macos">Linux install guide →</a></p>
+    </div>
+    <div class="fmt">
+      <div class="code mono"><span class="dot" style="background:var(--c5)"></span>macOS</div>
+      <div class="src"><code>./install.sh</code> then <code>./launch_gui.sh</code>. Runs on CPU.</div>
+      <p style="margin:12px 0 4px"><a class="btn btn-primary" href="https://github.com/DanielKhaykelson/dino-4dstem/releases/latest/download/dino-4dstem-macos.zip">⬇&nbsp; Download for macOS</a></p>
+      <p class="micro"><a href="https://github.com/DanielKhaykelson/dino-4dstem/blob/master/INSTALL.md#linux--macos">macOS install guide →</a></p>
+    </div>
+  </div>
+
+  <p class="micro" style="margin-top:-14px">⚠️ <b>Windows is the primary, fully tested platform.</b> The Linux and macOS builds share the same code and their installers have been checked, but are <b>not yet fully tested end-to-end</b> — please <a href="https://github.com/DanielKhaykelson/dino-4dstem/issues">open an issue</a> or email <a href="mailto:daniel.kh@weizmann.ac.il">daniel.kh@weizmann.ac.il</a> if you hit a snag.</p>
+
+  <div class="sec-head" style="margin-top:20px">
+    <p><b>Windows</b> offers two ways — pick whichever fits:</p>
   </div>
   <div class="ways">
     <div class="way recommended">

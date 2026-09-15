@@ -1,0 +1,4 @@
+# Shell scripts must always check out with LF line endings, on every platform.
+# A CRLF in a .sh breaks the shebang on Linux/macOS:
+#   "bash: bad interpreter: /usr/bin/env bash^M".
+*.sh text eol=lf

@@ -2403,14 +2403,10 @@ class SynthPanel(ctk.CTkFrame):
             messagebox.showinfo("folder",
                 "No sim run yet."); return
         d = os.path.dirname(self._last_cube_path)
-        try:
-            if sys.platform == "win32":
-                os.startfile(d)
-            else:
-                import subprocess
-                subprocess.Popen(["xdg-open", d])
-        except Exception as e:
-            messagebox.showerror("folder", repr(e))
+        # Native file manager on Windows/macOS/Linux.
+        from gui_app._platform import open_path
+        if not open_path(d):
+            messagebox.showinfo("folder", d)
 
 
 # =========================================================================

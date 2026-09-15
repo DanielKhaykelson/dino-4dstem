@@ -306,7 +306,7 @@ class InterpretPanel(ctk.CTkFrame):
             return
         out = os.path.join(run, "_interpretability")
         os.makedirs(out, exist_ok=True)
-        try:
-            os.startfile(out)            # Windows
-        except Exception:
+        # Open the folder in the native file manager (Windows/macOS/Linux).
+        from gui_app._platform import open_path
+        if not open_path(out):
             messagebox.showinfo("output", out)
