@@ -13,7 +13,7 @@ diffraction patterns into distinct structural regions and shows you **why** —
 **no labels, no coding**.
 
 [![paper](https://img.shields.io/badge/paper-arXiv%3A2608.15098-b31b1b?style=flat-square)](https://arxiv.org/abs/2608.15098)
-![platform](https://img.shields.io/badge/platform-Windows-0a7bbd?style=flat-square)
+![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0a7bbd?style=flat-square)
 ![coding](https://img.shields.io/badge/coding-not%20required-0ca678?style=flat-square)
 ![setup](https://img.shields.io/badge/setup-~15%20min%2C%20once-e8590c?style=flat-square)
 
@@ -142,6 +142,11 @@ then run the two installers. Update anytime with `git pull`.
 
 > First time? The download bundle includes **`GETTING_STARTED.docx`** — a
 > picture-by-picture, click-by-click walkthrough.
+
+**On Linux or macOS?** Same app, shell-script launchers instead of `.bat`:
+install [Miniforge](https://github.com/conda-forge/miniforge#install), then
+`chmod +x *.sh && ./install.sh`, then `./launch_gui.sh`. Details in
+**[INSTALL.md → Linux &amp; macOS](INSTALL.md#linux--macos)**.
 
 ---
 
