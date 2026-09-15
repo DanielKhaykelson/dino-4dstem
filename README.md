@@ -125,28 +125,52 @@ original — your raw file is never modified.
 
 ---
 
-## Get started — two ways
+## Get started — pick your platform
 
-Both need **[Miniconda](https://www.anaconda.com/download/success)** (free)
-installed first. Full step-by-step with screenshots: **[INSTALL.md](INSTALL.md)**.
+Each bundle is the whole app with the right launchers for your OS. All three
+need free **[Miniconda / Miniforge](https://github.com/conda-forge/miniforge#install)**
+installed first.
 
-**① Download &amp; run — for everyone (no git):**
-Download the ZIP → double-click `install_1_environment.bat` → double-click
-`install_2_dino4dstem.bat` → launch from the Desktop icon.
+<table>
+<tr>
+<th align="center">🪟 Windows</th>
+<th align="center">🐧 Linux</th>
+<th align="center">🍎 macOS</th>
+</tr>
+<tr valign="top">
+<td align="center">
 
-**② Install with git — for one-command updates:**
-```bash
-git clone https://github.com/DanielKhaykelson/dino-4dstem
-```
-then run the two installers. Update anytime with `git pull`.
+**[⬇ Download for Windows](https://github.com/DanielKhaykelson/dino-4dstem/releases/latest/download/dino-4dstem-windows.zip)**
 
-> First time? The download bundle includes **`GETTING_STARTED.docx`** — a
-> picture-by-picture, click-by-click walkthrough.
+Double-click `install_1_…bat` then `install_2_…bat`, launch from the Desktop icon.
 
-**On Linux or macOS?** Same app, shell-script launchers instead of `.bat`:
-install [Miniforge](https://github.com/conda-forge/miniforge#install), then
-`chmod +x *.sh && ./install.sh`, then `./launch_gui.sh`. Details in
-**[INSTALL.md → Linux &amp; macOS](INSTALL.md#linux--macos)**.
+**[Install guide →](INSTALL.md)**
+
+</td>
+<td align="center">
+
+**[⬇ Download for Linux](https://github.com/DanielKhaykelson/dino-4dstem/releases/latest/download/dino-4dstem-linux.zip)**
+
+`chmod +x *.sh` → `./install.sh` → `./launch_gui.sh`. NVIDIA-GPU ready.
+
+**[Install guide →](INSTALL.md#linux--macos)**
+
+</td>
+<td align="center">
+
+**[⬇ Download for macOS](https://github.com/DanielKhaykelson/dino-4dstem/releases/latest/download/dino-4dstem-macos.zip)**
+
+`chmod +x *.sh` → `./install.sh` → `./launch_gui.sh`. Runs on CPU.
+
+**[Install guide →](INSTALL.md#linux--macos)**
+
+</td>
+</tr>
+</table>
+
+> Prefer git? `git clone https://github.com/DanielKhaykelson/dino-4dstem`, then
+> run the installer for your OS. The Windows bundle also includes
+> **`GETTING_STARTED.docx`**, a picture-by-picture walkthrough.
 
 ---
 
