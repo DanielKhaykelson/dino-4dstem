@@ -1,7 +1,28 @@
 # Installing DINO-4DSTEM
 
-**Windows** users: follow the guide below (no programming or “git” needed).
-**Linux / macOS** users: jump to **[Linux &amp; macOS](#linux--macos)** at the end.
+## Step 0 — download the bundle for your system
+
+Each bundle contains the whole app with the right launchers for your OS.
+
+| | 🪟 **Windows** | 🐧 **Linux** | 🍎 **macOS** |
+|---|---|---|---|
+| **Download** | **[⬇ dino-4dstem-windows.zip](https://github.com/DanielKhaykelson/dino-4dstem/releases/latest/download/dino-4dstem-windows.zip)** | **[⬇ dino-4dstem-linux.zip](https://github.com/DanielKhaykelson/dino-4dstem/releases/latest/download/dino-4dstem-linux.zip)** | **[⬇ dino-4dstem-macos.zip](https://github.com/DanielKhaykelson/dino-4dstem/releases/latest/download/dino-4dstem-macos.zip)** |
+| **Then follow** | [Windows guide ↓](#windows) | [Linux / macOS guide ↓](#linux--macos) | [Linux / macOS guide ↓](#linux--macos) |
+
+> All downloads are on the **[Releases page](https://github.com/DanielKhaykelson/dino-4dstem/releases/latest)** if you’d rather browse them.
+
+> ⚠️ **Windows is the primary, fully tested platform.** Linux and macOS share the
+> same code and their installers have been checked, but are **not yet fully
+> tested end-to-end**. Problems? [Open an issue](https://github.com/DanielKhaykelson/dino-4dstem/issues)
+> or email **[daniel.kh@weizmann.ac.il](mailto:daniel.kh@weizmann.ac.il)**.
+
+<br>
+
+---
+
+<br>
+
+# Windows
 
 **You don’t need to know anything about programming or “git.”**
 Pick one of the two methods below and copy-paste the lines exactly.
@@ -43,9 +64,9 @@ The defaults are fine — change nothing.
 
 <br>
 
-### &nbsp; ⬇ &nbsp; [**Download DINO-4DSTEM (ZIP)**](https://github.com/DanielKhaykelson/dino-4dstem/archive/refs/heads/master.zip)
+### &nbsp; ⬇ &nbsp; [**Download for Windows (dino-4dstem-windows.zip)**](https://github.com/DanielKhaykelson/dino-4dstem/releases/latest/download/dino-4dstem-windows.zip)
 
-*(Or, on the repo page, click the green **`< > Code`** button → **Download ZIP**.)*
+*(Already downloaded it in Step 0? Skip straight to Step 1.)*
 
 <br>
 
@@ -203,7 +224,7 @@ conda activate dino4dstem; pip install torch==2.7.1 torchvision==0.22.1 --index-
 
 <br>
 
-## Linux &amp; macOS
+# Linux &amp; macOS
 
 The same app runs on Linux and macOS — the only difference is that the
 launchers are shell scripts (`.sh`) instead of `.bat` files.
@@ -211,12 +232,18 @@ launchers are shell scripts (`.sh`) instead of `.bat` files.
 **1. Install Miniforge** (free conda) if you don’t have conda already:
 [github.com/conda-forge/miniforge](https://github.com/conda-forge/miniforge#install).
 
-**2. Get the code** — download the ZIP and unzip it, or:
+**2. Download and unzip the bundle for your system:**
+
+### &nbsp; 🐧 &nbsp; [**Download for Linux (dino-4dstem-linux.zip)**](https://github.com/DanielKhaykelson/dino-4dstem/releases/latest/download/dino-4dstem-linux.zip)
+
+### &nbsp; 🍎 &nbsp; [**Download for macOS (dino-4dstem-macos.zip)**](https://github.com/DanielKhaykelson/dino-4dstem/releases/latest/download/dino-4dstem-macos.zip)
 
 ```bash
-git clone https://github.com/DanielKhaykelson/dino-4dstem
+unzip dino-4dstem-linux.zip -d dino-4dstem     # or the macos zip
 cd dino-4dstem
 ```
+
+*Prefer git?* `git clone https://github.com/DanielKhaykelson/dino-4dstem && cd dino-4dstem`
 
 **3. Install** (creates the `dino4dstem` conda env, ~10–15 min):
 
