@@ -221,8 +221,10 @@ class PrePanel(ctk.CTkFrame):
                 text=f"Training now uses  crop={_gv('center_crop_size')}, "
                      f"beam-mask r={_gv('center_mask_radius')} "
                      f"(= polar_mask//2), polar_mask={_gv('polar_mask_cols')}, "
-                     f"COM={_gv('com_centering')}.  (vmax is display-only — "
-                     f"training normalizes internally.)")
+                     f"COM={_gv('com_centering')}, "
+                     f"vmax={float(self.vmax.get()):g}.  (vmax follows this "
+                     f"tab's slider live — no need to press this button for "
+                     f"it.)")
         except Exception as e:
             self._load_params_status.configure(text=f"failed: {e}")
 
@@ -314,6 +316,10 @@ class PrePanel(ctk.CTkFrame):
                           "Pixel values above this clip to 1.0 in the "
                           "rescaled image. Lower vmax saturates more of "
                           "the central beam halo.\n\n"
+                          "This is NOT display-only: it is the vmax that "
+                          "Training, NMF, Eval and Post-hoc use for this "
+                          "cube. It is pushed to the active sample as you "
+                          "move it, so set it BEFORE starting a run.\n\n"
                           "The slider covers 0.1-250. For raw-count data "
                           "(e.g. un-normalised detector counts) you can "
                           "TYPE a larger value in the box, up to 10000 - "
@@ -1973,8 +1979,16 @@ class PrePanel(ctk.CTkFrame):
             pass
 
     def _propagate_filters_quiet(self):
-        """Push blur / log / ellipticity into the SAMPLES entry WITHOUT
-        triggering a redraw.  Safe to call from inside ``_refresh``.
+        """Push vmax / blur / log / ellipticity into the SAMPLES entry
+        WITHOUT triggering a redraw.  Safe to call from inside ``_refresh``.
+
+        vmax matters beyond the preview: run_contrastive resolves its
+        ``vmax=None`` argument to ``cfg["vmax"]`` of the sample, and the
+        runner serialises this SAMPLES entry into the training subprocess
+        at spawn time.  Writing it here is what makes the slider the value
+        the MODEL trains and evaluates with -- previously only the value
+        captured at cube-load/bake time reached the run, so moving the
+        slider afterwards silently changed nothing but the picture.
         """
         if self.sample_key is None:
             return
@@ -1985,6 +1999,7 @@ class PrePanel(ctk.CTkFrame):
                 return
             sig = (float(self.blur_sigma.get())
                     if bool(self.use_blur.get()) else 0.0)
+            cfg["vmax"] = float(self.vmax.get())
             cfg["blur_sigma"] = float(sig)
             cfg["log_stretch"] = bool(self.log_stretch.get())
             cfg["ellipticity_ab"] = float(self.ellip_ab.get())
