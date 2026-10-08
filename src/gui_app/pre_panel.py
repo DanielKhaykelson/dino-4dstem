@@ -229,6 +229,19 @@ class PrePanel(ctk.CTkFrame):
                     vmax_note = "  (vmax NOT sent - no sample loaded)"
                 else:
                     cfg["vmax"] = vm
+                    # If the NMF tab is already pointed at this sample and is
+                    # following the sample vmax, refresh its box too, so the
+                    # transfer is visible there rather than only on its next
+                    # sample change.
+                    try:
+                        np_ = getattr(self.winfo_toplevel(), "nmf", None)
+                        if (np_ is not None
+                                and getattr(np_, "sample", None) == self.sample_key
+                                and np_._vars["use_sample_vmax"].get()):
+                            np_._snap_vmax_to_sample()
+                            vmax_note = "  (also sent to NMF)"
+                    except Exception:
+                        pass
             except Exception as _e:
                 vmax_note = f"  (vmax NOT sent: {_e})"
             # Read back what the Training tab ACTUALLY holds now, so the
@@ -335,13 +348,12 @@ class PrePanel(ctk.CTkFrame):
                           "Pixel values above this clip to 1.0 in the "
                           "rescaled image. Lower vmax saturates more of "
                           "the central beam halo.\n\n"
-                          "This is NOT display-only: it is the vmax the "
-                          "model uses. The value here is kept on the active "
-                          "sample as you move it, so the next Training run "
-                          "uses it, and the NMF tab snaps to it (uncheck "
-                          "\"use sample vmax\" there to override). "
-                          "\"Load parameters to model\" re-sends it and shows "
-                          "you the value, so you can confirm what a run gets.\n\n"
+                          "This is NOT display-only, but moving the slider "
+                          "only changes the PREVIEW. To make it the vmax a "
+                          "run uses, press \"Load parameters to model\" below: "
+                          "that sends it (with the crop / masks / COM) to "
+                          "Training, and to the NMF tab when its \"use sample "
+                          "vmax\" is ticked - untick it there to override.\n\n"
                           "The slider covers 0.1-250. For raw-count data "
                           "(e.g. un-normalised detector counts) you can "
                           "TYPE a larger value in the box, up to 10000 - "
@@ -2004,9 +2016,9 @@ class PrePanel(ctk.CTkFrame):
         """Push blur / log / ellipticity into the SAMPLES entry WITHOUT
         triggering a redraw.  Safe to call from inside ``_refresh``.
 
-        vmax is not pushed here because ``_refresh`` already keeps
-        ``SAMPLES[key]["vmax"]`` in sync with the slider (see the top of
-        _refresh); duplicating it here would just write the same value twice.
+        vmax is deliberately NOT pushed here (nor by ``_refresh``): it is
+        transferred only when the user presses "Load parameters to model", so
+        redrawing the preview can never re-aim a run.
         """
         if self.sample_key is None:
             return
@@ -3609,18 +3621,13 @@ class PrePanel(ctk.CTkFrame):
     def _refresh(self):
         if self.cube is None:
             return
-        # Keep the runtime SAMPLES entry in sync with the user's current
-        # vmax choice on this tab.  ``center_mask_radius`` is no longer
-        # set from PrePanel — the equivalent role is now played by
-        # ``polar_mask_cols`` and we leave SAMPLES at whatever value
-        # was set when the cube was registered.
-        if self.sample_key is not None:
-            try:
-                from data import SAMPLES as _S
-                if self.sample_key in _S:
-                    _S[self.sample_key]["vmax"] = float(self.vmax.get())
-            except Exception:
-                pass
+        # NOTE: vmax is deliberately NOT written into the SAMPLES entry here.
+        # Redrawing the preview must not change what a run would use -- that
+        # made dragging the slider silently re-aim Training/NMF/Eval.  vmax is
+        # transferred only when the user presses "Load parameters to model"
+        # (see _load_params_to_model).  ``center_mask_radius`` likewise stays
+        # at whatever value the cube was registered with; its role is now
+        # played by ``polar_mask_cols``.
         Ny, Nx, H, W = self.cube.shape
         idx = int(self.idx.get())
         y, x = divmod(idx, Nx)
