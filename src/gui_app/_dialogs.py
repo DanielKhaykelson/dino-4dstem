@@ -499,3 +499,41 @@ def ask_h5_dataset(parent, filename: str, datasets: list):
                   command=dlg.destroy).pack(side="left", padx=6)
     parent.wait_window(dlg)
     return result["path"]
+
+
+def ask_choice(parent, title: str, prompt: str, options: list):
+    """Modal popup: pick one of `options` (strings).  Returns the chosen
+    string, or None on cancel.  With a single option it is returned
+    without asking."""
+    options = [str(o) for o in options]
+    if not options:
+        return None
+    if len(options) == 1:
+        return options[0]
+    dlg = tk.Toplevel(parent)
+    dlg.title(title)
+    dlg.geometry("480x190")
+    try:
+        dlg.transient(parent.winfo_toplevel())
+    except Exception:
+        pass
+    dlg.grab_set()
+    ctk.CTkLabel(dlg, justify="left", wraplength=450, text=prompt,
+                 font=("Segoe UI", 10)).pack(padx=10, pady=(10, 6))
+    var = ctk.StringVar(value=options[0])
+    ctk.CTkOptionMenu(dlg, values=options, variable=var,
+                      width=440).pack(padx=10, pady=6)
+    result = {"v": None}
+
+    def _ok():
+        result["v"] = var.get()
+        dlg.destroy()
+
+    btns = ctk.CTkFrame(dlg, fg_color="transparent")
+    btns.pack(pady=(10, 8))
+    ctk.CTkButton(btns, text="OK", width=80, command=_ok).pack(
+        side="left", padx=6)
+    ctk.CTkButton(btns, text="Cancel", width=80,
+                  command=dlg.destroy).pack(side="left", padx=6)
+    parent.wait_window(dlg)
+    return result["v"]

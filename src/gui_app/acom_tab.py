@@ -205,6 +205,9 @@ class ACOMTabPanel(ctk.CTkFrame):
         ctk.CTkButton(lsrc_row, text="refresh", width=56,
                       command=self._refresh_label_sources
                       ).pack(side="left", padx=2)
+        ctk.CTkButton(sidebar, text="Load NMF labels from folder...",
+                      width=240, command=self._load_nmf_label_folder
+                      ).pack(anchor="w", padx=10, pady=(0, 2))
         cls_row = ctk.CTkFrame(sidebar, fg_color="transparent")
         cls_row.pack(fill="x", padx=10, pady=2)
         ctk.CTkLabel(cls_row, text="class:", width=44,
@@ -779,7 +782,53 @@ class ACOMTabPanel(ctk.CTkFrame):
         dc = getattr(self.app, "dino_cluster", None)
         if dc is not None and getattr(dc, "last_labels", None) is not None:
             out.append("DINO+cluster")
+        # labels_*.npy loaded from an NMF results folder
+        for nm, (smp, _a) in getattr(self, "_file_labels", {}).items():
+            if smp == s:
+                out.append(nm)
         return out
+
+    def _load_nmf_label_folder(self):
+        """Pick an NMF results folder (or its 'maps' / any sub-folder):
+        its labels_<method>.npy become class-label sources; asks which
+        one to use when there are several."""
+        from gui_app.blob_panel import BlobPanel
+        from gui_app._dialogs import ask_choice
+        s = self._active_sample()
+        if s is None:
+            messagebox.showinfo("ACOM",
+                "Load the dataset the NMF was run on first."); return
+        d = filedialog.askdirectory(title="Pick an NMF results folder")
+        if not d:
+            return
+        files = BlobPanel._find_nmf_label_files(d)
+        if not files:
+            messagebox.showinfo("ACOM",
+                f"No labels_<method>.npy in\n{d}\n(nor one level up or "
+                f"down).  NMF writes them with 'Save'."); return
+        Ny, Nx = SAMPLES[s]["scan_shape"]
+        ok = {}
+        for m, pth in files.items():
+            try:
+                a = np.load(pth, allow_pickle=False)
+            except Exception:
+                continue
+            if a.size == Ny * Nx:
+                ok[m] = a
+        if not ok:
+            messagebox.showerror("ACOM",
+                f"None of the NMF label maps in that folder fit the "
+                f"loaded dataset ({Ny} x {Nx})."); return
+        name = ask_choice(self, "NMF class maps",
+            "Use which NMF class map for ACOM?", list(ok))
+        if name is None:
+            return
+        self.__dict__.setdefault("_file_labels", {})
+        for m, a in ok.items():
+            self._file_labels[f"NMF file: {m}"] = (s, a)
+        self._refresh_label_sources()
+        self._label_src.set(f"NMF file: {name}")
+        self._draw_classmap_if_possible()
 
     def _refresh_label_sources(self):
         srcs = self._label_sources()
@@ -817,6 +866,9 @@ class ACOMTabPanel(ctk.CTkFrame):
         elif which == "DINO+cluster":
             dc = getattr(self.app, "dino_cluster", None)
             lab = getattr(dc, "last_labels", None) if dc else None
+        elif which.startswith("NMF file: "):
+            ent = getattr(self, "_file_labels", {}).get(which)
+            lab = ent[1] if ent and ent[0] == s else None
         if lab is None:
             return None, (f"'{which}' is not available.  Run NMF "
                           f"(Clustering > NMF) or DINO+cluster on this "

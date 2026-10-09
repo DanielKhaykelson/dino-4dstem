@@ -176,6 +176,10 @@ class BlobPanel(ctk.CTkFrame):
         self._worker_progress = ""
         self._worker_lock = threading.Lock()
         self._raw_cache = {}          # frame_idx -> raw 2D
+        # classes from NMF (a labels_*.npy file or the NMF tab in memory)
+        # instead of a DINO run: (Ny*Nx,) int, and a human-readable name
+        self._label_map = None
+        self._label_name = ""
         self._build()
         # Subscribe to the global session so loading a run anywhere
         # (topbar badge, post-hoc, …) auto-links Blob.
@@ -188,6 +192,8 @@ class BlobPanel(ctk.CTkFrame):
     def link_run(self, outdir, sample):
         self.outdir = outdir
         self.sample = sample
+        self._label_map = None
+        self._label_name = ""
         self._info_lbl.configure(
             text=f"linked: {os.path.basename(outdir)}  (sample={sample})")
         self._load_run_state()
@@ -197,6 +203,9 @@ class BlobPanel(ctk.CTkFrame):
         dataset/run loaded by any other tab or the topbar badge."""
         if sess is None: return
         if not (sess.has_dataset() and sess.has_run()):
+            return
+        if self._label_map is not None and not self._dir_has_dino(
+                sess.run_dir):
             return
         if (self.outdir == sess.run_dir
                 and self.sample == sess.sample):
@@ -469,9 +478,18 @@ class BlobPanel(ctk.CTkFrame):
 
     # ------------- top-bar callbacks ------------------------------
     def _load_dir_dialog(self):
-        p = filedialog.askdirectory(title="Pick a run dir")
+        p = filedialog.askdirectory(
+            title="Pick a DINO run dir or an NMF results folder")
         if not p:
             return
+        # An NMF folder (labels_<method>.npy here, one level up -- e.g.
+        # you picked its 'maps' -- or one level down) has no checkpoint:
+        # use its labels instead of looking for a .pth.
+        if not self._dir_has_dino(p):
+            files = self._find_nmf_label_files(p)
+            if files:
+                self._adopt_label_files(files)
+                return
         # Route through the global Session so SAMPLE_LOCK.json /
         # run_summary.json / _train_kwargs.json get resolved
         # consistently with every other tab.
@@ -499,7 +517,254 @@ class BlobPanel(ctk.CTkFrame):
         self._method_frames[m].pack(fill="x")
 
     # ------------- class data loading -----------------------------
+    # ------------- classes from NMF (no DINO run needed) -------------
+    @staticmethod
+    def _dir_has_dino(d) -> bool:
+        """A DINO run dir: a checkpoint or cached inference."""
+        if not d or not os.path.isdir(d):
+            return False
+        try:
+            names = os.listdir(d)
+        except Exception:
+            return False
+        if "best.pth" in names or any(
+                n.startswith("ckpt_ep") and n.endswith(".pth")
+                for n in names):
+            return True
+        ev = os.path.join(d, "eval")
+        try:
+            return any(n.startswith("inference") and n.endswith(".npz")
+                       for n in os.listdir(ev))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _find_nmf_label_files(d) -> dict:
+        """{method: path} of labels_<method>.npy in d, its parent and
+        its direct sub-folders (NMF saves them next to 'maps/')."""
+        out = {}
+        cands = [d, os.path.dirname(os.path.normpath(d))]
+        try:
+            cands += [os.path.join(d, x) for x in sorted(os.listdir(d))
+                      if os.path.isdir(os.path.join(d, x))]
+        except Exception:
+            pass
+        for c in cands:
+            try:
+                names = sorted(os.listdir(c))
+            except Exception:
+                continue
+            for n in names:
+                if n.startswith("labels_") and n.endswith(".npy"):
+                    m = n[len("labels_"):-len(".npy")]
+                    if m in out:
+                        m = f"{m}  ({os.path.basename(c)})"
+                    out[m] = os.path.join(c, n)
+        return out
+
+    def _active_sample_key(self):
+        from data import SAMPLES
+        sess = getattr(self.app, "session", None) if self.app else None
+        s = getattr(sess, "sample", None)
+        if s in SAMPLES:
+            return s
+        pre = getattr(self.app, "pre", None) if self.app else None
+        try:
+            k = pre.get_sample_key() if pre is not None else None
+        except Exception:
+            k = None
+        if k in SAMPLES:
+            return k
+        return self.sample if self.sample in SAMPLES else None
+
+    def _adopt_label_files(self, files: dict) -> bool:
+        """Pick one labels_*.npy (asks if several) and use it."""
+        from gui_app._dialogs import ask_choice
+        name = ask_choice(self, "NMF class maps",
+            "This folder has several NMF class maps.  Which one should "
+            "Blob detection use?", list(files))
+        if name is None:
+            return False
+        path = files[name]
+        folder = os.path.dirname(path)
+        # the NMF summary names its sample; else the dataset loaded now
+        sample = None
+        try:
+            from data import SAMPLES
+            js = json.load(open(os.path.join(folder, "summary.json"),
+                                encoding="utf-8"))
+            if js.get("sample") in SAMPLES:
+                sample = js["sample"]
+        except Exception:
+            pass
+        sample = sample or self._active_sample_key()
+        if sample is None:
+            messagebox.showinfo("Blob",
+                "Load the dataset these NMF labels belong to (topbar / "
+                "Data tab) first, then pick the folder again.")
+            return False
+        try:
+            lab = np.load(path, allow_pickle=False)
+        except Exception as e:
+            messagebox.showerror("Blob", f"cannot read {path}:\n{e!r}")
+            return False
+        return self._use_label_map(lab, f"NMF {name}  (file)", sample,
+                                   folder)
+
+    def _adopt_running_nmf(self) -> bool:
+        """Use the NMF tab's current clustering for the active dataset."""
+        nmf = getattr(self.app, "nmf", None) if self.app else None
+        store = getattr(nmf, "last_cluster_labels", None) if nmf else None
+        sample = getattr(nmf, "sample", None) if nmf else None
+        if not store or sample is None:
+            return False
+        active = self._active_sample_key()
+        if active is not None and active != sample:
+            return False
+        from gui_app._dialogs import ask_choice
+        name = ask_choice(self, "NMF class maps",
+            "Use which NMF clustering from the NMF tab?", list(store))
+        if name is None:
+            return False
+        base = (getattr(nmf, "outdir", None)
+                or os.path.join(os.path.expanduser("~"), "DINO-4DSTEM"))
+        outdir = os.path.join(base, "nmf_blob", str(sample))
+        return self._use_label_map(store[name], f"NMF {name}  (NMF tab)",
+                                   sample, outdir)
+
+    def _use_label_map(self, labels, name, sample, outdir) -> bool:
+        from data import SAMPLES
+        cfg = SAMPLES.get(sample) or {}
+        ss = cfg.get("scan_shape") or cfg.get("scan_size")
+        lab = np.asarray(labels).ravel().astype(int)
+        if ss is not None and lab.size != int(ss[0]) * int(ss[1]):
+            messagebox.showerror("Blob",
+                f"{name} has {lab.size} positions but the dataset "
+                f"'{sample}' is {ss[0]} x {ss[1]}.  Load the dataset the "
+                f"NMF was run on.")
+            return False
+        os.makedirs(outdir, exist_ok=True)
+        self.outdir = outdir
+        self.sample = sample
+        self._cube_path = cfg.get("path") or (cfg.get("paths") or [None])[0]
+        self._scan_shape = tuple(ss) if ss is not None else None
+        self._label_map = lab
+        self._label_name = name
+        self._assigns = lab
+        self._K = int(lab.max()) + 1 if lab.size else 0
+        self._class_avgs = None
+        self._raw_cache = {}
+        self._read_per_class_cfg()
+        self._info_lbl.configure(
+            text=f"classes: {name}   (sample={sample})")
+        self._refresh_class_menu()
+        self._render_canvas_idle()
+        return True
+
+    def _display_pattern(self, raw_mean, cfg):
+        """Raw mean pattern -> the same 192 px view the DINO class
+        averages use (vmax clip, sample blur/log, crop 140, resize)."""
+        import torch
+        import torch.nn.functional as F
+        from torchvision.transforms import v2 as T
+        from torchvision.transforms import InterpolationMode
+        H = 192
+        wn = np.clip(raw_mean / max(float(cfg.get("vmax", 2.0)), 1e-6),
+                     0.0, 1.0)
+        x = torch.from_numpy(wn.astype(np.float32))[None, None]
+        x = F.interpolate(x, size=(H, H), mode="bilinear",
+                          align_corners=False)
+        try:
+            from data import apply_sample_filters
+            arr = apply_sample_filters(x.squeeze().numpy(), cfg)
+            x = torch.from_numpy(np.asarray(arr, np.float32))[None, None]
+        except Exception:
+            pass
+        pre = T.Compose([T.CenterCrop(140),
+                         T.Resize(H, interpolation=InterpolationMode.BILINEAR,
+                                  antialias=True)])
+        return pre(x)[0, 0].numpy().astype(np.float32)
+
+    def _mean_raw_idx(self, idx):
+        from data import LoadPRZ, SAMPLES
+        cfg = SAMPLES[self.sample]
+        ds = LoadPRZ(cfg["path"], resize=192, vmax=cfg["vmax"])
+        acc = None
+        for i in idx:
+            f = ds.get_raw(int(i)).astype(np.float64)
+            acc = f if acc is None else acc + f
+        return acc / max(len(idx), 1)
+
+    def _class_avgs_from_labels(self):
+        from data import SAMPLES
+        cfg = SAMPLES[self.sample]
+        sel = self._vars["classavg_members"].get()
+        top_n = (None if sel.startswith("all")
+                 else 500 if "500" in sel else 200)
+        rng = np.random.default_rng(42)
+        lab = self._label_map
+        avgs = []
+        for c in range(self._K):
+            self._status_lbl.configure(
+                text=f"averaging class {c + 1}/{self._K} ({self._label_name})")
+            self.update_idletasks()
+            idx = np.flatnonzero(lab == c)
+            if idx.size == 0:
+                avgs.append(np.zeros((192, 192), np.float32)); continue
+            # NMF has no per-pattern confidence: a fixed-seed random subset
+            if top_n and idx.size > top_n:
+                idx = rng.choice(idx, top_n, replace=False)
+            avgs.append(self._display_pattern(self._mean_raw_idx(idx), cfg))
+        self._class_avgs = np.asarray(avgs)
+        self._refresh_class_menu()
+        self._status_lbl.configure(
+            text=f"class averages ready (K={self._K}, {self._label_name}"
+                 + (f", random {top_n}/class" if top_n else ", all members")
+                 + f"). Scan: {self._scan_shape}")
+        self._render_canvas_idle()
+
+    def _grain_from_labels(self, y, x):
+        from scipy.ndimage import label
+        from data import SAMPLES
+        Ny, Nx = self._scan_shape
+        grid = self._label_map.reshape(Ny, Nx)
+        cls = int(grid[y, x])
+        if cls < 0:
+            return None
+        lab, _ = label(grid == cls)
+        gid = int(lab[y, x])
+        if gid == 0:
+            return None
+        idx = np.flatnonzero((lab == gid).ravel())
+        n = int(idx.size)
+        if n > 1024:
+            idx = np.random.default_rng(42).choice(idx, 1024, replace=False)
+        avg = self._display_pattern(self._mean_raw_idx(idx),
+                                    SAMPLES[self.sample])
+        return dict(grain_avg=avg, cls=cls, n_pix=n)
+
     def _compute_class_avgs(self):
+        # Classes, in this order: an NMF label map already picked; a DINO
+        # run with a checkpoint / cached inference; the NMF tab's current
+        # clustering.  No checkpoint is needed for NMF classes.
+        if self._label_map is None and not self._dir_has_dino(self.outdir):
+            files = (self._find_nmf_label_files(self.outdir)
+                     if self.outdir else {})
+            if not ((files and self._adopt_label_files(files))
+                    or self._adopt_running_nmf()):
+                messagebox.showinfo("Blob",
+                    "No classes yet.  Either run NMF (Clustering > NMF) "
+                    "on this dataset, pick an NMF results folder or a "
+                    "trained DINO run with 'Load run dir...', or load a "
+                    "DINO run from the topbar.")
+                return
+        if self._label_map is not None:
+            try:
+                self._class_avgs_from_labels()
+            except Exception as e:
+                messagebox.showerror("Blob",
+                    f"compute class avgs failed:\n{e!r}")
+            return
         if not self.outdir:
             messagebox.showinfo("Blob", "Load a run dir first."); return
         if not self._cube_path:
@@ -584,12 +849,15 @@ class BlobPanel(ctk.CTkFrame):
             # of same-class pixels containing the click).
             ph = (getattr(self.app, "posthoc", None)
                     if self.app else None)
-            if ph is None or ph._inf is None:
-                return None, "(need posthoc inference for grain mode)"
+            if self._label_map is None and (ph is None or ph._inf is None):
+                return None, ("(grain mode needs classes: NMF or a DINO "
+                              "run - press 'Reload class avgs')")
             try:
                 y = int(self._vars["grain_y"].get())
                 x = int(self._vars["grain_x"].get())
-                gi = ph._compute_grain_average(y, x)
+                gi = (self._grain_from_labels(y, x)
+                      if self._label_map is not None
+                      else ph._compute_grain_average(y, x))
             except Exception:
                 return None, "(grain extract failed)"
             if gi is None:
