@@ -88,6 +88,33 @@ NMF_VARIANTS = {
 }
 
 
+def polar_component_to_cart(comp, out_size: int = 192,
+                            max_radius_frac: float = 1.0) -> np.ndarray:
+    """Map a polar NMF component back to the Cartesian detector plane.
+
+    Exact inverse of ``dino_sr_ablation.PolarTransform``: that samples the
+    Cartesian image at normalised (x, y) = (r cos t, r sin t) with t running
+    0..2*pi down the rows and r running 0..max_radius_frac across the
+    columns (``align_corners=True``).  Here every Cartesian pixel looks up
+    its own (t, r).  Pixels outside the inscribed circle were never sampled
+    and come back NaN; the low-r columns zeroed by PolarMaskLeft come back as
+    the dark central disc -- the same information, just in detector space.
+    """
+    from scipy.ndimage import map_coordinates
+    comp = np.asarray(comp, dtype=np.float64)
+    n_t, n_r = comp.shape
+    n = int(out_size)
+    yy, xx = np.mgrid[0:n, 0:n].astype(np.float64)
+    gx = 2.0 * xx / (n - 1) - 1.0
+    gy = 2.0 * yy / (n - 1) - 1.0
+    r = np.hypot(gx, gy) / float(max_radius_frac)
+    t = np.mod(np.arctan2(gy, gx), 2.0 * np.pi)
+    out = map_coordinates(comp, [t * (n_t - 1) / (2.0 * np.pi),
+                                 r * (n_r - 1)], order=1, mode="nearest")
+    out[r > 1.0] = np.nan
+    return out
+
+
 def _safe_name(s: str) -> str:
     """Slug-safe version of a variant key (parentheses, spaces, etc.)."""
     out = []
@@ -666,13 +693,35 @@ class NMFPanel(ctk.CTkFrame):
             text_color=("#444", "#aaa"), wraplength=300)
         self._status_lbl.pack(anchor="w", padx=8, pady=(8, 4))
 
-        # canvas
+        # canvas -- inside a vertical scroller.  When a result needs more
+        # rows than fit (e.g. the Cartesian row under the polar components)
+        # the figure grows taller and a scrollbar appears, instead of every
+        # row being squeezed to make room.
+        import tkinter as _tk
         canv = ctk.CTkFrame(body)
         canv.pack(side="left", fill="both", expand=True, padx=(6, 0))
+        view = _tk.Frame(canv)                      # packed after the toolbar
+        self._view_canvas = _tk.Canvas(view, highlightthickness=0,
+                                       borderwidth=0)
+        self._vsb = ctk.CTkScrollbar(view, orientation="vertical",
+                                     command=self._view_canvas.yview)
+        self._view_canvas.configure(yscrollcommand=self._vsb.set)
+        self._vsb_shown = False
+        self._view_canvas.pack(side="left", fill="both", expand=True)
+        self._fig_holder = _tk.Frame(self._view_canvas)
+        self._fig_win = self._view_canvas.create_window(
+            (0, 0), window=self._fig_holder, anchor="nw")
+        self._fig_T = 1.0     # figure height / visible height
         self._fig = Figure(figsize=(14, 9))
-        self._canvas = FigureCanvasTkAgg(self._fig, master=canv)
+        self._canvas = FigureCanvasTkAgg(self._fig, master=self._fig_holder)
         self._canvas.get_tk_widget().pack(fill="both", expand=True)
-        NavigationToolbar2Tk(self._canvas, canv)
+        NavigationToolbar2Tk(self._canvas, canv)    # stays visible, below
+        view.pack(side="top", fill="both", expand=True)
+        self._view_canvas.bind("<Configure>",
+                               lambda _e: self._apply_fig_height())
+        for _seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self._canvas.get_tk_widget().bind(
+                _seq, self._on_fig_wheel, add="+")
         # Double-click any inline class map -> open the big interactive
         # viewer at that method (left/right/shift+right click inside).
         self._map_axes = {}     # ax -> method name
@@ -1061,8 +1110,51 @@ class NMFPanel(ctk.CTkFrame):
             if self._last is not None:
                 self._render_last()
 
+    # ----- scrolling figure -------------------------------------------
+    def _apply_fig_height(self):
+        """Size the figure to ``_fig_T`` times the visible height.
+
+        T == 1 fills the view exactly (the old behaviour, no scrollbar).
+        T > 1 keeps every row at the size it would have had and makes the
+        extra height reachable with the scrollbar.
+        """
+        try:
+            vc = self._view_canvas
+            w = max(int(vc.winfo_width()), 1)
+            h = max(int(vc.winfo_height()), 1)
+            T = max(1.0, float(self._fig_T))
+            hh = int(round(h * T))
+            vc.itemconfigure(self._fig_win, width=w, height=hh)
+            vc.configure(scrollregion=(0, 0, w, hh))
+            need = T > 1.0001
+            if need and not self._vsb_shown:
+                self._vsb.pack(side="right", fill="y")
+                self._vsb_shown = True
+            elif not need and self._vsb_shown:
+                self._vsb.pack_forget()
+                self._vsb_shown = False
+                vc.yview_moveto(0.0)
+        except Exception:
+            pass
+
+    def _on_fig_wheel(self, e):
+        if float(getattr(self, "_fig_T", 1.0)) <= 1.0001:
+            return
+        if getattr(e, "num", None) == 4:
+            step = -1
+        elif getattr(e, "num", None) == 5:
+            step = 1
+        else:
+            step = -1 if e.delta > 0 else 1
+        self._view_canvas.yview_scroll(step * 3, "units")
+
+    def _set_fig_T(self, T):
+        self._fig_T = max(1.0, float(T))
+        self._apply_fig_height()
+
     # ----- rendering ---------------------------------------------------
     def _render_idle(self):
+        self._set_fig_T(1.0)
         self._fig.clear()
         ax = self._fig.add_subplot(111)
         ax.text(0.5, 0.5,
@@ -1092,26 +1184,45 @@ class NMFPanel(ctk.CTkFrame):
         self._fig.clear()
         n_methods = max(1, len(labels))
         ncomp_cols = max(n_comp, 2)
-        # Components (+ optional diagnostics) get a top gridspec; the class
-        # maps get their OWN bottom gridspec with one column PER METHOD, so
-        # they render large instead of squeezed into n_comp columns.
+        # Polar runs also get a row of the same components in the Cartesian
+        # detector plane.  Cartesian / 1-D radial runs have nothing to add.
+        inp = ((d.get("cfg") or {}).get("input")
+               or NMF_VARIANTS.get(d.get("variant", ""), {}).get("input"))
+        show_cart = (inp == "polar" and len(comp_shape) == 2
+                     and comp_shape[0] > 1)
+
+        # Bands are laid out in units of the VISIBLE height (top = 0).  These
+        # reproduce the previous layout exactly; an extra row is inserted by
+        # pushing everything below it down and making the figure taller
+        # (scrollbar), so no existing row shrinks.
         if diag:
-            gs_top = self._fig.add_gridspec(
-                2, ncomp_cols, left=0.04, right=0.98, top=0.94, bottom=0.52,
-                height_ratios=[1.0, 0.6], hspace=0.55, wspace=0.12)
-            map_top, map_bot = 0.44, 0.06
+            comp_b, diag_b, map_b = (0.06, 0.266), (0.357, 0.48), (0.56, 0.94)
         else:
-            gs_top = self._fig.add_gridspec(
-                1, ncomp_cols, left=0.04, right=0.98, top=0.94, bottom=0.55,
-                wspace=0.12)
-            map_top, map_bot = 0.48, 0.06
-        gs_map = self._fig.add_gridspec(
-            1, n_methods, left=0.04, right=0.98, top=map_top, bottom=map_bot,
-            wspace=0.40)
+            comp_b, diag_b, map_b = (0.06, 0.45), None, (0.52, 0.94)
+        delta, cart_b = 0.0, None
+        if show_cart:
+            gap = 0.07                              # room for the row titles
+            ch = comp_b[1] - comp_b[0]              # same height as polar row
+            cart_b = (comp_b[1] + gap, comp_b[1] + gap + ch)
+            delta = gap + ch
+            if diag_b:
+                diag_b = (diag_b[0] + delta, diag_b[1] + delta)
+            map_b = (map_b[0] + delta, map_b[1] + delta)
+        T = 1.0 + delta
+        F = lambda y: 1.0 - y / T                   # band -> figure fraction
+
+        def _band(b, n, ws):
+            return self._fig.add_gridspec(
+                1, n, left=0.04, right=0.98, top=F(b[0]), bottom=F(b[1]),
+                wspace=ws)
+        gs_comp = _band(comp_b, ncomp_cols, 0.12)
+        gs_cart = _band(cart_b, ncomp_cols, 0.12) if cart_b else None
+        gs_diag = _band(diag_b, ncomp_cols, 0.12) if diag_b else None
+        gs_map = _band(map_b, n_methods, 0.40)
 
         # ---- NMF components ----
         for k in range(n_comp):
-            ax = self._fig.add_subplot(gs_top[0, k])
+            ax = self._fig.add_subplot(gs_comp[0, k])
             comp = H[k].reshape(comp_shape)
             if comp.shape[0] == 1:                   # 1D radial
                 ax.plot(comp[0], color="black", lw=1.0)
@@ -1119,7 +1230,22 @@ class NMFPanel(ctk.CTkFrame):
             else:
                 ax.imshow(comp, cmap="inferno", aspect="auto")
                 ax.set_xticks([]); ax.set_yticks([])
-            ax.set_title(f"H[{k}]", fontsize=9)
+            ax.set_title(f"H[{k}]  polar" if show_cart else f"H[{k}]",
+                         fontsize=9)
+
+        # ---- the same components in the Cartesian detector plane ----
+        if show_cart:
+            import copy as _copy
+            cmap_c = _copy.copy(plt.get_cmap("inferno"))
+            cmap_c.set_bad("black")
+            for k in range(n_comp):
+                ax = self._fig.add_subplot(gs_cart[0, k])
+                cart = polar_component_to_cart(H[k].reshape(comp_shape),
+                                               out_size=comp_shape[1])
+                ax.imshow(cart, cmap=cmap_c, aspect="equal",
+                          interpolation="nearest")
+                ax.set_xticks([]); ax.set_yticks([])
+                ax.set_title(f"H[{k}]  cartesian", fontsize=9)
 
         # ---- diagnostic curves (only when auto modes were used) ----
         if diag:
@@ -1127,7 +1253,7 @@ class NMFPanel(ctk.CTkFrame):
             # Use first half for recon-err, second half for silhouette.
             half = max(1, n_cols // 2)
             if errs is not None:
-                ax_e = self._fig.add_subplot(gs_top[1, 0:half])
+                ax_e = self._fig.add_subplot(gs_diag[0, 0:half])
                 xs = np.arange(2, 2 + len(errs))
                 ax_e.plot(xs, errs, marker="o", lw=1.4, color="#1f77b4")
                 ax_e.axvline(n_comp, color="orange", ls="--", lw=1.2,
@@ -1144,7 +1270,7 @@ class NMFPanel(ctk.CTkFrame):
                 ax_e.legend(fontsize=7, loc="upper right")
                 ax_e.grid(alpha=0.3)
             if sil is not None:
-                ax_s = self._fig.add_subplot(gs_top[1, half:n_cols])
+                ax_s = self._fig.add_subplot(gs_diag[0, half:n_cols])
                 xs = np.arange(2, 2 + len(sil))
                 ax_s.plot(xs, sil, marker="o", lw=1.4, color="#d62728")
                 ax_s.axvline(K, color="orange", ls="--", lw=1.2,
@@ -1197,9 +1323,13 @@ class NMFPanel(ctk.CTkFrame):
         title = (f"{self.sample}   variant: {d['variant']}   "
                  f"vmax={vmax:g}   n_comp={n_comp}   K={K}   "
                  f"recon-err={d['err_final']:.3f}")
-        self._fig.suptitle(title, fontsize=11)
+        # Keep the title at the same distance from the top as on a single
+        # screen; on a taller figure the default y=0.98 lands further down
+        # and collides with the first row's labels.
+        self._fig.suptitle(title, fontsize=11, y=1.0 - 0.02 / T)
         # NOTE: no tight_layout here — the manual gridspec (left/right/top/
         # bottom) already positions the components row + the larger maps row.
+        self._set_fig_T(T)
         self._canvas.draw_idle()
         # Auto-save a copy of the result figure next to the loaded data.
         try:
