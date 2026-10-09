@@ -140,7 +140,7 @@ class PrePanel(ctk.CTkFrame):
         # the model sees them.  Pushed through get_pre_kwargs into
         # Training tab defaults.
         self.polar_mask_cols = ctk.IntVar(value=45)
-        self.com = ctk.BooleanVar(value=True)
+        self.com = ctk.BooleanVar(value=False)   # opt-in
         self.log_stretch = ctk.BooleanVar(value=False)   # display only
         self.use_blur    = ctk.BooleanVar(value=False)   # display only
         self.blur_sigma  = ctk.DoubleVar(value=1.0)      # px in display frame
@@ -1686,9 +1686,11 @@ class PrePanel(ctk.CTkFrame):
         cy0 = (H - 1) / 2.0; cx0 = (W - 1) / 2.0
         dy = cy - cy0; dx = cx - cx0
         self._nbed_status.configure(
-            text=f"BF centre @ idx={idx}:  (cy={cy:.1f}, cx={cx:.1f})\n"
-                  f"offset from geom centre:  Δy={dy:+.1f}px, "
-                  f"Δx={dx:+.1f}px  → {np.hypot(dy, dx):.2f}px shift")
+            text=f"green ring = BF disk found @ idx={idx}  "
+                  f"(cy={cy:.1f}, cx={cx:.1f})\n"
+                  f"dashed crosshair = target centre;  arrow = shift "
+                  f"Δy={dy:+.1f}px, Δx={dx:+.1f}px  "
+                  f"({np.hypot(dy, dx):.2f}px)")
         self._refresh()
 
     # ==================================================================
@@ -3775,13 +3777,33 @@ class PrePanel(ctk.CTkFrame):
             scale = 192.0 / max(crop_size, 1)
             cy_disp = 96.0 + (cy_192 - 96.0) * scale
             cx_disp = 96.0 + (cx_192 - 96.0) * scale
-            self._ax_proc.plot([cx_disp], [cy_disp], marker="+",
-                                  color="lime", markersize=12,
-                                  markeredgewidth=1.8,
-                                  label="BF centre")
-            self._ax_proc.plot([96], [96], marker="x", color="cyan",
-                                  markersize=8, markeredgewidth=1.2,
-                                  label="geom centre")
+            # GOAL = where the beam is moved to: a thin dashed crosshair
+            # spanning the whole image (a fixed reticle, clearly not a
+            # detection).  FOUND = the detected BF disk: a solid ring of
+            # the disk's size + centre dot.  An arrow FOUND -> GOAL shows
+            # the shift that centering applies.
+            from matplotlib.patches import Circle as _Circle
+            ax = self._ax_proc
+            ax.axhline(96, color="white", lw=0.9, ls=(0, (4, 3)),
+                       alpha=0.75, zorder=4)
+            ax.axvline(96, color="white", lw=0.9, ls=(0, (4, 3)),
+                       alpha=0.75, zorder=4)
+            try:
+                r_raw = float(self._nbed_disk_radius.get())
+            except Exception:
+                r_raw = 0.0
+            r_disp = r_raw * (191.0 / max(H_r - 1, 1)) * scale
+            if r_disp > 1.0:
+                ax.add_patch(_Circle((cx_disp, cy_disp), r_disp,
+                                     fill=False, ec="lime", lw=1.8,
+                                     zorder=5))
+            ax.plot([cx_disp], [cy_disp], marker="o", ms=4.5,
+                    color="lime", mec="black", mew=0.6, zorder=6)
+            if np.hypot(cx_disp - 96.0, cy_disp - 96.0) > 0.75:
+                ax.annotate("", xy=(96, 96), xytext=(cx_disp, cy_disp),
+                            arrowprops=dict(arrowstyle="-|>", color="lime",
+                                            lw=1.4, shrinkA=0, shrinkB=0),
+                            zorder=6)
         # Ellipticity overlay — only when the slider is still at
         # identity (a/b == 1).  Once the user moves the slider the
         # corrected image speaks for itself (the elliptical feature
