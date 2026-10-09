@@ -68,6 +68,38 @@ def _hint(parent, text):
                   anchor="w").pack(anchor="w", padx=10, pady=(0, 2))
 
 
+def _fill_stride(obj, Ny, Nx, stride):
+    """A full-dataset run with stride s only matches positions with
+    y % s == 0 and x % s == 0; everything else is empty, so the maps
+    show isolated dots and no grain is ever connected.  Copy each sampled
+    result into its s x s block, in place, for every array in obj (an
+    ndarray, a dict of them, or an object such as py4DSTEM's orientation
+    map) whose axes hold the (Ny, Nx) scan -- first two axes, or axes 1-2
+    for per-phase stacks."""
+    s = int(stride)
+    if s <= 1:
+        return obj
+    iy = (np.arange(Ny) // s) * s
+    ix = (np.arange(Nx) // s) * s
+
+    def _fix(a):
+        if not isinstance(a, np.ndarray) or a.ndim < 2:
+            return a
+        if a.shape[:2] == (Ny, Nx):
+            a[...] = a[iy][:, ix]
+        elif a.ndim >= 3 and a.shape[1:3] == (Ny, Nx):
+            a[...] = a[:, iy][:, :, ix]
+        return a
+    if isinstance(obj, np.ndarray):
+        return _fix(obj)
+    items = (obj.items() if isinstance(obj, dict)
+             else list(vars(obj).items()) if hasattr(obj, "__dict__")
+             else [])
+    for _k, v in items:
+        _fix(v)
+    return obj
+
+
 # ---------------------------------------------------------------------------
 
 class ACOMTabPanel(ctk.CTkFrame):
@@ -329,11 +361,18 @@ class ACOMTabPanel(ctk.CTkFrame):
         # Fiber axis (only used when plan = fiber).
         fib_row = ctk.CTkFrame(sidebar, fg_color="transparent")
         fib_row.pack(fill="x", padx=10, pady=1)
-        ctk.CTkLabel(fib_row, text="fiber axis (h k l):",
-                       width=110, anchor="w").pack(side="left")
+        ctk.CTkLabel(fib_row, text="view dir [u v w]:",
+                       width=104, anchor="w").pack(side="left")
         self._fiber_axis = ctk.StringVar(value="0 0 1")
         ctk.CTkEntry(fib_row, textvariable=self._fiber_axis,
-                       width=70).pack(side="left", padx=2)
+                       width=62).pack(side="left", padx=2)
+        ctk.CTkLabel(fib_row, text="tilt ±°:").pack(side="left",
+                                                   padx=(6, 2))
+        # fiber cap half-angle: 0 = exactly this zone axis (all in-plane
+        # rotations); >0 also tries axes tilted up to this many degrees
+        self._fiber_tilt = ctk.DoubleVar(value=0.0)
+        ctk.CTkEntry(fib_row, textvariable=self._fiber_tilt,
+                       width=40).pack(side="left", padx=2)
         # GPU (CUDA) — only effective if cupy is installed.
         self._use_gpu = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(fib_row, text="GPU", variable=self._use_gpu,
@@ -344,8 +383,10 @@ class ACOMTabPanel(ctk.CTkFrame):
             "zone_axis_range (note py4DSTEM's quirky naming):\n"
             "• corners — explicit zone-axis triangle (cubic fundamental "
             "zone; fast).\n"
-            "• fiber — spherical cap about the fiber axis (in-plane "
-            "0–360°).\n"
+            "• fiber — ONE view direction: the zone axis [u v w] you "
+            "type (crystal coordinates), with every in-plane rotation.  "
+            "'tilt ±°' > 0 also tries zone axes tilted up to that angle "
+            "from it.\n"
             "• full — HEMISPHERE range.\n"
             "• half — QUARTER-sphere range.\n"
             "• auto — pymatgen point-group symmetry picks the range for "
@@ -614,7 +655,8 @@ class ACOMTabPanel(ctk.CTkFrame):
         for ax, txt in ((self._ax_pat,  "(load a source — step 1)"),
                           (self._ax_1d,   "(needs source + CIF — steps 1+3)"),
                           (self._ax_fit,  "(needs single match — step 4)"),
-                          (self._ax_cmap, "(load posthoc inference)")):
+                          (self._ax_cmap, "(no class map yet: NMF, "
+                                          "DINO+cluster or a DINO run)")):
             ax.text(0.5, 0.5, txt, ha="center", va="center",
                      fontsize=10, color="#888", transform=ax.transAxes)
             ax.set_xticks([]); ax.set_yticks([])
@@ -1325,10 +1367,15 @@ class ACOMTabPanel(ctk.CTkFrame):
                 fib = [0.0, 0.0, 1.0]
         except Exception:
             fib = [0.0, 0.0, 1.0]
+        try:
+            tilt = min(max(float(self._fiber_tilt.get()), 0.0), 180.0)
+        except Exception:
+            tilt = 0.0
         return dict(plan_mode=self._plan_mode.get(),
                      angle_step_zone_axis=za,
                      angle_step_in_plane=ip,
                      fiber_axis=fib,
+                     fiber_angles=(tilt, 360.0),
                      use_cuda=bool(self._use_gpu.get()))
 
     def _build_all_phases(self):
@@ -1354,6 +1401,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                 key = (cif, kmax, plan, plan_kw["angle_step_zone_axis"],
                        plan_kw["angle_step_in_plane"],
                        tuple(plan_kw["fiber_axis"]),
+                       tuple(plan_kw["fiber_angles"]),
                        plan_kw["use_cuda"])
                 if (self._phase_keys.get(name) == key
                         and name in self._phase_crystals):
@@ -1520,12 +1568,20 @@ class ACOMTabPanel(ctk.CTkFrame):
             # Match tolerance = 1.5 % of visible q-range.
             match_tol = max((rc_inva.max() - rc_inva.min()) * 0.015,
                                  1e-3)
+            near = np.zeros(gleng_vis.size, bool)
+            if peak_q.size:
+                near = (np.min(np.abs(gleng_vis[:, None]
+                                      - peak_q[None, :]), axis=1)
+                        <= match_tol)
+            near_idx = np.flatnonzero(near)
+            MAX_MATCHED = 20
+            matched = set(near_idx[np.argsort(-sint_vis[near_idx])]
+                          [:MAX_MATCHED].tolist())
             for k_idx in range(gleng_vis.size):
                 q = float(gleng_vis[k_idx])
                 I = float(sint_vis[k_idx])
                 is_top = k_idx in topN
-                is_matched = (peak_q.size > 0
-                                and np.min(np.abs(peak_q - q)) <= match_tol)
+                is_matched = k_idx in matched
                 if not (is_top or is_matched):
                     continue
                 # Opacity / lw scale with intensity (sqrt).  Matched
@@ -1922,10 +1978,9 @@ class ACOMTabPanel(ctk.CTkFrame):
         for s in ax.spines.values():
             s.set_visible(False)
         ax.set_title(
-            "step 4 — NNLS multi-phase fit  "
-            "(gray = experimental peaks; coloured triangles = "
-            "predicted per phase)",
-            fontsize=10)
+            "step 4 — NNLS multi-phase fit\n"
+            "(gray = experiment, triangles = each phase)",
+            fontsize=9)
         # Status line: weights + residual + reliability
         lines = ["NNLS  "]
         total = float(per_phase_weights.sum())
@@ -2041,7 +2096,31 @@ class ACOMTabPanel(ctk.CTkFrame):
                 scale_markers=s_fit,
                 scale_markers_compare=s_exp,
                 min_marker_size=2, figsize=(5, 5),
+                add_labels=False,
                 input_fig_handle=(self._fig, [ax]))
+            # hkl labels only on the strongest predicted reflections --
+            # labelling all of them buries the panel in text
+            try:
+                qx = np.asarray(fit.data["qx"], float)
+                qy = np.asarray(fit.data["qy"], float)
+                it = np.asarray(fit.data["intensity"], float)
+                hh = [np.asarray(fit.data[c]) for c in ("h", "k", "l")]
+                for j in np.argsort(-it)[:12]:
+                    ax.text(qy[j], qx[j] + 0.03,
+                            f"{int(hh[0][j])}{int(hh[1][j])}{int(hh[2][j])}",
+                            fontsize=6, color="#c00", ha="center",
+                            va="bottom", clip_on=True)
+            except Exception:
+                pass
+            # frame the experimental peaks (+10 %), not every simulated one
+            try:
+                ex = np.asarray(pl.data["qx"], float)
+                ey = np.asarray(pl.data["qy"], float)
+                if ex.size:
+                    r = 1.1 * float(np.max(np.hypot(ex, ey))) or 1.0
+                    ax.set_xlim(-r, r); ax.set_ylim(r, -r)
+            except Exception:
+                pass
         except Exception as e:
             ax.text(0.5, 0.5, f"plot err:\n{e!r}",
                      ha="center", va="center", fontsize=9,
@@ -2355,6 +2434,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                     omap = match_orientations_progress(
                         cr, bv, min_peaks=self._min_peaks_val(),
                         progress_cb=_mprog, stop_event=self._stop_event)
+                    _fill_stride(omap, Ny, Nx, stride)
                     scan_shape = (Ny, Nx)
                     dt = time.time() - t0
                     pname = next(iter(crystals.keys()))
@@ -2367,6 +2447,11 @@ class ACOMTabPanel(ctk.CTkFrame):
                         f"(stride={stride})…")
                     cp = self._run_nnls_full_dataset(
                         cube, stride, detect_kw, _prog, inv_a=inv_a)
+                    _fill_stride(cp, Ny, Nx, stride)
+                    for _cr in self._phase_crystals.values():
+                        _om = getattr(_cr, "orientation_map", None)
+                        if _om is not None:
+                            _fill_stride(_om, Ny, Nx, stride)
                     dt = time.time() - t0
                     self.after(0, lambda: self._render_nnls_full(
                         cp, (Ny, Nx), stride, dt))
@@ -2380,6 +2465,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                     res = self._run_mp_full_cached(
                         cube, stride, detect_kw, inv_a, thr, mar,
                         crystals, _prog, min_peaks=self._min_peaks_val())
+                    _fill_stride(res, Ny, Nx, stride)
                     dt = time.time() - t0
                     self.after(0, lambda: self._render_mp_full_three(
                         res, stride, dt))
@@ -3193,7 +3279,9 @@ class ACOMTabPanel(ctk.CTkFrame):
                 plan_mode=pk["plan_mode"],
                 angle_step_zone_axis=pk["angle_step_zone_axis"],
                 angle_step_in_plane=pk["angle_step_in_plane"],
-                fiber_axis=pk["fiber_axis"], use_cuda=pk["use_cuda"],
+                fiber_axis=pk["fiber_axis"],
+                fiber_angles=list(pk["fiber_angles"]),
+                use_cuda=pk["use_cuda"],
                 inv_ang_per_px=float(self._eff_inv_ang()),
                 detect_kw=detect_kw,
                 corr_threshold=float(thr), margin=float(mar),
@@ -3506,10 +3594,11 @@ class ACOMTabPanel(ctk.CTkFrame):
         self._fig.colorbar(im, ax=ax2, fraction=0.046, pad=0.02)
         self._fig.suptitle(
             f"ACOM single-phase full — {phase_name}  "
-            f"(stride={stride}, {elapsed_s:.0f}s).  Stand-alone PNGs → "
-            f"{os.path.basename(base)}/  ·  'Overlay' now enabled.",
+            f"(stride={stride}, {elapsed_s:.0f}s)\n"
+            f"PNGs saved to {os.path.basename(base)}/  ·  "
+            f"'Overlay' now enabled",
             fontsize=10)
-        self._fig.tight_layout(rect=[0, 0, 1, 0.94])
+        self._fig.tight_layout(rect=[0, 0, 1, 0.90])
         self._canvas.draw_idle()
 
     def _render_classical_orientation_strain(self, crystal, omap, bv,
@@ -3927,7 +4016,9 @@ class ACOMTabPanel(ctk.CTkFrame):
             region_za[k] = (pi, za, gm)
 
         self._fig.clf()
-        gs = self._fig.add_gridspec(1, 2, wspace=0.10)
+        # leave the right quarter for the zone-axis legend
+        gs = self._fig.add_gridspec(1, 2, wspace=0.08, left=0.03,
+                                    right=0.66, top=0.86, bottom=0.08)
         ax_ph = self._fig.add_subplot(gs[0, 0])
         ax_za = self._fig.add_subplot(gs[0, 1])
         what = ("class" if mode == "mp_classes" else "grain")
@@ -3935,15 +4026,14 @@ class ACOMTabPanel(ctk.CTkFrame):
         # ---- LEFT: phase map ----
         ax_ph.imshow(phase_rgb, interpolation="nearest", aspect="equal")
         ax_ph.set_xticks([]); ax_ph.set_yticks([])
-        ax_ph.set_title(f"PHASE  ({what}-level)\n"
-                          f"L-click=single · R-click=grain avg",
-                          fontsize=10)
+        ax_ph.set_title(f"phase  ({what} level)", fontsize=10)
         tot = Ny * Nx
         ph_handles = []
         for pi, nm in enumerate(names):
             ph_handles.append(Patch(
                 color=palette[pi],
-                label=f"{nm}  ·  {per_phase_regs[pi]} {what}s  ·  "
+                label=f"{nm}  ·  {per_phase_regs[pi]} "
+                      f"{what + ('es' if what == 'class' else 's')}  ·  "
                       f"{per_phase_pix[pi]/tot*100:.0f}%"))
         if na_regs:
             ph_handles.append(Patch(color=NA,
@@ -3957,8 +4047,7 @@ class ACOMTabPanel(ctk.CTkFrame):
         # ---- RIGHT: zone-axis map + explicit legend + labels ----
         ax_za.imshow(za_rgb, interpolation="nearest", aspect="equal")
         ax_za.set_xticks([]); ax_za.set_yticks([])
-        ax_za.set_title("ZONE AXIS per region  (colour ↔ [u v w])",
-                          fontsize=10)
+        ax_za.set_title("zone axis per region  [u v w]", fontsize=10)
         # Print [u v w] text on the larger grains (top by area).
         sized = sorted(
             [(k, int(region_za[k][2].sum()), region_za[k])
@@ -3969,7 +4058,7 @@ class ACOMTabPanel(ctk.CTkFrame):
             if npx < 25: break
             ys, xs = np.where(gm)
             cy, cx = float(ys.mean()), float(xs.mean())
-            ax_za.text(cx, cy, f"{za[0]}{za[1]}{za[2]}",
+            ax_za.text(cx, cy, f"[{za[0]} {za[1]} {za[2]}]",
                           ha="center", va="center", fontsize=6.5,
                           color="white", weight="bold",
                           path_effects=[])
@@ -4009,10 +4098,15 @@ class ACOMTabPanel(ctk.CTkFrame):
             "button_press_event", self._on_phase_map_click)
 
         self._fig.suptitle(
-            f"Multi-phase ACOM {mode} — phase + zone-axis  "
-            f"(calib {float(self._inv_ang.get()):.5g} 1/Å/px)",
+            f"Multi-phase ACOM ({what} level)   "
+            f"calib {float(self._inv_ang.get()):.5g} 1/Å/px",
             fontsize=11)
-        self._fig.tight_layout(rect=[0, 0, 1, 0.95])
+        self._fig.text(0.5, 0.015,
+                       "left-click: single pattern   ·   right-click: "
+                       "grain average", ha="center", fontsize=8,
+                       color="#555")
+        # fixed gridspec margins (tight_layout would squeeze the maps to
+        # make room for the outside legend and clip the title)
         self._canvas.draw_idle()
 
     def _on_phase_map_click(self, event):

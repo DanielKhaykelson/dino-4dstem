@@ -201,13 +201,29 @@ def prepare_crystal(crystal,
 
     mode = str(plan_mode).lower()
     if mode == "fiber":
-        # Fiber texture about `fiber_axis`, in-plane angles `fiber_angles`.
+        # Fiber about `fiber_axis`: fiber_angles = (max tilt away from the
+        # axis, in-plane range) in degrees.  (0, 360) = ONE zone axis --
+        # the given view direction -- with every in-plane rotation.
+        # zone_axis_range MUST be "fiber": without it py4DSTEM ignores the
+        # fiber args and plans its default [011]-[111] zone-axis triangle.
         if "fiber_axis" in available:
-            kw["fiber_axis"] = list(map(float, fiber_axis))
+            # py4DSTEM takes the fiber axis as a CARTESIAN vector; the GUI
+            # gives a zone axis [uvw] -> u*a + v*b + w*c (differs from the
+            # raw numbers for any non-orthogonal cell)
+            uvw = np.asarray(list(map(float, fiber_axis)), dtype=np.float64)
+            if not np.any(uvw):
+                raise ValueError("view direction [u v w] cannot be 0 0 0")
+            cart = uvw @ np.asarray(crystal.lat_real, dtype=np.float64)
+            kw["fiber_axis"] = (cart / np.linalg.norm(cart)).tolist()
             kw["fiber_angles"] = list(map(float, fiber_angles))
-        if "zone_axis_range" in available and "fiber_axis" not in available:
-            kw["zone_axis_range"] = "fiber"   # 0.13 convention
+        if "zone_axis_range" in available:
+            kw["zone_axis_range"] = "fiber"
         crystal.orientation_plan(**kw)
+        if (getattr(crystal, "orientation_fiber", True) is False
+                and "fiber_axis" in available):
+            raise RuntimeError(
+                "py4DSTEM did not build a fiber plan (orientation_fiber is "
+                "False) - check the fiber axis / angles.")
     elif mode in ("full", "auto", "half"):
         # Whole-sphere ("full"), symmetry-reduced fundamental zone
         # ("auto"), or hemisphere ("half").  py4DSTEM accepts these as

@@ -972,7 +972,32 @@ class App(ctk.CTk):
 
 def main():
     app = App()
+    _main_thread_gc(app)
     app.mainloop()
+
+
+def _main_thread_gc(root, every_ms=1000, full_every=10):
+    """Run Python's cycle collector ONLY on the Tk main thread.
+
+    Tk objects (images, variables, widgets of closed popups) often sit in
+    reference cycles.  If the automatic collector fires while a worker
+    thread (ACOM, NMF, training monitor ...) is allocating, it finalises
+    them on that thread and Tcl aborts the whole process with
+    'Tcl_AsyncDelete: async handler deleted by the wrong thread'.
+    Collecting on a timer from the main loop instead removes that crash.
+    """
+    import gc
+    gc.disable()
+    n = {"i": 0}
+
+    def _tick():
+        n["i"] += 1
+        try:
+            gc.collect() if n["i"] % full_every == 0 else gc.collect(1)
+        except Exception:
+            pass
+        root.after(every_ms, _tick)
+    root.after(every_ms, _tick)
 
 
 if __name__ == "__main__":
