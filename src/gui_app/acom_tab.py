@@ -3126,7 +3126,12 @@ class ACOMTabPanel(ctk.CTkFrame):
         try:
             import json
             from datetime import datetime
-            base = os.path.dirname(self._acom_maps_dir())   # <run>/acom
+            ph = self._posthoc()
+            run = getattr(ph, "outdir", None) if ph else None
+            # <run>/acom with a DINO run; else the maps folder itself (never
+            # loose files in the data folder)
+            base = (os.path.dirname(self._acom_maps_dir()) if run
+                    else self._acom_maps_dir())
             os.makedirs(base, exist_ok=True)
             pk = self._plan_kwargs()
             cfg = dict(
