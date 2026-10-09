@@ -145,6 +145,38 @@ def _section(parent, title):
 # ---------------------------------------------------------------------------
 # Build the (N, D) input matrix for NMF.
 # ---------------------------------------------------------------------------
+def nmf_pre_params(cfg: dict) -> dict:
+    """Crop / beam mask / COM the NMF input uses.
+
+    The Pre-processing tab's "Load parameters to model" writes its settings
+    onto the sample as cfg["nmf_pre"]; until then NMF keeps its built-in
+    defaults (crop 140, polar mask 45 columns, no COM)."""
+    p = dict(cfg.get("nmf_pre") or {})
+    out = dict(
+        center_crop_size=int(p.get("center_crop_size", CENTER_CROP)),
+        polar_mask_cols=int(p.get("polar_mask_cols", POLAR_MASK_COLS)),
+        center_mask_radius=int(p.get("center_mask_radius", 0)),
+        com_centering=bool(p.get("com_centering", False)),
+        from_pre=bool(p))
+    # COM search radius exactly as training derives it
+    eff_r = (out["center_mask_radius"] if out["center_mask_radius"] > 0
+             else max(1, out["polar_mask_cols"] // 2))
+    out["com_search_radius"] = int(
+        float(p.get("com_search_radius_factor", 2.0)) * eff_r)
+    return out
+
+
+def nmf_pre_summary(cfg: dict) -> str:
+    pp = nmf_pre_params(cfg)
+    return (f"crop={pp['center_crop_size']}  "
+            f"polar mask={pp['polar_mask_cols']}  "
+            f"beam r={pp['center_mask_radius']}  "
+            f"COM={'on' if pp['com_centering'] else 'off'}  "
+            + ("(from Pre-processing)" if pp["from_pre"]
+               else "(NMF defaults - press 'Load parameters to model' "
+                    "in Pre-processing to use yours)"))
+
+
 def build_nmf_input(sample_key: str, variant_cfg: dict,
                      progress_cb=None, batch: int = 128,
                      vmax_override: float | None = None
@@ -173,24 +205,28 @@ def build_nmf_input(sample_key: str, variant_cfg: dict,
     ds = LoadPRZ(cfg["path"], resize=POLAR_SIZE, vmax=vmax)
     N = len(ds)
     inp = variant_cfg["input"]
+    pp = nmf_pre_params(cfg)
+    # Same order as the model's eval transform: crop -> COM -> resize ->
+    # polar -> polar beam mask (the Cartesian variant masks the beam disc
+    # instead, since it has no polar step).
+    ops = []
+    if inp == "cart" and pp["center_mask_radius"] > 0:
+        from dino_sr_ablation import CenterMask
+        ops.append(CenterMask(radius=pp["center_mask_radius"]))
+    ops.append(T.CenterCrop(pp["center_crop_size"]))
+    if pp["com_centering"]:
+        from dino_sr_ablation import CenterOnCOM
+        ops.append(CenterOnCOM(search_radius=pp["com_search_radius"]))
+    ops.append(T.Resize(POLAR_SIZE,
+                        interpolation=InterpolationMode.BILINEAR,
+                        antialias=True))
     if inp == "polar" or inp == "radial":
-        pre = T.Compose([
-            T.CenterCrop(CENTER_CROP),
-            T.Resize(POLAR_SIZE,
-                       interpolation=InterpolationMode.BILINEAR,
-                       antialias=True),
-            PolarTransform(output_size=POLAR_SIZE),
-            PolarMaskLeft(k_cols=POLAR_MASK_COLS),
-        ])
-    elif inp == "cart":
-        pre = T.Compose([
-            T.CenterCrop(CENTER_CROP),
-            T.Resize(POLAR_SIZE,
-                       interpolation=InterpolationMode.BILINEAR,
-                       antialias=True),
-        ])
-    else:
+        ops.append(PolarTransform(output_size=POLAR_SIZE))
+        if pp["polar_mask_cols"] > 0:
+            ops.append(PolarMaskLeft(k_cols=pp["polar_mask_cols"]))
+    elif inp != "cart":
         raise ValueError(f"unknown input mode {inp!r}")
+    pre = T.Compose(ops)
 
     chunks = []
     with torch.no_grad():
@@ -231,7 +267,7 @@ def build_nmf_input(sample_key: str, variant_cfg: dict,
     else:
         X = X_full.reshape(X_full.shape[0], -1)
     info = dict(N=int(X.shape[0]), D=int(X.shape[1]),
-                  variant=variant_cfg, vmax=vmax)
+                  variant=variant_cfg, vmax=vmax, pre=pp)
     return X, X_aug, comp_shape, info
 
 
@@ -517,6 +553,9 @@ class NMFPanel(ctk.CTkFrame):
             "variant":   ctk.StringVar(value=next(iter(NMF_VARIANTS))),
             "n_comp":    ctk.IntVar(value=8),
             "auto_n":    ctk.BooleanVar(value=True),
+            # largest n_comp / K the auto scans try (inclusive)
+            "n_max":     ctk.IntVar(value=13),
+            "K_max":     ctk.IntVar(value=11),
             "use_kmeans": ctk.BooleanVar(value=True),
             "use_aglo":   ctk.BooleanVar(value=False),
             "use_hdbscan": ctk.BooleanVar(value=False),
@@ -608,6 +647,9 @@ class NMFPanel(ctk.CTkFrame):
         ctk.CTkCheckBox(n_row, text="auto (knee)",
                           variable=self._vars["auto_n"]
                           ).pack(side="left", padx=8)
+        ctk.CTkLabel(n_row, text="max:").pack(side="left", padx=(4, 2))
+        ctk.CTkEntry(n_row, textvariable=self._vars["n_max"],
+                       width=50).pack(side="left", padx=2)
 
         _section(sb, "Clustering methods")
         ctk.CTkCheckBox(sb, text="K-means  (default)",
@@ -651,6 +693,9 @@ class NMFPanel(ctk.CTkFrame):
         ctk.CTkCheckBox(k_row, text="auto (silhouette)",
                           variable=self._vars["auto_K"]
                           ).pack(side="left", padx=8)
+        ctk.CTkLabel(k_row, text="max:").pack(side="left", padx=(4, 2))
+        ctk.CTkEntry(k_row, textvariable=self._vars["K_max"],
+                       width=50).pack(side="left", padx=2)
         # Re-cluster the EXISTING NMF (no re-fit) — fast way to change K
         # or add clustering methods without recomputing the decomposition.
         self._cluster_btn = ctk.CTkButton(
@@ -752,10 +797,7 @@ class NMFPanel(ctk.CTkFrame):
         # snap vmax to the sample's training vmax.
         if self._vars["use_sample_vmax"].get():
             self._snap_vmax_to_sample()
-        self._info_lbl.configure(
-            text=f"sample: {self.sample}   "
-                  f"scan = {self._scan_shape}   "
-                  f"vmax = {self._vars['vmax'].get():g}")
+        self._update_info()
 
     def _snap_vmax_to_sample(self):
         try:
@@ -766,13 +808,37 @@ class NMFPanel(ctk.CTkFrame):
         except Exception:
             pass
 
-    def _on_use_sample_vmax(self):
+    def _scan_range(self, key):
+        """range_ for the auto scans: 2 .. max (inclusive), max >= 3."""
+        try:
+            hi = int(self._vars[key].get())
+        except Exception:
+            hi = 13 if key == "n_max" else 11
+        return (2, max(3, hi) + 1)
+
+    def on_pre_params_loaded(self):
+        """Pre-processing pushed new crop / mask / COM / vmax: show them
+        (the next Run uses them)."""
         if self._vars["use_sample_vmax"].get():
             self._snap_vmax_to_sample()
+        self._update_info()
+
+    def _update_info(self):
+        try:
+            from data import SAMPLES
+            pre = nmf_pre_summary(SAMPLES.get(self.sample) or {})
+        except Exception:
+            pre = ""
         self._info_lbl.configure(
             text=f"sample: {self.sample}   "
                   f"scan = {self._scan_shape}   "
-                  f"vmax = {self._vars['vmax'].get():g}")
+                  f"vmax = {self._vars['vmax'].get():g}\n"
+                  f"input: {pre}")
+
+    def _on_use_sample_vmax(self):
+        if self._vars["use_sample_vmax"].get():
+            self._snap_vmax_to_sample()
+        self._update_info()
 
     def _load_cube_from_disk(self):
         """Pick a .prz / .npy / .h5 cube from disk and register it as a
@@ -938,7 +1004,7 @@ class NMFPanel(ctk.CTkFrame):
         if self._vars["auto_K"].get():
             with self._lock:
                 self._compute_progress = "auto K (silhouette)…"
-            K, sil = auto_K(W)
+            K, sil = auto_K(W, range_=self._scan_range("K_max"))
             self._vars["K"].set(K)
         else:
             K = int(self._vars["K"].get())
@@ -1043,6 +1109,7 @@ class NMFPanel(ctk.CTkFrame):
                 with self._lock:
                     self._compute_progress = "auto n_comp scan…"
                 n_comp, errs = auto_n_comp(X, X_aug,
+                                              range_=self._scan_range("n_max"),
                                               sparse=cfg["sparse"],
                                               progress_cb=cb)
                 self._vars["n_comp"].set(n_comp)
@@ -1569,6 +1636,10 @@ class NMFPanel(ctk.CTkFrame):
                        width=100,
                        command=lambda: _save()
                        ).pack(side="right", padx=4)
+        ctk.CTkButton(ctrl, text="Compare classes (A, B, A-B)...",
+                       width=200,
+                       command=lambda: _compare()
+                       ).pack(side="right", padx=4)
         status = ctk.CTkLabel(win, text="",
                                 font=("Consolas", 9), anchor="w")
         status.pack(side="top", fill="x", padx=8)
@@ -1653,6 +1724,20 @@ class NMFPanel(ctk.CTkFrame):
                       f"class, vmax={v:g}, log-stretch="
                       f"{log_var.get()})")
 
+        def _compare():
+            from gui_app.cluster_interactive import open_class_difference
+            method = method_var.get()
+            lbl = np.asarray(labels_dict[method])
+            ids, cnt = np.unique(lbl[lbl >= 0], return_counts=True)
+            try:
+                open_class_difference(
+                    win, title=f"{self.sample}  {method}",
+                    class_ids=ids.tolist(),
+                    counts={int(i): int(n) for i, n in zip(ids, cnt)},
+                    get_avg=lambda c: _compute(method)[int(c)])
+            except Exception as e:
+                messagebox.showerror("Compare classes", str(e), parent=win)
+
         def _save():
             if self.outdir is None:
                 d = os.path.join(os.getcwd(), "nmf_class_averages")
@@ -1727,13 +1812,14 @@ class NMFPanel(ctk.CTkFrame):
                 self._check_stop()
                 # Use auto n_comp + auto K for a quick survey.
                 n_comp, _e = auto_n_comp(X, X_aug,
+                                              range_=self._scan_range("n_max"),
                                               sparse=cfg["sparse"])
                 self._check_stop()
                 W, H, err = fit_nmf(X, X_aug, n_comp,
                                           sparse=cfg["sparse"],
                                           max_iter=200)
                 self._check_stop()
-                K, _s = auto_K(W)
+                K, _s = auto_K(W, range_=self._scan_range("K_max"))
                 self._check_stop()
                 polar_full = None
                 if cfg["input"] == "polar":

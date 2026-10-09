@@ -229,17 +229,22 @@ class PrePanel(ctk.CTkFrame):
                     vmax_note = "  (vmax NOT sent - no sample loaded)"
                 else:
                     cfg["vmax"] = vm
-                    # If the NMF tab is already pointed at this sample and is
-                    # following the sample vmax, refresh its box too, so the
-                    # transfer is visible there rather than only on its next
-                    # sample change.
+                    # NMF builds its own input (no Training tab), so the
+                    # crop / beam mask / COM travel on the sample as well
+                    nmf_pre = {k: v for k, v in self.get_pre_kwargs().items()
+                               if k != "vmax"}
+                    try:
+                        nmf_pre["com_search_radius_factor"] = float(
+                            tp.var["com_search_radius_factor"].get())
+                    except Exception:
+                        pass
+                    cfg["nmf_pre"] = nmf_pre
+                    vmax_note = "  (also sent to NMF)"
                     try:
                         np_ = getattr(self.winfo_toplevel(), "nmf", None)
-                        if (np_ is not None
-                                and getattr(np_, "sample", None) == self.sample_key
-                                and np_._vars["use_sample_vmax"].get()):
-                            np_._snap_vmax_to_sample()
-                            vmax_note = "  (also sent to NMF)"
+                        if (np_ is not None and getattr(
+                                np_, "sample", None) == self.sample_key):
+                            np_.on_pre_params_loaded()
                     except Exception:
                         pass
             except Exception as _e:

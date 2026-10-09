@@ -7,6 +7,8 @@ small maps cramped into the summary figure):
     left-click        -> single diffraction pattern popup
     right-click       -> cluster connected-component ("grain") average
     shift+right-click -> add that grain to a stacked-comparison window
+    "Live" checkbox   -> the pattern under the mouse, updated as you move
+    "Compare classes" -> class A average, class B average and A - B
 
 No trained model is required: everything is computed from the raw
 diffraction cube + a label map, so NMF (model-free) and DINO+cluster
@@ -42,6 +44,122 @@ def open_interactive_clustermap(parent, *, sample, scan_shape, labels,
                               title)
 
 
+def open_class_difference(parent, *, title, class_ids, counts, get_avg,
+                          recip_per_px=0.0):
+    """Popup: pick classes A and B -> their average patterns and A - B.
+
+    get_avg(c) returns the (H, W) average pattern of class c (the caller
+    caches); counts[c] is the number of probe positions in class c.
+    A and B share one intensity scale so they can be compared by eye; the
+    difference uses a diverging map centred on zero (red: brighter in A,
+    blue: brighter in B).
+    """
+    ids = [int(c) for c in class_ids]
+    if len(ids) < 2:
+        raise ValueError("need at least two classes to compare")
+    names = [f"c{c}  (N={int(counts.get(c, 0))})" for c in ids]
+    win = tk.Toplevel(parent)
+    win.title(f"{title} - class difference")
+    win.geometry("1320x600")
+    try:
+        win.lift(); win.focus_force()
+        win.attributes("-topmost", True)
+        win.after(500, lambda: (win.winfo_exists()
+                                and win.attributes("-topmost", False)))
+    except Exception:
+        pass
+    bar = ctk.CTkFrame(win, fg_color="transparent")
+    bar.pack(side="top", fill="x", padx=6, pady=4)
+    a_var = ctk.StringVar(value=names[0])
+    b_var = ctk.StringVar(value=names[1])
+    log_var = ctk.BooleanVar(value=True)
+    norm_var = ctk.BooleanVar(value=False)
+    ctk.CTkLabel(bar, text="class A:").pack(side="left", padx=(6, 2))
+    ctk.CTkOptionMenu(bar, variable=a_var, values=names, width=150,
+                      command=lambda _v: _redraw()).pack(side="left", padx=2)
+    ctk.CTkLabel(bar, text="class B:").pack(side="left", padx=(10, 2))
+    ctk.CTkOptionMenu(bar, variable=b_var, values=names, width=150,
+                      command=lambda _v: _redraw()).pack(side="left", padx=2)
+    ctk.CTkCheckBox(bar, text="log stretch (A, B)", variable=log_var,
+                    command=lambda: _redraw()).pack(side="left", padx=10)
+    ctk.CTkCheckBox(bar, text="normalise to equal total counts",
+                    variable=norm_var,
+                    command=lambda: _redraw()).pack(side="left", padx=4)
+    ctk.CTkButton(bar, text="Save PNG", width=90,
+                  command=lambda: _save()).pack(side="right", padx=4)
+    status = ctk.CTkLabel(win, text="", font=("Consolas", 9), anchor="w")
+    status.pack(side="top", fill="x", padx=8)
+    fig = Figure(figsize=(12.6, 4.8), dpi=100, facecolor="white")
+    canvas = FigureCanvasTkAgg(fig, master=win)
+    canvas.get_tk_widget().pack(fill="both", expand=True)
+
+    def _redraw():
+        ca = ids[names.index(a_var.get())]
+        cb = ids[names.index(b_var.get())]
+        status.configure(text=f"averaging c{ca} and c{cb} ...")
+        try:
+            win.update_idletasks()
+        except Exception:
+            pass
+        A = np.asarray(get_avg(ca), dtype=np.float64)
+        B = np.asarray(get_avg(cb), dtype=np.float64)
+        if norm_var.get():
+            A = A / max(A.sum(), 1e-12) * 1e4
+            B = B / max(B.sum(), 1e-12) * 1e4
+        D = A - B
+        vm = float(np.percentile(np.concatenate([A.ravel(), B.ravel()]),
+                                 99.5)) or 1.0
+        dm = float(np.percentile(np.abs(D), 99.5)) or 1.0
+        fig.clear()
+        cmap = display_prefs.get_diff_cmap_name()
+        for k, (img, c) in enumerate(((A, ca), (B, cb))):
+            ax = fig.add_subplot(1, 3, k + 1)
+            disp = np.clip(img / vm, 0.0, 1.0)
+            if log_var.get():
+                disp = np.log1p(disp * 50)
+            ax.imshow(disp, cmap=cmap, interpolation="nearest")
+            ax.set_title(f"{'AB'[k]} = c{c}   (N={int(counts.get(c, 0))})",
+                         fontsize=10)
+            ax.set_xticks([]); ax.set_yticks([])
+        ax = fig.add_subplot(1, 3, 3)
+        im = ax.imshow(D, cmap="RdBu_r", vmin=-dm, vmax=dm,
+                       interpolation="nearest")
+        ax.set_title("A - B   (red: stronger in A, blue: in B)", fontsize=10)
+        ax.set_xticks([]); ax.set_yticks([])
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        if recip_per_px and recip_per_px > 0:
+            try:
+                from gui_app._ui import attach_hover_q
+                H, W = D.shape
+                for a in fig.axes[:3]:
+                    attach_hover_q(canvas, a, center=(H / 2.0, W / 2.0),
+                                   q_per_disp_px=recip_per_px, units="nm⁻¹")
+            except Exception:
+                pass
+        fig.suptitle(f"{title}:  c{ca} vs c{cb}", fontsize=11)
+        fig.tight_layout()
+        canvas.draw_idle()
+        status.configure(text=(
+            f"c{ca} vs c{cb}   |A-B| 99.5th pct = {dm:.3g}   "
+            f"(A, B share vmax {vm:.3g}"
+            + ("; each scaled to equal total" if norm_var.get() else "")
+            + ")"))
+
+    def _save():
+        from tkinter import filedialog
+        p = filedialog.asksaveasfilename(
+            parent=win, defaultextension=".png",
+            filetypes=[("PNG", "*.png")],
+            initialfile=f"class_diff_{a_var.get().split()[0]}_"
+                        f"{b_var.get().split()[0]}.png")
+        if p:
+            fig.savefig(p, dpi=150, bbox_inches="tight")
+            status.configure(text=f"saved -> {p}")
+
+    _redraw()
+    return win
+
+
 class _ClusterMapViewer:
     def __init__(self, parent, sample, scan_shape, labels, recip_per_px,
                   title):
@@ -62,6 +180,9 @@ class _ClusterMapViewer:
         self._ds = None                # lazy LoadPRZ
         self._grain_stack = []
         self._grain_stack_win = None
+        self._avg_cache = {}           # (method, class) -> mean pattern
+        self._live_pending = None      # (y, x) waiting to be drawn
+        self._live_last = None
         self._build(title)
 
     # ------------------------------------------------------------------
@@ -125,6 +246,19 @@ class _ClusterMapViewer:
         # Re-draw the map live when the palette changes anywhere in the app.
         display_prefs.subscribe(self._on_cmap_change)
         win.protocol("WM_DELETE_WINDOW", self._on_close)
+        bar2 = ctk.CTkFrame(win, fg_color="transparent")
+        bar2.pack(side="top", fill="x", padx=6, pady=(0, 2))
+        self.live_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(bar2, text="Live pattern (follows the mouse)",
+                        variable=self.live_var,
+                        command=self._toggle_live).pack(side="left", padx=6)
+        self.live_log = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(bar2, text="log", variable=self.live_log,
+                        command=self._redraw_live, width=60
+                        ).pack(side="left", padx=4)
+        ctk.CTkButton(bar2, text="Compare classes (A, B, A-B)...",
+                      width=200, command=self._open_compare
+                      ).pack(side="left", padx=14)
         body = ctk.CTkFrame(win)
         body.pack(side="top", fill="both", expand=True, padx=6, pady=4)
         self.fig = Figure(figsize=(8.6, 8.2), dpi=110, facecolor="white")
@@ -132,6 +266,8 @@ class _ClusterMapViewer:
         self.canvas = FigureCanvasTkAgg(self.fig, master=body)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
         self.canvas.mpl_connect("button_press_event", self._on_click)
+        self.canvas.mpl_connect("motion_notify_event", self._on_motion)
+        self.ax_live = None
         self._draw()
 
     def _draw(self):
@@ -139,7 +275,22 @@ class _ClusterMapViewer:
         grid = self.labels[m]
         K = int(grid.max()) + 1
         pal = display_prefs.class_palette(K)
+        live = bool(getattr(self, "live_var", None) and self.live_var.get())
+        if live != (self.ax_live is not None):
+            # switching layout: rebuild the axes (and the colorbar with them)
+            self.fig.clear()
+            self._cb = None
+            if live:
+                self.ax = self.fig.add_subplot(1, 2, 1)
+                self.ax_live = self.fig.add_subplot(1, 2, 2)
+            else:
+                self.ax = self.fig.add_subplot(111)
+                self.ax_live = None
         self.ax.clear()
+        self._live_mark = None
+        self._live_im = None
+        if self.ax_live is not None:
+            self.ax_live.clear()
         im = self.ax.imshow(grid, cmap=pal, vmin=-0.5, vmax=K - 0.5,
                              interpolation="nearest", aspect="equal")
         self.ax.set_title(
@@ -154,8 +305,106 @@ class _ClusterMapViewer:
             self._cb.set_label("cluster id")
         else:
             self._cb.update_normal(im)
+        if self.ax_live is not None:
+            self._redraw_live(draw=False)
         self.fig.tight_layout()
         self.canvas.draw_idle()
+
+    # ---- live pattern ------------------------------------------------
+    def _toggle_live(self):
+        Ny, Nx = self.scan_shape
+        self._live_last = (Ny // 2, Nx // 2) if self.live_var.get() else None
+        self._draw()
+
+    def _on_motion(self, event):
+        if (self.ax_live is None or event.inaxes is not self.ax
+                or event.xdata is None):
+            return
+        Ny, Nx = self.scan_shape
+        x = max(0, min(Nx - 1, int(round(event.xdata))))
+        y = max(0, min(Ny - 1, int(round(event.ydata))))
+        if (y, x) == self._live_last:
+            return
+        # coalesce: only the latest position is drawn, after the event burst
+        first = self._live_pending is None
+        self._live_pending = (y, x)
+        if first:
+            self.win.after(15, self._flush_live)
+
+    def _flush_live(self):
+        yx, self._live_pending = self._live_pending, None
+        if yx is None:
+            return
+        self._live_last = yx
+        try:
+            self._redraw_live()
+        except Exception as e:
+            print(f"[cluster-interactive] live view failed: {e!r}",
+                  flush=True)
+
+    def _redraw_live(self, draw=True):
+        if self.ax_live is None or self._live_last is None:
+            return
+        y, x = self._live_last
+        raw = self._raw(y, x)
+        vm = float(np.percentile(raw, 99.5)) or 1.0
+        img = np.clip(raw / vm, 0.0, 1.0)
+        if self.live_log.get():
+            img = np.log1p(img * 50)
+        cmap = display_prefs.get_diff_cmap_name()
+        if self._live_im is None:
+            self.ax_live.clear()
+            self._live_im = self.ax_live.imshow(
+                img, cmap=cmap, interpolation="nearest")
+            self.ax_live.set_xticks([]); self.ax_live.set_yticks([])
+        else:
+            self._live_im.set_data(img)
+            self._live_im.set_cmap(cmap)
+        self._live_im.set_clim(float(img.min()), float(img.max()) or 1.0)
+        cls = int(self.labels[self.method_var.get()][y, x])
+        self.ax_live.set_title(
+            f"live: (y={y}, x={x})  class c{cls}  [vmax={vm:.3g}"
+            + ("  log" if self.live_log.get() else "") + "]", fontsize=10)
+        if self._live_mark is None:
+            (self._live_mark,) = self.ax.plot(
+                [x], [y], marker="+", ms=14, mew=2, color="white")
+        else:
+            self._live_mark.set_data([x], [y])
+        if draw:
+            self.canvas.draw_idle()
+
+    # ---- class comparison --------------------------------------------
+    def _class_avg(self, c, cap=300):
+        """Mean pattern of class c (random cap positions, fixed seed --
+        the same sampling as the NMF class-average window)."""
+        m = self.method_var.get()
+        key = (m, int(c))
+        if key not in self._avg_cache:
+            idx = np.flatnonzero(self.labels[m].ravel() == int(c))
+            if idx.size > cap:
+                idx = np.random.default_rng(42).choice(idx, cap,
+                                                       replace=False)
+            ds = self._dataset()
+            acc = None
+            for i in idx:
+                f = ds.get_raw(int(i)).astype(np.float64)
+                acc = f if acc is None else acc + f
+            self._avg_cache[key] = (acc / max(len(idx), 1)).astype(
+                np.float32)
+        return self._avg_cache[key]
+
+    def _open_compare(self):
+        grid = self.labels[self.method_var.get()]
+        ids, cnt = np.unique(grid, return_counts=True)
+        try:
+            open_class_difference(
+                self.win, title=f"{self.sample}  {self.method_var.get()}",
+                class_ids=ids.tolist(),
+                counts={int(i): int(n) for i, n in zip(ids, cnt)},
+                get_avg=self._class_avg, recip_per_px=self.rp)
+        except Exception as e:
+            from tkinter import messagebox
+            messagebox.showerror("Compare classes", str(e), parent=self.win)
 
     def _on_cmap_change(self):
         """Colour scheme changed (here or elsewhere) → recolour the map and
