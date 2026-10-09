@@ -1686,7 +1686,7 @@ class PrePanel(ctk.CTkFrame):
         cy0 = (H - 1) / 2.0; cx0 = (W - 1) / 2.0
         dy = cy - cy0; dx = cx - cx0
         self._nbed_status.configure(
-            text=f"green ring = BF disk found @ idx={idx}  "
+            text=f"green dot = BF centre found @ idx={idx}  "
                   f"(cy={cy:.1f}, cx={cx:.1f})\n"
                   f"dashed crosshair = target centre;  arrow = shift "
                   f"Δy={dy:+.1f}px, Δx={dx:+.1f}px  "
@@ -3779,24 +3779,13 @@ class PrePanel(ctk.CTkFrame):
             cx_disp = 96.0 + (cx_192 - 96.0) * scale
             # GOAL = where the beam is moved to: a thin dashed crosshair
             # spanning the whole image (a fixed reticle, clearly not a
-            # detection).  FOUND = the detected BF disk: a solid ring of
-            # the disk's size + centre dot.  An arrow FOUND -> GOAL shows
-            # the shift that centering applies.
-            from matplotlib.patches import Circle as _Circle
+            # detection).  FOUND = a dot at the detected BF centre.  An
+            # arrow FOUND -> GOAL shows the shift that centering applies.
             ax = self._ax_proc
             ax.axhline(96, color="white", lw=0.9, ls=(0, (4, 3)),
                        alpha=0.75, zorder=4)
             ax.axvline(96, color="white", lw=0.9, ls=(0, (4, 3)),
                        alpha=0.75, zorder=4)
-            try:
-                r_raw = float(self._nbed_disk_radius.get())
-            except Exception:
-                r_raw = 0.0
-            r_disp = r_raw * (191.0 / max(H_r - 1, 1)) * scale
-            if r_disp > 1.0:
-                ax.add_patch(_Circle((cx_disp, cy_disp), r_disp,
-                                     fill=False, ec="lime", lw=1.8,
-                                     zorder=5))
             ax.plot([cx_disp], [cy_disp], marker="o", ms=4.5,
                     color="lime", mec="black", mew=0.6, zorder=6)
             if np.hypot(cx_disp - 96.0, cy_disp - 96.0) > 0.75:
