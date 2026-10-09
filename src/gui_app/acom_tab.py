@@ -25,9 +25,10 @@ UI layout:
               [pattern + detected peaks]   [1D radial + CIF rings]
               [single-pattern match fit]   [class map (source pick)]
 
-The tab pulls live state (sample, scan_shape, inference, class avgs,
-grain extraction) from `self.app.posthoc` so the user only has to
-load a run once.
+Class averages and grains come from whichever class map exists: a
+trained DINO run, NMF clustering or DINO+cluster ("class labels from" in
+step 1).  They are averaged from the RAW frames of the loaded dataset
+(through the sample's flyback raster), so no DINO run directory is needed.
 """
 from __future__ import annotations
 import os, sys, json, threading, time
@@ -135,7 +136,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                 "ok" if self._phase_crystals else "idle",
                 f"{len(self._phase_crystals)} crystal(s) built"
                 if self._phase_crystals else "no CIF built yet")
-            self._draw_classmap_if_possible()
+            self._refresh_label_sources()
         except Exception: pass
 
     # ------------------------------------------------------------------
@@ -173,9 +174,10 @@ class ACOMTabPanel(ctk.CTkFrame):
         _section_header(sidebar, "1.  Pick a source")
         _hint(sidebar,
             "Choose ONE pattern to validate detection + calibration "
-            "+ fit BEFORE batching.  Class avgs are computed from "
-            "the post-hoc inference; grains/positions come from "
-            "clicking the class map (bottom right).")
+            "+ fit BEFORE batching.  Class avgs / grains use the class "
+            "map picked below (DINO run, NMF or DINO+cluster) and the "
+            "raw frames; positions come from clicking the class map "
+            "(bottom right).")
         self._source_var = ctk.StringVar(value="dp_max")
         src_row = ctk.CTkFrame(sidebar, fg_color="transparent")
         src_row.pack(fill="x", padx=10, pady=2)
@@ -183,12 +185,26 @@ class ACOMTabPanel(ctk.CTkFrame):
                 ("dp_max  (per-pixel max — DATASET only)", "dp_max"),
                 ("dp_mean (mean — DATASET only)", "dp_mean"),
                 ("scan pos (y, x) — DATASET only", "scan_pos"),
-                ("class avg  (needs trained run)", "class_avg"),
-                ("grain @ click  (needs trained run)", "grain")):
+                ("class avg  (DINO / NMF / DINO+cluster classes)",
+                 "class_avg"),
+                ("grain @ click  (same classes)", "grain")):
             ctk.CTkRadioButton(src_row, text=label,
                                 variable=self._source_var,
                                 value=val
                                 ).pack(anchor="w", padx=2)
+        lsrc_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        lsrc_row.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(lsrc_row, text="class labels from:",
+                     anchor="w").pack(side="left")
+        self._label_src = ctk.StringVar(value="")
+        self._label_menu = ctk.CTkOptionMenu(
+            lsrc_row, variable=self._label_src, values=["(none yet)"],
+            width=140,
+            command=lambda _v: self._draw_classmap_if_possible())
+        self._label_menu.pack(side="left", padx=4)
+        ctk.CTkButton(lsrc_row, text="refresh", width=56,
+                      command=self._refresh_label_sources
+                      ).pack(side="left", padx=2)
         cls_row = ctk.CTkFrame(sidebar, fg_color="transparent")
         cls_row.pack(fill="x", padx=10, pady=2)
         ctk.CTkLabel(cls_row, text="class:", width=44,
@@ -475,6 +491,20 @@ class ACOMTabPanel(ctk.CTkFrame):
                        fg_color=("#A23BB0", "#7A2680"),
                        command=lambda: self._run_batch("mp_full")
                        ).pack(side="left", padx=2)
+        nnls_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        nnls_row.pack(fill="x", padx=10, pady=2)
+        ctk.CTkButton(nnls_row, text="Phase map (NNLS, all CIFs) ▶",
+                       width=284,
+                       fg_color=("#2E7D6B", "#1F5A4D"),
+                       command=lambda: self._run_batch("nnls_full")
+                       ).pack(side="left", padx=2)
+        _hint(sidebar,
+            "Multi-phase full = winner of the per-phase correlation.  "
+            "Phase map (NNLS) = py4DSTEM CrystalPhase.quantify_phase "
+            "(the Ti alpha/beta tutorial): fits every pattern with all "
+            "CIFs at once -> phase weights, reliability, dominant-phase "
+            "map and each phase's orientation map masked to where it "
+            "dominates.")
         # Single-phase full saves stand-alone publication PNGs (out-of-
         # plane orientation, correlation, zone-axis) and opens each in its
         # own window.  In-plane orientation only when this is ticked.
@@ -500,13 +530,12 @@ class ACOMTabPanel(ctk.CTkFrame):
             "classes.")
         ov_row = ctk.CTkFrame(sidebar, fg_color="transparent")
         ov_row.pack(fill="x", padx=10, pady=1)
-        self._overlay_src = ctk.StringVar(value="DINO class map")
-        ctk.CTkOptionMenu(ov_row, variable=self._overlay_src,
-            values=["DINO class map",
-                       "NMF-KMeans", "NMF-Aglo",
-                       "NMF-HDBSCAN", "NMF-FCM",
-                       "DINO+cluster"],
-            width=160).pack(side="left", padx=2)
+        self._overlay_src = ctk.StringVar(value="(none yet)")
+        # filled from what exists (step-1 'refresh' updates it too)
+        self._ov_menu = ctk.CTkOptionMenu(ov_row,
+            variable=self._overlay_src, values=["(none yet)"],
+            width=160)
+        self._ov_menu.pack(side="left", padx=2)
         self._overlay_mode = ctk.StringVar(value="contour")
         ctk.CTkOptionMenu(ov_row, variable=self._overlay_mode,
             values=["contour", "side-by-side"],
@@ -668,12 +697,15 @@ class ACOMTabPanel(ctk.CTkFrame):
     def _save_panel(self):
         ph = getattr(self.app, "posthoc", None)
         outdir = getattr(ph, "outdir", None) if ph else None
-        if not outdir:
-            messagebox.showinfo("save",
-                "No run linked — link a post-hoc run first."); return
         from datetime import datetime
-        out = os.path.join(outdir, "eval", "acom_tab")
-        os.makedirs(out, exist_ok=True)
+        if outdir:
+            out = os.path.join(outdir, "eval", "acom_tab")
+            os.makedirs(out, exist_ok=True)
+        elif self._active_sample() is not None:
+            # no DINO run: save next to the ACOM maps for this dataset
+            out = self._acom_maps_dir()
+        else:
+            messagebox.showinfo("save", "Load a dataset first."); return
         stamp = datetime.now().strftime("%H%M%S")
         png = os.path.join(out, f"acom_{stamp}.png")
         pdf = os.path.join(out, f"acom_{stamp}.pdf")
@@ -730,6 +762,171 @@ class ACOMTabPanel(ctk.CTkFrame):
                     "full-dataset ACOM work with just a dataset.")
                 return None
         return ph
+
+    # --- class labels: DINO run, NMF or DINO+cluster (no run needed) ---
+    def _label_sources(self):
+        """Class maps available for the ACTIVE dataset."""
+        s = self._active_sample()
+        out = []
+        ph = self._posthoc()
+        if (ph is not None and getattr(ph, "_inf", None) is not None
+                and getattr(ph, "sample", None) == s):
+            out.append("DINO class map")
+        nmf = getattr(self.app, "nmf", None)
+        store = getattr(nmf, "last_cluster_labels", None) if nmf else None
+        if store and getattr(nmf, "sample", None) == s:
+            out += [f"NMF: {m}" for m in store]
+        dc = getattr(self.app, "dino_cluster", None)
+        if dc is not None and getattr(dc, "last_labels", None) is not None:
+            out.append("DINO+cluster")
+        return out
+
+    def _refresh_label_sources(self):
+        srcs = self._label_sources()
+        try:
+            self._label_menu.configure(values=srcs or ["(none yet)"])
+            if self._label_src.get() not in srcs:
+                self._label_src.set(srcs[0] if srcs else "(none yet)")
+        except Exception:
+            pass
+        try:
+            self._ov_menu.configure(values=srcs or ["(none yet)"])
+            if self._overlay_src.get() not in srcs:
+                self._overlay_src.set(srcs[0] if srcs else "(none yet)")
+        except Exception:
+            pass
+        self._draw_classmap_if_possible()
+        return srcs
+
+    def _labels_for(self, which):
+        """(Ny, Nx) int class map (-1 = unassigned) for a source name,
+        or (None, reason)."""
+        s = self._active_sample()
+        if s is None:
+            return None, "Load a dataset first."
+        Ny, Nx = SAMPLES[s]["scan_shape"]
+        lab = None
+        if which == "DINO class map":
+            ph = self._posthoc()
+            if ph is not None and getattr(ph, "_inf", None) is not None:
+                lab = ph._inf["assigns"]
+        elif which.startswith("NMF: "):
+            nmf = getattr(self.app, "nmf", None)
+            store = getattr(nmf, "last_cluster_labels", None) if nmf else None
+            lab = (store or {}).get(which[5:])
+        elif which == "DINO+cluster":
+            dc = getattr(self.app, "dino_cluster", None)
+            lab = getattr(dc, "last_labels", None) if dc else None
+        if lab is None:
+            return None, (f"'{which}' is not available.  Run NMF "
+                          f"(Clustering > NMF) or DINO+cluster on this "
+                          f"dataset, or load a trained DINO run.")
+        a = np.asarray(lab)
+        if a.size != Ny * Nx:
+            return None, (f"'{which}' has {a.size} positions but the "
+                          f"dataset is {Ny} x {Nx} - re-run it on this "
+                          f"dataset.")
+        return a.reshape(Ny, Nx).astype(int), None
+
+    def _current_labels(self, quiet=False):
+        """(grid, source name) for the picked source, else None."""
+        srcs = self._label_sources()
+        which = self._label_src.get()
+        if which not in srcs:
+            if not srcs:
+                if not quiet:
+                    messagebox.showinfo("ACOM",
+                        "No class map for this dataset yet.\n\n"
+                        "Class averages / grains need classes from ANY "
+                        "of: NMF (Clustering > NMF), DINO+cluster, or a "
+                        "trained DINO run.  dp_max / dp_mean / scan pos "
+                        "/ full-dataset ACOM need only the dataset.")
+                return None
+            which = srcs[0]
+            self._label_src.set(which)
+        grid, why = self._labels_for(which)
+        if grid is None:
+            if not quiet:
+                messagebox.showinfo("ACOM", why)
+            return None
+        return grid, which
+
+    def _raw_ds(self):
+        """LoadPRZ over the active sample (raster-aware), cached."""
+        s = self._active_sample()
+        c = getattr(self, "_raw_ds_cache", None)
+        if c is None or c[0] != s:
+            cfg = SAMPLES[s]
+            c = (s, LoadPRZ(cfg["path"], resize=192,
+                            vmax=float(cfg.get("vmax", 2.0))))
+            self._raw_ds_cache = c
+        return c[1]
+
+    def _mean_raw(self, idx):
+        ds = self._raw_ds()
+        acc = None
+        for i in idx:
+            f = ds.get_raw(int(i)).astype(np.float64)
+            acc = f if acc is None else acc + f
+        return (acc / max(len(idx), 1)).astype(np.float32)
+
+    def _class_avg_raw(self, grid, cid, which, cap=256):
+        """Average RAW pattern of class cid: the cap most confident
+        positions for a DINO map, a fixed-seed random cap otherwise."""
+        key = (self._active_sample(), which, int(cid), cap,
+               hash(grid.tobytes()))
+        cache = self.__dict__.setdefault("_cls_avg_cache", {})
+        if key in cache:
+            return cache[key]
+        idx = np.flatnonzero(grid.ravel() == int(cid))
+        if idx.size > cap:
+            ph = self._posthoc()
+            if (which == "DINO class map" and ph is not None
+                    and getattr(ph, "_inf", None) is not None
+                    and "soft_probs" in ph._inf):
+                conf = np.asarray(ph._inf["soft_probs"])[idx, int(cid)]
+                idx = idx[np.argsort(-conf)[:cap]]
+            else:
+                idx = np.random.default_rng(42).choice(idx, cap,
+                                                       replace=False)
+        cache[key] = self._mean_raw(idx)
+        return cache[key]
+
+    def _grain_avg_raw(self, grid, y, x, cap=1024):
+        """Connected (4-conn) same-class region at (y, x) -> dict like
+        posthoc._compute_grain_average (raw frames)."""
+        from scipy.ndimage import label
+        cls = int(grid[y, x])
+        if cls < 0:
+            return None
+        lab, _ = label(grid == cls)
+        gid = int(lab[y, x])
+        if gid == 0:
+            return None
+        mask = lab == gid
+        idx = np.flatnonzero(mask.ravel())
+        n = int(idx.size)
+        if n > cap:
+            idx = np.random.default_rng(42).choice(idx, cap, replace=False)
+        return dict(grain_avg=self._mean_raw(idx), cls=cls, n_pix=n,
+                    mask=mask, mean_conf=None)
+
+    def _writable_dir(self, preferred):
+        """preferred if it can be written (data drives are often
+        read-only), else ~/DINO-4DSTEM/acom/<sample>/<leaf>."""
+        try:
+            os.makedirs(preferred, exist_ok=True)
+            t = os.path.join(preferred, ".write_test")
+            with open(t, "w") as f:
+                f.write("ok")
+            os.remove(t)
+            return preferred
+        except Exception:
+            alt = os.path.join(os.path.expanduser("~"), "DINO-4DSTEM",
+                               "acom", str(self._active_sample()),
+                               os.path.basename(preferred.rstrip("/\\")))
+            os.makedirs(alt, exist_ok=True)
+            return alt
 
     def _compute_dp_max_mean(self, sample):
         """Stream over the cube to build (dp_max, dp_mean) without
@@ -847,47 +1044,38 @@ class ACOMTabPanel(ctk.CTkFrame):
                 text=f"loaded: {self._test_origin}")
             self._detect_and_redraw()
             return
-        # class_avg / grain need DINO inference.
-        ph = self._need_posthoc_inference()
-        if ph is None: return
-        cfg = SAMPLES[ph.sample]
+        # class_avg / grain need a class map (DINO, NMF or DINO+cluster)
+        if self._need_dataset() is None: return
+        cur = self._current_labels()
+        if cur is None: return
+        grid, which = cur
         if src == "class_avg":
             try:
                 cid = int(self._src_class.get())
             except Exception:
                 messagebox.showerror("source",
                     "class id must be an integer."); return
-            K = int(ph._inf["soft_probs"].shape[1])
-            if not (0 <= cid < K):
+            present = sorted(int(c) for c in np.unique(grid) if c >= 0)
+            if cid not in present:
                 messagebox.showerror("source",
-                    f"class id {cid} out of range [0..{K-1}]."); return
-            # Compute class avg via post-hoc helper.
+                    f"class {cid} is not in '{which}' "
+                    f"(classes: {present})."); return
+            self._source_status.configure(
+                text=f"averaging class {cid} of {which} ...")
+            self.update_idletasks()
             try:
-                avgs = ph._compute_class_averages(top_n=256)
+                pat = self._class_avg_raw(grid, cid, which)
             except Exception as e:
                 messagebox.showerror("class avg", repr(e)); return
-            vm = float(cfg.get("vmax", 5.0))
-            pat = (avgs[cid] * vm).astype(np.float32)
             self._test_pattern = pat
             H, W = pat.shape
             self._test_center = (H / 2.0, W / 2.0)
-            # Class-avg pipeline = raw → resize(192) → CenterCrop(140)
-            # → resize(192).  Each display px spans
-            #   (H_raw/192) · (140/192)  raw-detector px,
-            # so q (and the matching calibration) scale by that.
-            try:
-                _ds = LoadPRZ(cfg["path"], resize=192, vmax=vm)
-                H_raw = float(_ds.H)
-            except Exception:
-                H_raw = 192.0
-            CENTER_CROP = 140.0
-            self._test_px_factor = (H_raw / 192.0) * (CENTER_CROP / 192.0)
-            self._test_origin = (
-                f"class p{cid} avg  (q×{self._test_px_factor:.3g} "
-                f"vs raw)")
+            # raw frames -> raw-detector pixels, q-scale 1
+            n = int((grid == cid).sum())
+            self._test_origin = f"{which} class {cid} avg  ({n} px)"
             self._source_status.configure(
-                text=f"loaded: class p{cid} avg  ({H}×{W})  "
-                      f"q-scale ×{self._test_px_factor:.3g}")
+                text=f"loaded: {which} class {cid} avg  ({H}x{W}, "
+                     f"{n} positions)")
         else:
             # grain / scan_pos require a click on the classmap
             self._source_status.configure(
@@ -902,14 +1090,14 @@ class ACOMTabPanel(ctk.CTkFrame):
         if event.xdata is None or event.ydata is None:
             return
         src = self._source_var.get()
-        ph = self._need_posthoc_inference()
-        if ph is None: return
-        Ny, Nx = ph._scan_shape
+        cur = self._current_labels()
+        if cur is None: return
+        grid, which = cur
+        Ny, Nx = grid.shape
         x = max(0, min(Nx - 1, int(round(event.xdata))))
         y = max(0, min(Ny - 1, int(round(event.ydata))))
         if src == "scan_pos":
-            cfg = SAMPLES[ph.sample]
-            ds = LoadPRZ(cfg["path"], resize=192, vmax=cfg["vmax"])
+            ds = self._raw_ds()
             idx = y * Nx + x
             try:
                 raw = ds.get_raw(int(idx)).astype(np.float32)
@@ -923,24 +1111,21 @@ class ACOMTabPanel(ctk.CTkFrame):
                 text=f"loaded: scan ({y}, {x})  "
                       f"({raw.shape[0]}×{raw.shape[1]})")
         elif src == "grain":
-            gi = ph._compute_grain_average(y, x)
+            gi = self._grain_avg_raw(grid, y, x)
             if gi is None:
                 messagebox.showerror("grain",
                     "pixel not in any grain."); return
             self._test_pattern = gi["grain_avg"].astype(np.float32)
-            self._test_origin = (f"grain @ ({y}, {x})  class p{gi['cls']}  "
-                                  f"{gi['n_pix']}px")
+            self._test_px_factor = 1.0
+            self._test_origin = (f"grain @ ({y}, {x})  {which} class "
+                                  f"{gi['cls']}  {gi['n_pix']}px")
             H, W = self._test_pattern.shape
             self._test_center = (H / 2.0, W / 2.0)
             self._source_status.configure(
                 text=f"loaded: grain @ ({y}, {x})  class p{gi['cls']}  "
                       f"{gi['n_pix']}px")
         elif src == "class_avg":
-            try:
-                self._src_class.set(
-                    str(int(ph._inf["assigns"].reshape(Ny, Nx)[y, x])))
-            except Exception:
-                pass
+            self._src_class.set(str(int(grid[y, x])))
             self._load_source()
             return
         self._detect_and_redraw()
@@ -1884,22 +2069,32 @@ class ACOMTabPanel(ctk.CTkFrame):
         ax = self._ax_cmap
         ax.clear()
         ax.set_xticks([]); ax.set_yticks([])
-        ph = self._posthoc()
-        if ph is None or ph._inf is None or ph._scan_shape is None:
-            ax.text(0.5, 0.5, "(load posthoc inference)",
-                     ha="center", va="center", fontsize=10,
+        cur = None
+        try:
+            if self._label_src.get() in self._label_sources():
+                cur = self._current_labels(quiet=True)
+            else:
+                srcs = self._label_sources()
+                if srcs:
+                    self._label_src.set(srcs[0])
+                    cur = self._current_labels(quiet=True)
+        except Exception:
+            cur = None
+        if cur is None:
+            ax.text(0.5, 0.5, "(no class map yet: run NMF or DINO+cluster,\n"
+                              "or load a DINO run - then 'refresh')",
+                     ha="center", va="center", fontsize=9,
                      color="#888", transform=ax.transAxes)
             self._redraw_all(); return
-        Ny, Nx = ph._scan_shape
-        K = int(ph._inf["soft_probs"].shape[1])
-        amap = ph._inf["assigns"].reshape(Ny, Nx)
-        import matplotlib.pyplot as plt
-        cmap = plt.get_cmap("tab10")
-        palette = ListedColormap([cmap(i) for i in range(K)])
-        ax.imshow(amap, cmap=palette, vmin=-0.5, vmax=K - 0.5,
-                    interpolation="nearest")
+        amap, which = cur
+        Ny, Nx = amap.shape
+        K = int(amap.max()) + 1
+        from gui_app import display_prefs
+        palette = display_prefs.class_palette(max(K, 1))
+        ax.imshow(np.ma.masked_less(amap, 0), cmap=palette,
+                    vmin=-0.5, vmax=K - 0.5, interpolation="nearest")
         ax.set_title(
-            f"class map  ({ph.sample}, K={K})  — "
+            f"class map  ({which}, K={K})  — "
             f"click to pick source (steps 1)",
             fontsize=10)
         self._classmap_axes_xy = (Ny, Nx)
@@ -1921,10 +2116,15 @@ class ACOMTabPanel(ctk.CTkFrame):
     def _run_batch(self, mode):
         # full / mp_full need only the DATASET; classes/grains need
         # DINO inference (they operate on class avgs / grains).
-        if mode in ("full", "mp_full"):
+        self._batch_labels = None
+        if mode in ("full", "mp_full", "nnls_full"):
             if self._need_dataset() is None: return
         else:
-            if self._need_posthoc_inference() is None: return
+            if self._need_dataset() is None: return
+            cur = self._current_labels()
+            if cur is None: return
+            # read on the main thread; the worker only uses this copy
+            self._batch_labels = (cur[0].copy(), cur[1])
         if not self._phase_crystals:
             messagebox.showinfo("Batch",
                 "Build at least one CIF (step 3)."); return
@@ -1940,7 +2140,7 @@ class ACOMTabPanel(ctk.CTkFrame):
         # on the MAIN thread here; the worker honours the flag.
         self._use_cached_peaks = True
         self._peaks_load_path = None
-        if mode in ("full", "mp_full"):
+        if mode in ("full", "mp_full", "nnls_full"):
             try:
                 stride = max(int(self._full_stride.get()), 1)
                 detect_kw = self._detect_kw_now()
@@ -2012,9 +2212,9 @@ class ACOMTabPanel(ctk.CTkFrame):
         if run and os.path.isdir(run):
             base = os.path.join(run, "acom")
         else:
-            base = os.path.join(
+            base = self._writable_dir(os.path.join(
                 os.path.dirname(SAMPLES[sample]["path"]),
-                "_acom_peakcache")
+                "_acom_peakcache"))
         return os.path.join(base, f"peaks_full_{kh}.npz")
 
     def _peak_cache_info(self, path):
@@ -2038,18 +2238,9 @@ class ACOMTabPanel(ctk.CTkFrame):
             sample = self._active_sample()
             cfg = SAMPLES[sample]
             Ny, Nx = cfg["scan_shape"]
+            # every pattern (class avg, grain, full dataset) is a raw-
+            # detector pattern now -> one calibration for all modes
             inv_a = float(self._inv_ang.get())
-            # Class-avg batch patterns are 192-cart-cropped (raw →
-            # resize192 → CenterCrop140 → resize192), so their q-per-px
-            # is scaled vs raw.  Grain avgs and full-dataset patterns
-            # are raw-resolution → factor 1.
-            if mode in ("classes", "mp_classes"):
-                try:
-                    _ds = LoadPRZ(cfg["path"], resize=192,
-                                     vmax=float(cfg.get("vmax", 5.0)))
-                    inv_a = inv_a * (float(_ds.H) / 192.0) * (140.0 / 192.0)
-                except Exception:
-                    pass
             detect_kw = dict(
                 min_sigma=float(self._det_min.get()),
                 max_sigma=float(self._det_max.get()),
@@ -2065,15 +2256,15 @@ class ACOMTabPanel(ctk.CTkFrame):
             t0 = time.time()
             # Inference-derived arrays are only needed for class/grain
             # modes — leave them None for full / mp_full (dataset-only).
-            assigns = soft = assigns_grid = None
-            K = 0
-            if mode not in ("full", "mp_full"):
-                assigns = ph._inf["assigns"]
-                soft = ph._inf["soft_probs"]
-                K = int(soft.shape[1])
-                assigns_grid = assigns.reshape(Ny, Nx)
+            assigns = assigns_grid = None
+            src_name = ""
+            class_ids = []
+            if mode not in ("full", "mp_full", "nnls_full"):
+                assigns_grid, src_name = self._batch_labels
+                assigns = assigns_grid.ravel()
+                class_ids = [int(c) for c in np.unique(assigns) if c >= 0]
 
-            if mode in ("full", "mp_full"):
+            if mode in ("full", "mp_full", "nnls_full"):
                 from gui_app.posthoc_panel import _open_lazy
                 cube = _open_lazy(cfg["path"], scan_shape=(Ny, Nx))
                 stride = max(int(self._full_stride.get()), 1)
@@ -2118,6 +2309,15 @@ class ACOMTabPanel(ctk.CTkFrame):
                     self.after(0, lambda p=pname:
                         self._render_singlephase_full(
                             cr, omap, bv, scan_shape, stride, dt, p))
+                elif mode == "nnls_full":
+                    self._set_status(
+                        f"NNLS phase map: detecting peaks "
+                        f"(stride={stride})…")
+                    cp = self._run_nnls_full_dataset(
+                        cube, stride, detect_kw, _prog, inv_a=inv_a)
+                    dt = time.time() - t0
+                    self.after(0, lambda: self._render_nnls_full(
+                        cp, (Ny, Nx), stride, dt))
                 else:
                     # Multi-phase full: detect (cached) → match each
                     # phase → combine into phase / zone-axis / corr,
@@ -2142,11 +2342,12 @@ class ACOMTabPanel(ctk.CTkFrame):
             # paint the class/grain map by phase.
             region_masks = []
             if mode in ("classes", "mp_classes"):
-                avgs = ph._compute_class_averages(top_n=256)
-                vm = float(cfg.get("vmax", 5.0))
-                for k in range(K):
-                    p = (avgs[k] * vm).astype(np.float32)
-                    patterns.append(p)
+                for j, k in enumerate(class_ids):
+                    self.after(0, lambda j=j: self._set_status(
+                        f"{mode}: averaging class {j + 1}/"
+                        f"{len(class_ids)} ({src_name})"))
+                    patterns.append(self._class_avg_raw(
+                        assigns_grid, k, src_name))
                     n = int((assigns == k).sum())
                     labels.append(f"class p{k}  N={n}")
                     classes.append(k)
@@ -2156,7 +2357,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                 # phase map covers most of the field, not just the
                 # 1 largest per class.
                 min_grain_size = 20
-                for k in range(K):
+                for k in class_ids:
                     mask = (assigns_grid == k)
                     if not mask.any(): continue
                     lab, _n = label(mask)
@@ -2168,13 +2369,14 @@ class ACOMTabPanel(ctk.CTkFrame):
                         ys, xs = np.where(gmask)
                         yi = int(ys[len(ys)//2])
                         xi = int(xs[len(xs)//2])
-                        gi = ph._compute_grain_average(yi, xi)
+                        if not gmask[yi, xi]:
+                            yi, xi = int(ys[0]), int(xs[0])
+                        gi = self._grain_avg_raw(assigns_grid, yi, xi)
                         if gi is None: continue
                         patterns.append(
                             gi["grain_avg"].astype(np.float32))
                         labels.append(
-                            f"p{k} g{gid}  {int(sizes[gid])}px  "
-                            f"⟨p⟩={gi['mean_conf']:.2f}")
+                            f"p{k} g{gid}  {int(sizes[gid])}px")
                         classes.append(k)
                         region_masks.append(gmask)
             else:
@@ -2215,7 +2417,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                 # user asked for): same shape as the class map but
                 # painted by phase.
                 self.after(0, lambda: self._render_phase_region_map(
-                    mp, region_masks, classes, labels, ph._scan_shape,
+                    mp, region_masks, classes, labels, (Ny, Nx),
                     mode))
             dt = time.time() - t0
             self.after(0, lambda: self._set_status(
@@ -2350,7 +2552,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                 f"'No' (re-detect) at the cache prompt."))
 
     def _run_nnls_full_dataset(self, cube, stride, detect_kw,
-                                    progress_cb):
+                                    progress_cb, inv_a=None):
         """Detect → build BV → match_orientations per phase →
         CrystalPhase.quantify_phase NNLS over all (Ny, Nx).  Returns
         the fitted CrystalPhase object."""
@@ -2363,7 +2565,8 @@ class ACOMTabPanel(ctk.CTkFrame):
             cube, stride, detect_kw, progress_cb)
         bv = build_bragg_vectors(
             peaks_all, centers=centers_all,
-            inv_ang_per_pixel=float(self._inv_ang.get()),
+            inv_ang_per_pixel=float(inv_a if inv_a is not None
+                                    else self._inv_ang.get()),
             Rshape=(Ny, Nx))
         names = list(self._phase_crystals.keys())
         crystals = list(self._phase_crystals.values())
@@ -2373,13 +2576,24 @@ class ACOMTabPanel(ctk.CTkFrame):
                     f"stopped by user (before match[{n}])")
             if progress_cb is not None:
                 progress_cb(0, 1, f"match_orientations[{n}]")
-            cr.match_orientations(bv, progress_bar=False,
-                min_number_peaks=self._min_peaks_val())
+            try:
+                cr.match_orientations(bv, progress_bar=False,
+                    min_number_peaks=self._min_peaks_val())
+            except Exception as e:
+                # an all-empty pattern can crash py4DSTEM's argmin;
+                # per-position fallback leaves those slots empty
+                print(f"[NNLS full] match fallback for {n}: {e!r}",
+                      flush=True)
+                from gui_app.acom_core import _match_safe
+                _match_safe(cr, bv, Ny * Nx,
+                            min_peaks=self._min_peaks_val())
         if self._stop_event.is_set():
             raise RuntimeError("stopped by user (before NNLS)")
         cp = CrystalPhase(crystals, crystal_names=names)
         if progress_cb is not None:
             progress_cb(0, 1, "quantify_phase NNLS")
+        # settings of the py4DSTEM Ti alpha/beta tutorial (one pattern per
+        # phase, single winning phase per position, strain allowed)
         cp.quantify_phase(
             bv, k_max=float(self._kmax.get()),
             corr_kernel_size=0.04,
@@ -2387,9 +2601,118 @@ class ACOMTabPanel(ctk.CTkFrame):
             power_intensity=0.25,
             power_intensity_experiment=0.25,
             max_number_patterns=1,
-            allow_strain=False,
+            single_phase=True,
+            allow_strain=True,
             progress_bar=False)
+        cp._dino_names = names
         return cp
+
+    def _render_nnls_full(self, cp, scan_shape, stride, elapsed_s):
+        """Notebook cells 54-57: dominant phase (brightness =
+        reliability), per-phase weight maps, reliability, and each
+        phase's orientation map masked to where that phase wins.
+        Saves PNGs + arrays and opens each figure in its own window."""
+        import matplotlib.pyplot as plt
+        from matplotlib.figure import Figure
+        Ny, Nx = scan_shape
+        names = list(getattr(cp, "_dino_names", self._phase_crystals))
+        n = len(names)
+        w = np.asarray(cp.phase_weights, dtype=np.float64)
+        w = w.reshape(Ny, Nx, -1)[..., :n]
+        rel = np.asarray(cp.phase_reliability, dtype=np.float64
+                         ).reshape(Ny, Nx)
+        rel_c = np.clip(np.nan_to_num(rel), 0.0, 1.0)
+        has = w.sum(-1) > 0
+        dom = np.where(has, np.argmax(w, axis=-1), -1)
+        pal = self._phase_palette(n)
+        from matplotlib.colors import to_rgb
+        cols = np.array([to_rgb(c) for c in pal])
+        rgb = np.zeros((Ny, Nx, 3))
+        for i in range(n):
+            rgb[dom == i] = cols[i]
+        rgb *= rel_c[..., None]
+        base = self._acom_maps_dir()
+        stamp = time.strftime("%H%M%S")
+        try:
+            np.save(os.path.join(base, f"nnls_phase_weights_{stamp}.npy"),
+                    w.astype(np.float32))
+            np.save(os.path.join(base, f"nnls_reliability_{stamp}.npy"),
+                    rel.astype(np.float32))
+            np.save(os.path.join(base, f"nnls_dominant_phase_{stamp}.npy"),
+                    dom.astype(np.int16))
+        except Exception as e:
+            print(f"[NNLS full] array save failed: {e!r}", flush=True)
+        fr = [float((dom == i).sum()) / max(int(has.sum()), 1)
+              for i in range(n)]
+        # 1) dominant phase + reliability
+        fig = Figure(figsize=(9, 4.6), dpi=110, facecolor="white")
+        ax = fig.add_subplot(1, 2, 1)
+        ax.imshow(rgb, interpolation="nearest")
+        ax.set_title("dominant phase (brightness = reliability)",
+                     fontsize=10)
+        ax.set_xticks([]); ax.set_yticks([])
+        from matplotlib.patches import Patch
+        ax.legend(handles=[Patch(color=cols[i],
+                                 label=f"{names[i]}  {100*fr[i]:.1f}%")
+                           for i in range(n)],
+                  loc="upper right", fontsize=8, framealpha=0.85)
+        ax2 = fig.add_subplot(1, 2, 2)
+        im = ax2.imshow(rel, cmap="gray", vmin=0, vmax=1,
+                        interpolation="nearest")
+        ax2.set_title("phase reliability", fontsize=10)
+        ax2.set_xticks([]); ax2.set_yticks([])
+        fig.colorbar(im, ax=ax2, fraction=0.046, pad=0.04)
+        fig.suptitle(f"NNLS phase map  (stride {stride}, "
+                     f"{elapsed_s:.0f}s)", fontsize=11)
+        fig.tight_layout()
+        fig.savefig(os.path.join(base, f"nnls_dominant_phase_{stamp}.png"),
+                    dpi=200, bbox_inches="tight", facecolor="white")
+        self._popup_figure(fig, "NNLS dominant phase")
+        # 2) per-phase weights
+        fig = Figure(figsize=(4.2 * n, 4.0), dpi=110, facecolor="white")
+        for i in range(n):
+            a = fig.add_subplot(1, n, i + 1)
+            im = a.imshow(w[..., i], cmap="magma", interpolation="nearest")
+            a.set_title(f"{names[i]} weight", fontsize=10)
+            a.set_xticks([]); a.set_yticks([])
+            fig.colorbar(im, ax=a, fraction=0.046, pad=0.04)
+        fig.tight_layout()
+        fig.savefig(os.path.join(base, f"nnls_phase_weights_{stamp}.png"),
+                    dpi=200, bbox_inches="tight", facecolor="white")
+        self._popup_figure(fig, "NNLS phase weights")
+        # 3) orientation maps masked by phase (notebook cell 57)
+        try:
+            fig = Figure(figsize=(8.4, 3.8 * n), dpi=110,
+                         facecolor="white")
+            for i, (nm, cr) in enumerate(zip(names,
+                                             self._phase_crystals.values())):
+                mask = rel_c * (dom == i)
+                imgs, f_, _a = cr.plot_orientation_maps(
+                    orientation_map=cr.orientation_map,
+                    corr_range=np.array([0, 5]), show_legend=False,
+                    returnfig=True)
+                plt.close(f_)
+                imgs = np.asarray(imgs)
+                for j, lab in ((0, "in-plane"), (1, "out-of-plane")):
+                    a = fig.add_subplot(n, 2, 2 * i + j + 1)
+                    a.imshow(np.clip(imgs[..., j] * mask[..., None], 0, 1),
+                             interpolation="nearest")
+                    a.set_title(f"{nm} - {lab} orientation", fontsize=10)
+                    a.set_xticks([]); a.set_yticks([])
+            fig.tight_layout()
+            fig.savefig(os.path.join(
+                base, f"nnls_masked_orientation_{stamp}.png"),
+                dpi=200, bbox_inches="tight", facecolor="white")
+            self._popup_figure(fig, "orientation maps masked by phase")
+        except Exception as e:
+            import traceback
+            print(f"[NNLS full] masked orientation maps failed:\n"
+                  f"{traceback.format_exc()}", flush=True)
+            self._set_status(f"orientation maps failed: {e!r}"[:160])
+        self._set_status(
+            "NNLS phase map: " + ", ".join(
+                f"{names[i]} {100*fr[i]:.1f}%" for i in range(n))
+            + f"  -> {base}")
 
     # ==================================================================
     # Multi-phase full dataset: cached detection → per-phase match →
@@ -2498,7 +2821,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                   else os.path.join(
                       os.path.dirname(SAMPLES[sample]["path"]),
                       "_acom_maps"))
-        os.makedirs(base, exist_ok=True)
+        base = self._writable_dir(base)
         # Persist the raw result arrays (not just PNGs) so the Interpretation
         # tab can reuse them for the DINO-vs-orientation cross-check.
         try:
@@ -2655,36 +2978,18 @@ class ACOMTabPanel(ctk.CTkFrame):
     def _resolve_overlay_labels(self, which):
         """Return (Ny,Nx) int label map for the chosen source, or
         (None, reason) if unavailable."""
-        ph = self._posthoc()
-        Ny, Nx = self._mpfull["scan_shape"]
-        if which == "DINO class map":
-            if ph is None or getattr(ph, "_inf", None) is None:
-                return None, ("DINO class map not available — load a "
-                                "trained run (topbar 'run' badge).")
-            return (np.asarray(ph._inf["assigns"]).reshape(Ny, Nx),
-                      None)
-        if which == "DINO+cluster":
-            dc = getattr(self.app, "dino_cluster", None)
-            lab = getattr(dc, "last_labels", None) if dc else None
-            if lab is None:
-                return None, ("DINO+cluster image not available — run "
-                                "it in the Clustering → DINO+cluster tab.")
-            return np.asarray(lab).reshape(Ny, Nx), None
-        if which.startswith("NMF"):
-            method = which.split("-", 1)[1]   # KMeans/Aglo/HDBSCAN/FCM
-            nmf = getattr(self.app, "nmf", None)
-            store = getattr(nmf, "last_cluster_labels", None) if nmf else None
-            if not store or method not in store:
-                return None, (f"{which} not available — run NMF + "
-                                f"'{method}' clustering in the "
-                                f"Clustering → NMF tab first.")
-            return np.asarray(store[method]).reshape(Ny, Nx), None
-        return None, f"unknown source {which}"
+        grid, why = self._labels_for(which)
+        if grid is not None and tuple(grid.shape) != tuple(
+                self._mpfull["scan_shape"]):
+            return None, (f"'{which}' is {grid.shape} but the ACOM map is "
+                          f"{self._mpfull['scan_shape']}.")
+        return grid, why
 
     def _do_overlay(self):
         if getattr(self, "_mpfull", None) is None:
             messagebox.showinfo("Overlay",
                 "Run a multi-phase full-dataset first."); return
+        self._refresh_label_sources()
         which = self._overlay_src.get()
         labels, reason = self._resolve_overlay_labels(which)
         if labels is None:
@@ -2912,7 +3217,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                   else os.path.join(
                       os.path.dirname(SAMPLES[sample]["path"]),
                       "_acom_maps"))
-        os.makedirs(base, exist_ok=True)
+        base = self._writable_dir(base)
         return base
 
     def _render_singlephase_full(self, crystal, omap, bv, scan_shape,
@@ -3676,23 +3981,22 @@ class ACOMTabPanel(ctk.CTkFrame):
                     break
         except Exception:
             pass
-        ph = self._posthoc()
-        if ph is None or ph.sample is None:
+        if self._active_sample() is None:
             return
         right = (event.button == 3)
         try:
             if right:
-                gi = ph._compute_grain_average(y, x)
+                cur = self._current_labels()
+                if cur is None:
+                    return
+                gi = self._grain_avg_raw(cur[0], y, x)
                 if gi is None:
                     self._set_status("no grain at that pixel"); return
                 pat = gi["grain_avg"].astype(np.float32)
                 title = (f"grain @ ({y},{x})  p{gi['cls']}  "
                            f"{gi['n_pix']}px  →  phase: {phase_txt}")
             else:
-                from data import SAMPLES, LoadPRZ
-                cfg = SAMPLES[ph.sample]
-                ds = LoadPRZ(cfg["path"], resize=192, vmax=cfg["vmax"])
-                pat = ds.get_raw(y * Nx + x).astype(np.float32)
+                pat = self._raw_ds().get_raw(y * Nx + x).astype(np.float32)
                 title = (f"single ({y},{x})  →  phase: {phase_txt}")
         except Exception as e:
             messagebox.showerror("inspect", repr(e)); return

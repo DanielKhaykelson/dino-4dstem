@@ -1127,7 +1127,7 @@ def _open_mib(path, scan_shape=None, raster=None):
     return mm[:, hlen:hlen + datasize].view(dt).reshape(Ny, Nx, H, W)
 
 
-def open_lazy_cube(path, scan_shape=None, raster=None,
+def open_lazy_cube(path, scan_shape=None, raster=...,
                      apply_dectris_corrections: bool = False):
     """Universal lazy 4D-cube loader.  Returns a numpy memmap
     `(Nx, Ny, H, W)` for `.prz / .npz / .npy` and an `_H5Cube4D` wrapper
@@ -1135,7 +1135,13 @@ def open_lazy_cube(path, scan_shape=None, raster=None,
 
     Always passes allow_pickle=True so np.load won't trip on pickled
     object arrays (some legacy .prz / .npy files).
+
+    raster: the frame map for streamed scans with flyback.  Left out, the
+    one registered for this file in SAMPLES is used, so ACOM / post-hoc /
+    tools read the same frames as the loader did; None forces 1:1.
     """
+    if raster is ...:
+        raster = _registered_raster(path)
     if path.lower().endswith((".h5", ".hdf5")):
         import h5py
         f = _h5_open(path)
