@@ -19,7 +19,7 @@ if not exist "%~dp0src\gui_dino4dstem.py" (
   echo         this file from the extracted folder.
   echo.
   echo         This file is currently in:
-  echo           %~dp0
+  echo           "%~dp0"
   echo.
   echo Press any key to close.
   pause >nul
