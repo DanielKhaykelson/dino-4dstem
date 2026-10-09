@@ -809,9 +809,41 @@ def folder_probe(folder):
     from PIL import Image
     files = list_folder_images(folder)
     if not files:
-        raise ValueError(
-            f"{os.path.basename(folder)}: no image files "
-            f"({'/'.join(e[1:] for e in _IMG_EXTS[:5])}/…) found.")
+        # Say WHAT is in the folder instead of just "nothing found" -- the
+        # usual causes are an unsupported format (raw detector files) or the
+        # images sitting one level down in sub-folders.
+        from collections import Counter
+        here = Counter(os.path.splitext(f)[1].lower()
+                       for f in os.listdir(folder)
+                       if os.path.isfile(os.path.join(folder, f)))
+        sub_hits, sub_dirs = 0, []
+        try:
+            for d in sorted(os.listdir(folder)):
+                dp = os.path.join(folder, d)
+                if os.path.isdir(dp):
+                    k = sum(1 for f in os.listdir(dp)
+                            if f.lower().endswith(_IMG_EXTS))
+                    if k:
+                        sub_hits += k
+                        sub_dirs.append(f"{d} ({k})")
+        except Exception:
+            pass
+        msg = [f"{os.path.basename(folder)}: no readable image files found."]
+        if here:
+            top = ", ".join(f"{n}x {e or '(no extension)'}"
+                            for e, n in here.most_common(6))
+            msg.append(f"The folder contains: {top}.")
+        msg.append("Readable image formats are: "
+                   f"{', '.join(e[1:] for e in _IMG_EXTS)}.")
+        if sub_hits:
+            msg.append(f"NOTE: {sub_hits} image(s) were found in sub-folders "
+                       f"({', '.join(sub_dirs[:4])}) - this loader reads ONE "
+                       f"folder, so pick that sub-folder instead.")
+        else:
+            msg.append("If these are raw detector files (.mib, .raw, .dm4, "
+                       ".h5 ...) use 'Browse' instead - they load directly, "
+                       "no folder import needed.")
+        raise ValueError(" ".join(msg))
     with Image.open(files[0]) as im:
         W, H = im.size
         mode = im.mode

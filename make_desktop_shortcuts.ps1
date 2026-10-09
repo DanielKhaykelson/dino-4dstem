@@ -12,6 +12,11 @@ $ws      = New-Object -ComObject WScript.Shell
 $icon    = $null
 $dinoIco = Join-Path $proj "assets\dino.ico"
 if (Test-Path $dinoIco) { $icon = $dinoIco }
+else {
+  Write-Warning "assets\dino.ico not found next to this script -- the shortcuts
+    will fall back to a generic icon. That usually means this script was run
+    outside the extracted DINO-4DSTEM folder; re-run it from that folder."
+}
 $envName = "dino4dstem"
 $roots = @(
   "$env:USERPROFILE\anaconda3", "$env:USERPROFILE\Anaconda3",

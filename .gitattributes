@@ -2,3 +2,9 @@
 # A CRLF in a .sh breaks the shebang on Linux/macOS:
 #   "bash: bad interpreter: /usr/bin/env bash^M".
 *.sh text eol=lf
+
+# Windows scripts must always check out with CRLF. A clone with
+# core.autocrlf=false (and GitHub's source .zip) would otherwise hand
+# Windows users LF .bat/.ps1 files.
+*.bat text eol=crlf
+*.ps1 text eol=crlf

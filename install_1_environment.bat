@@ -10,6 +10,24 @@ REM
 REM  Prerequisite: Miniconda or Anaconda installed.
 REM ============================================================
 cd /d "%~dp0"
+if not exist "%~dp0environment.yml" (
+  echo.
+  echo [ERROR] This folder is incomplete -- environment.yml is missing.
+  echo.
+  echo         Most likely you ran this file straight from INSIDE the .zip,
+  echo         or copied it out of the DINO-4DSTEM folder. The launcher needs
+  echo         the whole folder next to it.
+  echo.
+  echo         Fix: right-click the .zip, choose "Extract All...", then run
+  echo         this file from the extracted folder.
+  echo.
+  echo         This file is currently in:
+  echo           %~dp0
+  echo.
+  echo Press any key to close.
+  pause >nul
+  exit /b 1
+)
 REM Don't nag about conda being outdated -- it's just a warning, and it
 REM confuses users into thinking they must update conda first (they don't).
 REM This only affects THIS window; the user's global conda config is untouched.

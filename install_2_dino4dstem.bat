@@ -7,6 +7,24 @@ REM  creates the Desktop icons.  This step is FAST -- re-run it any
 REM  time you update the code (you do NOT need to redo step 1).
 REM ============================================================
 cd /d "%~dp0"
+if not exist "%~dp0src\gui_dino4dstem.py" (
+  echo.
+  echo [ERROR] This folder is incomplete -- src\gui_dino4dstem.py is missing.
+  echo.
+  echo         Most likely you ran this file straight from INSIDE the .zip,
+  echo         or copied it out of the DINO-4DSTEM folder. The launcher needs
+  echo         the whole folder next to it.
+  echo.
+  echo         Fix: right-click the .zip, choose "Extract All...", then run
+  echo         this file from the extracted folder.
+  echo.
+  echo         This file is currently in:
+  echo           %~dp0
+  echo.
+  echo Press any key to close.
+  pause >nul
+  exit /b 1
+)
 set PYTHONIOENCODING=utf-8
 REM Suppress conda's "a newer version exists" nag (see install_1 for why).
 set "CONDA_NOTIFY_OUTDATED_CONDA=false"
