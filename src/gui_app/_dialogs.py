@@ -260,7 +260,7 @@ def add_cubes_dialog(parent) -> list[str] | None:
     return result["paths"]
 
 
-def ask_scan_shape(parent, N: int, H: int, W: int):
+def ask_scan_shape(parent, N: int, H: int, W: int, get_frame=None):
     """Modal popup: pick (Ny, Nx) for a 3D HDF5 master where the cube
     is stored as (N_frames, H, W). Returns (Ny, Nx) or None on cancel.
 
@@ -281,7 +281,9 @@ def ask_scan_shape(parent, N: int, H: int, W: int):
         f"This HDF5 file (master + data) stores frames as a 3D array:\n"
         f"   N = {N},  H = {H},  W = {W}\n\n"
         f"Provide the scan shape (Ny, Nx) so flat-i → (rx, ry) works.\n"
-        f"Constraint: Ny · Nx = {N}."),
+        f"Ny · Nx may be SMALLER than {N}: continuously-streamed scans "
+        f"store extra frames per row while the beam flies back, and those "
+        f"are not probe positions. Enter the REAL grid and they are skipped."),
         font=("Segoe UI", 10)).pack(padx=10, pady=(8, 4))
     ny_init, nx_init = _closest_factor_pair(N)
     ny_var = ctk.IntVar(value=ny_init)
@@ -312,20 +314,109 @@ def ask_scan_shape(parent, N: int, H: int, W: int):
                             ).grid(row=i // 4, column=i % 4,
                                        padx=2, pady=2)
 
-    status = ctk.CTkLabel(dlg, text="", font=("Consolas", 9))
+    # ---- flyback -----------------------------------------------------
+    # A continuously-streamed scan keeps recording while the beam flies back
+    # to the start of the next row.  Those frames are not probe positions.
+    fly_box = ctk.CTkFrame(dlg, fg_color="transparent")
+    fly_box.pack(padx=10, pady=(10, 0), fill="x")
+    ctk.CTkLabel(fly_box, text="Is there flyback in this scan?",
+                 font=("Segoe UI", 10, "bold")).pack(side="left")
+    detect_btn = ctk.CTkButton(
+        fly_box, text="Yes - find it for me", width=170,
+        command=lambda: _detect())
+    detect_btn.pack(side="left", padx=8)
+    if get_frame is None:
+        detect_btn.configure(state="disabled")
+    fly_info = ctk.CTkLabel(dlg, text=(
+        "" if get_frame is not None else
+        "(automatic detection is not available for this file type)"),
+        font=("Consolas", 9), justify="left", wraplength=500,
+        text_color=("#555", "#aaa"))
+    fly_info.pack(padx=10, pady=(2, 0), anchor="w")
+
+    status = ctk.CTkLabel(dlg, text="", font=("Consolas", 9),
+                          justify="left", wraplength=500)
     status.pack(padx=10, pady=2)
     result = {"shape": None}
+
+    def _detect():
+        """Find the raster from the descan and propose the real grid."""
+        try:
+            from flyback import frame_centres, find_raster, suggest_grid
+        except Exception as e:
+            fly_info.configure(text=f"detector unavailable: {e}"); return
+        detect_btn.configure(state="disabled", text="scanning frames...")
+        try:
+            def prog(i, n):
+                fly_info.configure(
+                    text=f"reading frame centres... {i}/{n} "
+                         f"({100*i//max(n,1)}%)")
+                try: dlg.update()
+                except Exception: pass
+            cx = frame_centres(get_frame, N, progress=prog)
+            r = find_raster(cx)
+            g = suggest_grid(N, r["period"], r["n_flyback"])
+            ny_var.set(g["Ny"]); nx_var.set(g["Nx"])
+            conf = r["confidence"]
+            warn = ("" if conf >= 0.5 else
+                    "  LOW CONFIDENCE - check these numbers.")
+            fly_info.configure(text=(
+                f"Found a raster: {r['period']} frames per row = "
+                f"{r['n_scan']} scan + {r['n_flyback']} flyback "
+                f"(confidence {conf:.2f}).{warn}\n"
+                f"Suggested grid {g['Ny']} x {g['Nx']}. The period is found "
+                f"reliably; the flyback width is an estimate, so adjust Nx "
+                f"if you know the real scan width."))
+        except Exception as e:
+            fly_info.configure(text=f"no raster found: {e}")
+        finally:
+            detect_btn.configure(state="normal", text="Yes - find it for me")
+
+    def _plan(ny, nx):
+        """How (ny, nx) maps onto the N stored frames.
+
+        Exact fit -> every frame is a probe position.  Otherwise treat the
+        file as rows of `period` stored frames and keep the first nx of
+        each: the tail of a row is flyback, which is not a probe position
+        and, left in, shears the map and reads as a bright streak.
+        """
+        if ny <= 0 or nx <= 0:
+            return None, "Ny and Nx must be positive."
+        if ny * nx == N:
+            return nx, f"exact fit: {ny}x{nx} = {N} frames, none skipped."
+        if ny * nx > N:
+            return None, (f"Ny x Nx = {ny*nx} needs more than the {N} "
+                          f"frames in the file.")
+        period = N // ny
+        if period < nx:
+            return None, (f"{ny} rows of at least {nx} frames needs "
+                          f"{ny*nx}, but only {N} frames exist.")
+        per_row = period - nx
+        tail = N - ny * period
+        return period, (f"{ny} rows x {period} stored frames; keeping the "
+                        f"first {nx} of each.\n"
+                        f"Skipping {per_row}/row (flyback) = {ny*per_row}"
+                        + (f", plus {tail} trailing." if tail else "."))
+
+    def _preview(*_a):
+        try:
+            ny = int(ny_var.get()); nx = int(nx_var.get())
+        except Exception:
+            status.configure(text=""); return
+        period, msg = _plan(ny, nx)
+        status.configure(text=msg,
+                         text_color=(("#2D7A2D", "#7AC07A") if period
+                                     else ("#B00020", "#FF6B6B")))
 
     def _ok():
         try:
             ny = int(ny_var.get()); nx = int(nx_var.get())
         except Exception:
             status.configure(text="bad integer"); return
-        if ny * nx != N:
-            status.configure(
-                text=f"Ny·Nx = {ny*nx} ≠ N = {N}.  Try again.")
-            return
-        result["shape"] = (ny, nx)
+        period, msg = _plan(ny, nx)
+        if period is None:
+            status.configure(text=msg); return
+        result["shape"] = (ny, nx, period)
         dlg.destroy()
 
     def _cancel():
@@ -337,5 +428,9 @@ def ask_scan_shape(parent, N: int, H: int, W: int):
                    command=_ok).pack(side="left", padx=4)
     ctk.CTkButton(btns, text="Cancel", width=80,
                    command=_cancel).pack(side="left", padx=4)
+    for _v in (ny_var, nx_var):
+        try: _v.trace_add("write", _preview)
+        except Exception: pass
+    _preview()
     parent.wait_window(dlg)
     return result["shape"]

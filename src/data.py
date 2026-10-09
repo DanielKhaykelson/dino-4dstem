@@ -121,29 +121,49 @@ class _H5Cube4D:
     holds the file handle for external-link resolution."""
     def __init__(self, h5_dataset, file_handle=None,
                  scan_shape: tuple | None = None,
-                 corrections: dict | None = None):
+                 corrections: dict | None = None,
+                 row_period: int | None = None):
         s = tuple(h5_dataset.shape)
         self._corr = corrections or {}
         if len(s) == 4:
             self.Nx, self.Ny, self.H, self.W = s
             self._mode = "4d"
+            self._period = self.Ny
         elif len(s) == 3:
             N, H, W = s
             if scan_shape is None:
                 raise ValueError(
                     f"3D dataset of length {N}: scan_shape required.")
             Ny, Nx = (int(scan_shape[0]), int(scan_shape[1]))
-            if Ny * Nx != N:
+            # Frames stored per scan row.  Continuously-streamed scans keep
+            # recording while the beam flies back, so a row can hold more
+            # frames than probe positions; those extras are not scan points
+            # and, mapped as if they were, shear the whole image.
+            period = int(row_period) if row_period else Nx
+            if period < Nx:
                 raise ValueError(
-                    f"scan_shape ({Ny}, {Nx}) → Ny·Nx={Ny*Nx} ≠ "
-                    f"N={N}.")
+                    f"row period {period} is smaller than Nx={Nx}.")
+            if Ny * period > N:
+                raise ValueError(
+                    f"scan_shape ({Ny}, {Nx}) with row period {period} "
+                    f"needs {Ny*period} frames but the dataset has {N}.")
             self.Nx, self.Ny, self.H, self.W = Nx, Ny, H, W
             self._mode = "3d"
+            self._period = period
         else:
             raise ValueError(f"need 3D or 4D dataset, got shape {s}")
         self._d = h5_dataset
         self._f = file_handle
-        self.shape = (self.Nx, self.Ny, self.H, self.W)
+        # Report the shape the way this object is INDEXED: cube[row][col].
+        # A 4-D dataset already carries the scan order, so it is passed
+        # through unchanged.  The 3-D branch used to report (Nx, Ny, ...)
+        # while being indexed [row][col]; on a square scan that is
+        # invisible, but a non-square one (e.g. 99 x 108) came out
+        # transposed for every caller doing `Ny, Nx, H, W = cube.shape`.
+        if self._mode == "3d":
+            self.shape = (self.Ny, self.Nx, self.H, self.W)
+        else:
+            self.shape = (self.Nx, self.Ny, self.H, self.W)
         self.dtype = h5_dataset.dtype
 
     def read_block(self, r0, nrows, c0, ncols):
@@ -163,7 +183,7 @@ class _H5Cube4D:
             if self._mode == "4d":
                 a = np.asarray(self._d[r, c0:c0 + ncols])
             else:
-                s = r * S1 + c0
+                s = r * self._period + c0
                 a = np.asarray(self._d[s:s + ncols])
             rows.append(a)
         arr = np.stack(rows, axis=0)
@@ -183,7 +203,7 @@ class _H5Cube4D:
             return arr
         if isinstance(idx, tuple) and len(idx) >= 2:
             rx = int(idx[0]); ry = int(idx[1])
-            i = rx * self.Ny + ry
+            i = rx * self._period + ry
             frame = np.asarray(self._d[i])
             if self._corr:
                 frame = _apply_dectris_corrections(frame, self._corr)
@@ -1023,7 +1043,7 @@ def mib_probe(path, scan_shape=None):
             "assembly": assembly, "warnings": warnings}
 
 
-def _open_mib(path, scan_shape=None):
+def _open_mib(path, scan_shape=None, row_period=None):
     """Lazy 4D Merlin cube: memmap the .mib and return a big-endian
     (Ny, Nx, H, W) view with the per-frame headers stripped.  Zero-copy —
     frames are read from disk on demand and cast by the caller."""
@@ -1036,17 +1056,24 @@ def _open_mib(path, scan_shape=None):
             f"{os.path.basename(path)}: Merlin .mib has {n} frames but the "
             f"scan grid (Ny, Nx) is unknown — pass scan_shape=(Ny, Nx).")
     Ny, Nx = int(ss[0]), int(ss[1])
-    if Ny * Nx != n:
+    period = int(row_period) if row_period else Nx
+    if period < Nx:
+        raise ValueError(f"row period {period} is smaller than Nx={Nx}.")
+    if Ny * period > n:
         raise ValueError(
-            f"scan_shape ({Ny}, {Nx}) → {Ny*Nx} ≠ {n} frames in the file.")
+            f"scan_shape ({Ny}, {Nx}) with row period {period} needs "
+            f"{Ny*period} frames but the file has {n}.")
     datasize = H * W * dt.itemsize
     mm = np.memmap(path, dtype="<u1", mode="r", shape=(n, stride))
     # strip each frame's header, reinterpret pixels big-endian, reshape.
-    px = mm[:, hlen:hlen + datasize].view(dt).reshape(Ny, Nx, H, W)
+    px = (mm[:Ny * period, hlen:hlen + datasize]
+          .view(dt).reshape(Ny, period, H, W))
+    if period != Nx:
+        px = px[:, :Nx]          # drop the flyback tail of each  row (a view)
     return px
 
 
-def open_lazy_cube(path, scan_shape=None,
+def open_lazy_cube(path, scan_shape=None, row_period=None,
                      apply_dectris_corrections: bool = False):
     """Universal lazy 4D-cube loader.  Returns a numpy memmap
     `(Nx, Ny, H, W)` for `.prz / .npz / .npy` and an `_H5Cube4D` wrapper
@@ -1086,7 +1113,8 @@ def open_lazy_cube(path, scan_shape=None,
                     f"scan_shape (Ny, Nx) is required and could not "
                     f"be inferred from the master file metadata.")
             return _H5Cube4D(ds, file_handle=f,
-                                scan_shape=scan_shape, corrections=corr)
+                                scan_shape=scan_shape, corrections=corr,
+                                row_period=row_period)
         f.close()
         raise ValueError(f"unexpected dataset ndim={ndim}")
     if path.lower().endswith((".dm4", ".dm3")):
@@ -1094,7 +1122,8 @@ def open_lazy_cube(path, scan_shape=None,
     if path.lower().endswith(".raw"):
         return _open_empad(path, scan_shape=scan_shape)
     if path.lower().endswith(".mib"):
-        return _open_mib(path, scan_shape=scan_shape)
+        return _open_mib(path, scan_shape=scan_shape,
+                         row_period=row_period)
     if path.lower().endswith((".prz", ".npz")):
         base, _ = os.path.splitext(path)
         cand = base + ".cube.npy"
@@ -1388,6 +1417,7 @@ class _H5FlatCube:
     Reads are lazy — one pattern per __getitem__ call.
     """
     def __init__(self, h5_dataset, scan_shape: tuple | None = None,
+                 row_period: int | None = None,
                  corrections: dict | None = None):
         s = tuple(h5_dataset.shape)
         self._corr = corrections or {}
@@ -1407,13 +1437,22 @@ class _H5FlatCube:
                         f"(Ny, Nx) — the file has no scan grid info.")
             else:
                 Ny, Nx = (int(scan_shape[0]), int(scan_shape[1]))
-                if Ny * Nx != N:
+                if Ny * Nx > N:
                     raise ValueError(
                         f"scan_shape ({Ny}, {Nx}) gives "
-                        f"Ny·Nx={Ny*Nx} but the dataset has {N} "
+                        f"Ny·Nx={Ny*Nx} but the dataset has only {N} "
                         f"frames — pick the right shape.")
             self.Nx, self.Ny, self.H, self.W = Nx, Ny, H, W
             self._mode = "3d"
+            # Frames stored per scan row; > Nx when the file also keeps the
+            # frames recorded during flyback.  Those are not scan positions,
+            # so they must be skipped here too -- otherwise training and NMF
+            # would consume them as if they were data.
+            self._period = int(row_period) if row_period else Nx
+            if self._period < Nx or Ny * self._period > N:
+                raise ValueError(
+                    f"row period {self._period} invalid for "
+                    f"({Ny}, {Nx}) over {N} frames.")
         else:
             raise ValueError(f"need 3D or 4D dataset, got shape {s}")
         self._d = h5_dataset
@@ -1427,6 +1466,10 @@ class _H5FlatCube:
         if isinstance(idx, (int, np.integer)):
             i = int(idx)
             if self._mode == "3d":
+                # flat scan index -> dataset index, stepping over flyback
+                if self._period != self.Nx:
+                    _r, _c = divmod(i, self.Nx)
+                    i = _r * self._period + _c
                 frame = np.asarray(self._d[i])
             else:
                 rx, ry = divmod(i, self.Ny)
@@ -1503,6 +1546,8 @@ class LoadPRZ:
                     scan_shape = inferred
             cube_view = _H5FlatCube(ds,
                                        scan_shape=scan_shape,
+                                       row_period=_registered_row_period(
+                                           used_path),
                                        corrections=corrections)
             self.Nx = cube_view.Nx; self.Ny = cube_view.Ny
             self.H  = cube_view.H;  self.W  = cube_view.W
@@ -1876,8 +1921,28 @@ def loaded_sample_keys():
             if isinstance(v, dict) and v.get("_runtime")]
 
 
+def _registered_row_period(path):
+    """Row period recorded for this cube in SAMPLES, if any.
+
+    Training, NMF and the eval tabs build their own LoadPRZ from a path and
+    never saw the loader dialog, so the flyback row period has to travel with
+    the registered sample -- otherwise the Pre-processing preview would skip
+    flyback frames while everything downstream silently consumed them.
+    """
+    try:
+        ap = os.path.abspath(path)
+        for v in SAMPLES.values():
+            if v.get("row_period") and os.path.abspath(
+                    v.get("path", "")) == ap:
+                return int(v["row_period"])
+    except Exception:
+        pass
+    return None
+
+
 def register_runtime_sample(path, *, scan_shape=None, vmax=2.0,
                               center_mask_radius=15, key=None,
+                              row_period=None,
                               blur_sigma: float = 0.0,
                               log_stretch: bool = False):
     """Inject an arbitrary .prz / .npy cube into SAMPLES at runtime so the
@@ -1929,6 +1994,9 @@ def register_runtime_sample(path, *, scan_shape=None, vmax=2.0,
         "center_mask_radius": int(center_mask_radius),
         "blur_sigma": float(blur_sigma),
         "log_stretch": bool(log_stretch),
+        # frames stored per scan row (> Nx when the file keeps flyback
+        # frames); travels with the sample so every tab maps alike
+        "row_period": (int(row_period) if row_period else None),
         "approved_label": None,
         "_runtime": True,
     }

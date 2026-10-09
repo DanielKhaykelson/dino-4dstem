@@ -58,13 +58,13 @@ from gui_app.nbed_center import (
     find_bf_center, recenter_to, nbed_center_cube)
 
 
-def _open_lazy(path, scan_shape=None,
+def _open_lazy(path, scan_shape=None, row_period=None,
                   apply_dectris_corrections: bool = False):
     """Thin shim — delegates to data.open_lazy_cube so all panels share
     a single h5/.prz/.npy loader (and a single allow_pickle=True
     convention)."""
     from data import open_lazy_cube
-    return open_lazy_cube(path, scan_shape=scan_shape,
+    return open_lazy_cube(path, scan_shape=scan_shape, row_period=row_period,
                               apply_dectris_corrections=apply_dectris_corrections)
 
 
@@ -1241,6 +1241,9 @@ class PrePanel(ctk.CTkFrame):
         # and pop a scan-shape dialog. For 4D HDF5 / .prz / .npy, no
         # prompt is needed.
         scan_shape_override = None
+        # Frames stored per scan row (> Nx when the file keeps the frames
+        # recorded during flyback).  None = no extra frames.
+        row_period_override = None
         # Merlin/Medipix .mib: peek the per-frame header for the detector
         # geometry.  The scan grid is usually NOT stored, so confirm the
         # detected/inferred (Ny, Nx) or prompt for it.
@@ -1276,12 +1279,15 @@ class PrePanel(ctk.CTkFrame):
                 if ss is None:
                     return
                 scan_shape_override = (int(ss[0]), int(ss[1]))
+                if len(ss) > 2:
+                    row_period_override = int(ss[2])
         if p.lower().endswith((".h5", ".hdf5")):
             try:
                 import h5py
                 from data import (_h5_find_data_path,
                                       _h5_infer_scan_shape,
                                       _h5_dectris_external_data)
+                dpath = None     # unset on the Dectris external-link path
                 with h5py.File(p, "r") as fh:
                     try:
                         dpath, ndim = _h5_find_data_path(fh)
@@ -1309,9 +1315,26 @@ class PrePanel(ctk.CTkFrame):
             if ndim == 3 and scan_shape_override is None:
                 from gui_app._dialogs import ask_scan_shape
                 N, H, W = s
-                scan_shape_override = ask_scan_shape(self, N, H, W)
-                if scan_shape_override is None:
+                # give the dialog a frame reader so it can find the
+                # raster from the descan when the user says "yes, flyback"
+                def _gf(i, _p=p, _dp=dpath):
+                    import h5py as _h
+                    st = getattr(self, "_fb_h5", None)
+                    if st is None or st[0] != _p:
+                        try: st[1].close()
+                        except Exception: pass
+                        st = (_p, _h.File(_p, "r"))
+                        self._fb_h5 = st
+                    return st[1][_dp][int(i)]
+                # external-link masters have no single dataset path, so
+                # detection is offered only when we have one
+                _ss = ask_scan_shape(self, N, H, W,
+                                     get_frame=(_gf if dpath else None))
+                if _ss is None:
                     return
+                scan_shape_override = (int(_ss[0]), int(_ss[1]))
+                if len(_ss) > 2:
+                    row_period_override = int(_ss[2])
         # --- Peek shape/dtype cheaply (no frame load), estimate memory,
         #     and prompt to real-space bin before loading. ---
         shape4d = None; peek_dtype = None; lazy = True
@@ -1395,7 +1418,8 @@ class PrePanel(ctk.CTkFrame):
             out = base + f"_bin{n}.cube.npy"
             if not os.path.exists(out):
                 try:
-                    src = _open_lazy(p, scan_shape=scan_shape_override)
+                    src = _open_lazy(p, scan_shape=scan_shape_override,
+                                     row_period=row_period_override)
                 except Exception as e:
                     messagebox.showerror("Error", f"Load failed:\n{e}")
                     return
@@ -1404,7 +1428,8 @@ class PrePanel(ctk.CTkFrame):
             load_path = out
             used_scan_override = None             # binned .cube.npy is 4D
         try:
-            self.cube = _open_lazy(load_path, scan_shape=used_scan_override)
+            self.cube = _open_lazy(load_path, scan_shape=used_scan_override,
+                                   row_period=row_period_override)
         except Exception as e:
             messagebox.showerror("Error", f"Load failed:\n{e}")
             return
@@ -1445,6 +1470,7 @@ class PrePanel(ctk.CTkFrame):
         try:
             self.sample_key = register_runtime_sample(
                 p, scan_shape=(Ny, Nx),
+                row_period=row_period_override,
                 vmax=float(self.vmax.get()),
                 center_mask_radius=self._effective_center_mask_radius(),
                 blur_sigma=(float(self.blur_sigma.get())
