@@ -319,7 +319,7 @@ def ask_scan_shape(parent, N: int, H: int, W: int, get_frame=None):
     # to the start of the next row.  Those frames are not probe positions.
     fly_box = ctk.CTkFrame(dlg, fg_color="transparent")
     fly_box.pack(padx=10, pady=(10, 0), fill="x")
-    ctk.CTkLabel(fly_box, text="Is there flyback in this scan?",
+    ctk.CTkLabel(fly_box, text="Is there flyback? Enter your Ny, then",
                  font=("Segoe UI", 10, "bold")).pack(side="left")
     detect_btn = ctk.CTkButton(
         fly_box, text="Yes - find it for me", width=170,
@@ -339,34 +339,56 @@ def ask_scan_shape(parent, N: int, H: int, W: int, get_frame=None):
     status.pack(padx=10, pady=2)
     result = {"shape": None}
 
+    detected = {"sig": None, "raster": None, "grid": None}
+
     def _detect():
-        """Find the raster from the descan and propose the real grid."""
+        """Full cellulose recipe: raster from the descan, scan start from
+        row coherence, per-row slope check.  Uses the Ny you entered as the
+        number of scan rows (acquisition knowledge, like N_ROWS = 50 in the
+        cellulose pipeline); the frame pass is cached so changing Ny and
+        pressing again is instant."""
         try:
-            from flyback import frame_centres, find_raster, suggest_grid
+            from flyback import frame_signals, detect_raster
         except Exception as e:
             fly_info.configure(text=f"detector unavailable: {e}"); return
-        detect_btn.configure(state="disabled", text="scanning frames...")
         try:
-            def prog(i, n):
-                fly_info.configure(
-                    text=f"reading frame centres... {i}/{n} "
-                         f"({100*i//max(n,1)}%)")
-                try: dlg.update()
-                except Exception: pass
-            cx = frame_centres(get_frame, N, progress=prog)
-            r = find_raster(cx)
-            g = suggest_grid(N, r["period"], r["n_flyback"])
-            ny_var.set(g["Ny"]); nx_var.set(g["Nx"])
-            conf = r["confidence"]
-            warn = ("" if conf >= 0.5 else
-                    "  LOW CONFIDENCE - check these numbers.")
+            ny_in = int(ny_var.get())
+        except Exception:
+            ny_in = 0
+        detect_btn.configure(state="disabled", text="reading frames...")
+        try:
+            if detected["sig"] is None:
+                def prog(i, n):
+                    fly_info.configure(
+                        text=f"measuring beam position in every frame... "
+                             f"{i}/{n} ({100*i//max(n,1)}%)")
+                    try: dlg.update()
+                    except Exception: pass
+                detected["sig"] = frame_signals(get_frame, N, progress=prog)
+            r = detect_raster(detected["sig"],
+                              n_rows=ny_in if ny_in > 1 else None)
+            ny, nx = r["n_rows"], r["n_scan"]
+            detected["raster"] = dict(f0=r["f0"], period=r["period"],
+                                      n_scan=nx, n_rows=ny)
+            detected["grid"] = (ny, nx)
+            ny_var.set(ny); nx_var.set(nx)
+            notes = []
+            if r["raster_conf"] < 0.5:
+                notes.append("LOW CONFIDENCE in the raster - check it.")
+            if r["start_margin"] < 0.02:
+                notes.append("the scan START is poorly determined.")
+            if ny_in <= 1:
+                notes.append("Ny was not given, so the row count is a guess "
+                             "- enter your real Ny and press again.")
             fly_info.configure(text=(
-                f"Found a raster: {r['period']} frames per row = "
-                f"{r['n_scan']} scan + {r['n_flyback']} flyback "
-                f"(confidence {conf:.2f}).{warn}\n"
-                f"Suggested grid {g['Ny']} x {g['Nx']}. The period is found "
-                f"reliably; the flyback width is an estimate, so adjust Nx "
-                f"if you know the real scan width."))
+                f"Raster: {r['period']} frames per row = {nx} scan + "
+                f"{r['n_flyback']} flyback.  Scan starts at frame "
+                f"{r['f0']}; {ny} rows kept"
+                + (f" ({r['rows_rejected']} row(s) failed the slope check)"
+                   if r["rows_rejected"] else "")
+                + f".\nConfidence {r['raster_conf']:.2f}, "
+                f"row-to-row correlation {r['row_corr']:.3f}."
+                + ("  " + "  ".join(notes) if notes else "")))
         except Exception as e:
             fly_info.configure(text=f"no raster found: {e}")
         finally:
@@ -416,7 +438,13 @@ def ask_scan_shape(parent, N: int, H: int, W: int, get_frame=None):
         period, msg = _plan(ny, nx)
         if period is None:
             status.configure(text=msg); return
-        result["shape"] = (ny, nx, period)
+        if detected["raster"] is not None and detected["grid"] == (ny, nx):
+            raster = dict(detected["raster"])
+        elif ny * nx == N:
+            raster = None
+        else:
+            raster = dict(f0=0, period=int(period), n_scan=nx, n_rows=ny)
+        result["shape"] = (ny, nx, raster)
         dlg.destroy()
 
     def _cancel():
@@ -434,3 +462,40 @@ def ask_scan_shape(parent, N: int, H: int, W: int, get_frame=None):
     _preview()
     parent.wait_window(dlg)
     return result["shape"]
+
+
+def ask_h5_dataset(parent, filename: str, datasets: list):
+    """Modal popup: the HDF5 file holds several scans -- which one?
+    `datasets` is [(path, shape), ...] largest first.  Returns the chosen
+    path or None on cancel."""
+    dlg = tk.Toplevel(parent)
+    dlg.title("HDF5: several scans in this file")
+    dlg.geometry("520x200")
+    try:
+        dlg.transient(parent.winfo_toplevel())
+    except Exception:
+        pass
+    dlg.grab_set()
+    ctk.CTkLabel(dlg, justify="left", wraplength=500, text=(
+        f"{os.path.basename(filename)} contains {len(datasets)} data "
+        f"arrays.  Pick the one to load (each loads as its own sample):"),
+        font=("Segoe UI", 10)).pack(padx=10, pady=(10, 6))
+    labels = [f"{p}   {' x '.join(str(x) for x in sh)}"
+              for p, sh in datasets]
+    var = ctk.StringVar(value=labels[0])
+    ctk.CTkOptionMenu(dlg, values=labels, variable=var,
+                      width=480).pack(padx=10, pady=6)
+    result = {"path": None}
+
+    def _ok():
+        result["path"] = datasets[labels.index(var.get())][0]
+        dlg.destroy()
+
+    btns = ctk.CTkFrame(dlg, fg_color="transparent")
+    btns.pack(pady=(10, 8))
+    ctk.CTkButton(btns, text="OK", width=80, command=_ok).pack(
+        side="left", padx=6)
+    ctk.CTkButton(btns, text="Cancel", width=80,
+                  command=dlg.destroy).pack(side="left", padx=6)
+    parent.wait_window(dlg)
+    return result["path"]

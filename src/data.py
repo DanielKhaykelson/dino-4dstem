@@ -115,6 +115,44 @@ def rescale_like_vmax(x, vmax, vmin=None, out_range=(0.0, 1.0), dtype=np.float32
     return (np.clip(y, 0, 1) * (hi - lo) + lo).astype(dtype, copy=False)
 
 
+def raster_frame_index(raster, n_frames, dataset=None):
+    """(Ny, Nx) table of SOURCE-frame indices for a streamed 3-D series.
+
+    A continuously-recorded scan stores frames the loader must skip: a
+    lead-in before the first row, the flyback at the end of every row, and
+    sometimes rows the descan did not ramp cleanly on.  ``raster`` is a small
+    JSON-safe description (it has to survive the trip to the training
+    subprocess, which drops anything that is not plain JSON):
+
+      {"f0", "period", "n_scan", "n_rows"}  -- a regular raster: row r,
+          column c is frame f0 + r*period + c.  Found by flyback.py, or
+          f0 = 0 when the user enters the grid by hand.
+      {"map": "<dataset path>"}             -- the file's own (Ny, Nx) index
+          map (e.g. "scan indices"), which is exact and needs no detection.
+    """
+    if not raster:
+        return None
+    if "map" in raster:
+        if dataset is None:
+            raise ValueError("a file-provided scan map needs the HDF5 file")
+        fi = np.asarray(dataset.file[raster["map"]], dtype=np.int64)
+    else:
+        f0 = int(raster.get("f0", 0))
+        per = int(raster["period"])
+        ns = int(raster["n_scan"])
+        nr = int(raster["n_rows"])
+        if ns > per:
+            raise ValueError(f"n_scan {ns} exceeds the row period {per}")
+        fi = (f0 + np.arange(nr)[:, None] * per
+              + np.arange(ns)[None, :]).astype(np.int64)
+    if fi.ndim != 2 or fi.size == 0:
+        raise ValueError(f"scan map must be 2-D, got shape {fi.shape}")
+    if fi.min() < 0 or fi.max() >= int(n_frames):
+        raise ValueError(f"scan map points at frames {fi.min()}..{fi.max()} "
+                         f"but the series has {n_frames}")
+    return fi
+
+
 class _H5Cube4D:
     """4D `(Nx, Ny, H, W)` view over an h5py 3D / 4D dataset. For 3D
     inputs the caller must pass scan_shape=(Ny, Nx). Reads lazily and
@@ -122,34 +160,35 @@ class _H5Cube4D:
     def __init__(self, h5_dataset, file_handle=None,
                  scan_shape: tuple | None = None,
                  corrections: dict | None = None,
-                 row_period: int | None = None):
+                 raster: dict | None = None):
         s = tuple(h5_dataset.shape)
         self._corr = corrections or {}
+        self._fi = None
         if len(s) == 4:
             self.Nx, self.Ny, self.H, self.W = s
             self._mode = "4d"
-            self._period = self.Ny
         elif len(s) == 3:
             N, H, W = s
-            if scan_shape is None:
-                raise ValueError(
-                    f"3D dataset of length {N}: scan_shape required.")
-            Ny, Nx = (int(scan_shape[0]), int(scan_shape[1]))
-            # Frames stored per scan row.  Continuously-streamed scans keep
-            # recording while the beam flies back, so a row can hold more
-            # frames than probe positions; those extras are not scan points
-            # and, mapped as if they were, shear the whole image.
-            period = int(row_period) if row_period else Nx
-            if period < Nx:
-                raise ValueError(
-                    f"row period {period} is smaller than Nx={Nx}.")
-            if Ny * period > N:
-                raise ValueError(
-                    f"scan_shape ({Ny}, {Nx}) with row period {period} "
-                    f"needs {Ny*period} frames but the dataset has {N}.")
+            # A streamed series holds frames that are not probe positions
+            # (lead-in, flyback, rejected rows).  The raster says which
+            # frame each (row, col) really is; without one the frames must
+            # map 1:1 onto the grid.
+            fi = raster_frame_index(raster, N, h5_dataset)
+            if fi is not None:
+                Ny, Nx = fi.shape
+            else:
+                if scan_shape is None:
+                    raise ValueError(
+                        f"3D dataset of length {N}: scan_shape required.")
+                Ny, Nx = (int(scan_shape[0]), int(scan_shape[1]))
+                if Ny * Nx != N:
+                    raise ValueError(
+                        f"scan_shape ({Ny}, {Nx}) -> {Ny*Nx} frames but the "
+                        f"dataset has {N}. If the file also stores lead-in or "
+                        f"flyback frames, load it with a raster.")
             self.Nx, self.Ny, self.H, self.W = Nx, Ny, H, W
             self._mode = "3d"
-            self._period = period
+            self._fi = fi
         else:
             raise ValueError(f"need 3D or 4D dataset, got shape {s}")
         self._d = h5_dataset
@@ -182,9 +221,17 @@ class _H5Cube4D:
         for r in range(r0, r0 + nrows):
             if self._mode == "4d":
                 a = np.asarray(self._d[r, c0:c0 + ncols])
-            else:
-                s = r * self._period + c0
+            elif self._fi is None:
+                s = r * self.Nx + c0
                 a = np.asarray(self._d[s:s + ncols])
+            else:
+                ix = self._fi[r, c0:c0 + ncols]
+                if ix.size and np.all(np.diff(ix) == 1):
+                    a = np.asarray(self._d[int(ix[0]):int(ix[-1]) + 1])
+                else:                      # h5py wants increasing indices
+                    order = np.argsort(ix)
+                    a = np.asarray(self._d[[int(v) for v in ix[order]]])
+                    a = a[np.argsort(order)]
             rows.append(a)
         arr = np.stack(rows, axis=0)
         if self._corr:
@@ -203,7 +250,8 @@ class _H5Cube4D:
             return arr
         if isinstance(idx, tuple) and len(idx) >= 2:
             rx = int(idx[0]); ry = int(idx[1])
-            i = rx * self._period + ry
+            i = (int(self._fi[rx, ry]) if self._fi is not None
+                 else rx * self.Nx + ry)
             frame = np.asarray(self._d[i])
             if self._corr:
                 frame = _apply_dectris_corrections(frame, self._corr)
@@ -1043,7 +1091,7 @@ def mib_probe(path, scan_shape=None):
             "assembly": assembly, "warnings": warnings}
 
 
-def _open_mib(path, scan_shape=None, row_period=None):
+def _open_mib(path, scan_shape=None, raster=None):
     """Lazy 4D Merlin cube: memmap the .mib and return a big-endian
     (Ny, Nx, H, W) view with the per-frame headers stripped.  Zero-copy —
     frames are read from disk on demand and cast by the caller."""
@@ -1056,24 +1104,30 @@ def _open_mib(path, scan_shape=None, row_period=None):
             f"{os.path.basename(path)}: Merlin .mib has {n} frames but the "
             f"scan grid (Ny, Nx) is unknown — pass scan_shape=(Ny, Nx).")
     Ny, Nx = int(ss[0]), int(ss[1])
-    period = int(row_period) if row_period else Nx
-    if period < Nx:
-        raise ValueError(f"row period {period} is smaller than Nx={Nx}.")
-    if Ny * period > n:
-        raise ValueError(
-            f"scan_shape ({Ny}, {Nx}) with row period {period} needs "
-            f"{Ny*period} frames but the file has {n}.")
     datasize = H * W * dt.itemsize
     mm = np.memmap(path, dtype="<u1", mode="r", shape=(n, stride))
+    if raster:
+        # Only a regular raster can stay a zero-copy view: start at f0, take
+        # rows of `period` frames, keep the first n_scan of each.
+        if "map" in raster:
+            raise ValueError("a .mib carries no scan map; use a raster")
+        f0, per = int(raster.get("f0", 0)), int(raster["period"])
+        Ny, Nx = int(raster["n_rows"]), int(raster["n_scan"])
+        if Nx > per or f0 + Ny * per > n:
+            raise ValueError(
+                f"raster (f0={f0}, {Ny} rows x {per}) does not fit the "
+                f"{n} frames in the file.")
+        px = (mm[f0:f0 + Ny * per, hlen:hlen + datasize]
+              .view(dt).reshape(Ny, per, H, W))
+        return px[:, :Nx]
+    if Ny * Nx != n:
+        raise ValueError(
+            f"scan_shape ({Ny}, {Nx}) -> {Ny*Nx} != {n} frames in the file.")
     # strip each frame's header, reinterpret pixels big-endian, reshape.
-    px = (mm[:Ny * period, hlen:hlen + datasize]
-          .view(dt).reshape(Ny, period, H, W))
-    if period != Nx:
-        px = px[:, :Nx]          # drop the flyback tail of each  row (a view)
-    return px
+    return mm[:, hlen:hlen + datasize].view(dt).reshape(Ny, Nx, H, W)
 
 
-def open_lazy_cube(path, scan_shape=None, row_period=None,
+def open_lazy_cube(path, scan_shape=None, raster=None,
                      apply_dectris_corrections: bool = False):
     """Universal lazy 4D-cube loader.  Returns a numpy memmap
     `(Nx, Ny, H, W)` for `.prz / .npz / .npy` and an `_H5Cube4D` wrapper
@@ -1114,7 +1168,7 @@ def open_lazy_cube(path, scan_shape=None, row_period=None,
                     f"be inferred from the master file metadata.")
             return _H5Cube4D(ds, file_handle=f,
                                 scan_shape=scan_shape, corrections=corr,
-                                row_period=row_period)
+                                raster=raster)
         f.close()
         raise ValueError(f"unexpected dataset ndim={ndim}")
     if path.lower().endswith((".dm4", ".dm3")):
@@ -1122,8 +1176,7 @@ def open_lazy_cube(path, scan_shape=None, row_period=None,
     if path.lower().endswith(".raw"):
         return _open_empad(path, scan_shape=scan_shape)
     if path.lower().endswith(".mib"):
-        return _open_mib(path, scan_shape=scan_shape,
-                         row_period=row_period)
+        return _open_mib(path, scan_shape=scan_shape, raster=raster)
     if path.lower().endswith((".prz", ".npz")):
         base, _ = os.path.splitext(path)
         cand = base + ".cube.npy"
@@ -1380,6 +1433,16 @@ def _h5_find_data_path(h5_file) -> tuple[str, int]:
     `_h5_dectris_external_data` to enumerate the links and stitch.
     """
     import h5py
+    # a file holding several scans (scan_01..06, projections/0..5): the
+    # dataset the user picked when loading wins over "the biggest one"
+    chosen = _chosen_h5_dataset(getattr(h5_file, "filename", None))
+    if chosen:
+        try:
+            obj = h5_file[chosen]
+            if isinstance(obj, h5py.Dataset) and obj.ndim in (3, 4):
+                return chosen, int(obj.ndim)
+        except Exception:
+            pass
     cands_4d: list[tuple[str, tuple, int]] = []
     cands_3d: list[tuple[str, tuple, int]] = []
 
@@ -1401,6 +1464,68 @@ def _h5_find_data_path(h5_file) -> tuple[str, int]:
     raise ValueError("no 3D or 4D dataset found in HDF5 file")
 
 
+# In-process choice made in the loader (most recent load of a file wins);
+# the training subprocess gets the same choice from SAMPLES["h5_dataset"].
+_H5_PICK: dict = {}
+
+
+def _chosen_h5_dataset(filename):
+    if not filename:
+        return None
+    try:
+        ap = os.path.abspath(filename)
+    except Exception:
+        return None
+    if ap in _H5_PICK:
+        return _H5_PICK[ap]
+    try:
+        for v in reversed(list(SAMPLES.values())):
+            if v.get("h5_dataset") and os.path.abspath(
+                    v.get("path", "")) == ap:
+                return v["h5_dataset"]
+    except Exception:
+        pass
+    return None
+
+
+def h5_list_datasets(h5_file) -> list:
+    """Every 3-D / 4-D dataset in the file as (path, shape), largest
+    first -- for the loader's "which scan?" picker."""
+    import h5py
+    out = []
+
+    def _visit(name, obj):
+        if isinstance(obj, h5py.Dataset) and obj.ndim in (3, 4):
+            out.append((name, tuple(int(x) for x in obj.shape)))
+    h5_file.visititems(_visit)
+    out.sort(key=lambda t: -int(np.prod(t[1])))
+    return out
+
+
+def h5_find_scan_map(h5_file, n_frames) -> str | None:
+    """Path of a scan index map the acquisition wrote into the file (e.g.
+    TCNF "scan indices"): a 2-D integer dataset whose values are distinct
+    frame numbers inside the series.  Exact, so it beats detection."""
+    import h5py
+    found = []
+
+    def _visit(name, obj):
+        if (isinstance(obj, h5py.Dataset) and obj.ndim == 2
+                and obj.dtype.kind in "iu" and min(obj.shape) > 1
+                and obj.size <= int(n_frames)):
+            found.append(name)
+    h5_file.visititems(_visit)
+    for name in sorted(found, key=lambda n: ("ind" not in n.lower(), n)):
+        try:
+            a = np.asarray(h5_file[name])
+            if (a.min() >= 0 and a.max() < int(n_frames)
+                    and np.unique(a).size == a.size):
+                return name
+        except Exception:
+            continue
+    return None
+
+
 # Backwards-compat alias for any older code that imported this name.
 def _h5_find_4d_path(h5_file) -> str:
     p, _ = _h5_find_data_path(h5_file)
@@ -1417,13 +1542,22 @@ class _H5FlatCube:
     Reads are lazy — one pattern per __getitem__ call.
     """
     def __init__(self, h5_dataset, scan_shape: tuple | None = None,
-                 row_period: int | None = None,
+                 raster: dict | None = None,
                  corrections: dict | None = None):
         s = tuple(h5_dataset.shape)
         self._corr = corrections or {}
+        self._fi = None
         if len(s) == 4:
             self.Nx, self.Ny, self.H, self.W = s
             self._mode = "4d"
+        elif len(s) == 3 and raster:
+            N, H, W = s
+            # Same frame map the preview uses -- training and NMF must skip
+            # exactly the lead-in / flyback frames the user saw skipped.
+            self._fi = raster_frame_index(raster, N, h5_dataset)
+            Ny, Nx = self._fi.shape
+            self.Nx, self.Ny, self.H, self.W = Nx, Ny, H, W
+            self._mode = "3d"
         elif len(s) == 3:
             N, H, W = s
             if scan_shape is None:
@@ -1437,22 +1571,13 @@ class _H5FlatCube:
                         f"(Ny, Nx) — the file has no scan grid info.")
             else:
                 Ny, Nx = (int(scan_shape[0]), int(scan_shape[1]))
-                if Ny * Nx > N:
+                if Ny * Nx != N:
                     raise ValueError(
                         f"scan_shape ({Ny}, {Nx}) gives "
-                        f"Ny·Nx={Ny*Nx} but the dataset has only {N} "
+                        f"Ny·Nx={Ny*Nx} but the dataset has {N} "
                         f"frames — pick the right shape.")
             self.Nx, self.Ny, self.H, self.W = Nx, Ny, H, W
             self._mode = "3d"
-            # Frames stored per scan row; > Nx when the file also keeps the
-            # frames recorded during flyback.  Those are not scan positions,
-            # so they must be skipped here too -- otherwise training and NMF
-            # would consume them as if they were data.
-            self._period = int(row_period) if row_period else Nx
-            if self._period < Nx or Ny * self._period > N:
-                raise ValueError(
-                    f"row period {self._period} invalid for "
-                    f"({Ny}, {Nx}) over {N} frames.")
         else:
             raise ValueError(f"need 3D or 4D dataset, got shape {s}")
         self._d = h5_dataset
@@ -1466,10 +1591,9 @@ class _H5FlatCube:
         if isinstance(idx, (int, np.integer)):
             i = int(idx)
             if self._mode == "3d":
-                # flat scan index -> dataset index, stepping over flyback
-                if self._period != self.Nx:
-                    _r, _c = divmod(i, self.Nx)
-                    i = _r * self._period + _c
+                # flat scan index -> source frame (skips lead-in/flyback)
+                if self._fi is not None:
+                    i = int(self._fi.flat[i])
                 frame = np.asarray(self._d[i])
             else:
                 rx, ry = divmod(i, self.Ny)
@@ -1546,7 +1670,7 @@ class LoadPRZ:
                     scan_shape = inferred
             cube_view = _H5FlatCube(ds,
                                        scan_shape=scan_shape,
-                                       row_period=_registered_row_period(
+                                       raster=_registered_raster(
                                            used_path),
                                        corrections=corrections)
             self.Nx = cube_view.Nx; self.Ny = cube_view.Ny
@@ -1921,8 +2045,8 @@ def loaded_sample_keys():
             if isinstance(v, dict) and v.get("_runtime")]
 
 
-def _registered_row_period(path):
-    """Row period recorded for this cube in SAMPLES, if any.
+def _registered_raster(path):
+    """Raster (frame map) recorded for this cube in SAMPLES, if any.
 
     Training, NMF and the eval tabs build their own LoadPRZ from a path and
     never saw the loader dialog, so the flyback row period has to travel with
@@ -1931,10 +2055,11 @@ def _registered_row_period(path):
     """
     try:
         ap = os.path.abspath(path)
-        for v in SAMPLES.values():
-            if v.get("row_period") and os.path.abspath(
-                    v.get("path", "")) == ap:
-                return int(v["row_period"])
+        ds = _chosen_h5_dataset(ap)
+        for v in reversed(list(SAMPLES.values())):
+            if (os.path.abspath(v.get("path", "")) == ap
+                    and v.get("h5_dataset") == ds):
+                return dict(v["raster"]) if v.get("raster") else None
     except Exception:
         pass
     return None
@@ -1942,7 +2067,8 @@ def _registered_row_period(path):
 
 def register_runtime_sample(path, *, scan_shape=None, vmax=2.0,
                               center_mask_radius=15, key=None,
-                              row_period=None,
+                              raster=...,
+                              h5_dataset=None,
                               blur_sigma: float = 0.0,
                               log_stretch: bool = False):
     """Inject an arbitrary .prz / .npy cube into SAMPLES at runtime so the
@@ -1964,7 +2090,12 @@ def register_runtime_sample(path, *, scan_shape=None, vmax=2.0,
         # tab compatibility, but is owned by register_runtime_multi_sample).
         if v.get("is_multi"):
             continue
-        if os.path.abspath(v.get("path", "")) == abspath:
+        if (os.path.abspath(v.get("path", "")) == abspath
+                and v.get("h5_dataset") == h5_dataset):
+            if raster is not ...:
+                v["raster"] = dict(raster) if raster else None
+            # most recent load of a file decides which dataset it means
+            SAMPLES[k] = SAMPLES.pop(k)
             if scan_shape is not None:
                 v["scan_shape"] = tuple(scan_shape)
             if vmax is not None:
@@ -1980,6 +2111,8 @@ def register_runtime_sample(path, *, scan_shape=None, vmax=2.0,
     if key is None:
         # synthesize a friendly key from the basename
         base = os.path.splitext(os.path.basename(abspath))[0]
+        if h5_dataset:
+            base += "_" + str(h5_dataset).strip("/").replace("/", "_")
         # avoid collisions with builtin entries
         candidate = f"{RUNTIME_SAMPLE_PREFIX}{base}"
         suffix = 0
@@ -1994,9 +2127,12 @@ def register_runtime_sample(path, *, scan_shape=None, vmax=2.0,
         "center_mask_radius": int(center_mask_radius),
         "blur_sigma": float(blur_sigma),
         "log_stretch": bool(log_stretch),
-        # frames stored per scan row (> Nx when the file keeps flyback
-        # frames); travels with the sample so every tab maps alike
-        "row_period": (int(row_period) if row_period else None),
+        # which source frame each probe position is (lead-in / flyback /
+        # rejected rows skipped); JSON-safe so it reaches the training
+        # subprocess, and every tab rebuilds the same frame map from it
+        "raster": (dict(raster) if raster and raster is not ... else None),
+        # which dataset of a multi-scan HDF5 file this sample is
+        "h5_dataset": h5_dataset,
         "approved_label": None,
         "_runtime": True,
     }

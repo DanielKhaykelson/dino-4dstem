@@ -58,13 +58,13 @@ from gui_app.nbed_center import (
     find_bf_center, recenter_to, nbed_center_cube)
 
 
-def _open_lazy(path, scan_shape=None, row_period=None,
+def _open_lazy(path, scan_shape=None, raster=None,
                   apply_dectris_corrections: bool = False):
     """Thin shim — delegates to data.open_lazy_cube so all panels share
     a single h5/.prz/.npy loader (and a single allow_pickle=True
     convention)."""
     from data import open_lazy_cube
-    return open_lazy_cube(path, scan_shape=scan_shape, row_period=row_period,
+    return open_lazy_cube(path, scan_shape=scan_shape, raster=raster,
                               apply_dectris_corrections=apply_dectris_corrections)
 
 
@@ -1241,9 +1241,13 @@ class PrePanel(ctk.CTkFrame):
         # and pop a scan-shape dialog. For 4D HDF5 / .prz / .npy, no
         # prompt is needed.
         scan_shape_override = None
-        # Frames stored per scan row (> Nx when the file keeps the frames
-        # recorded during flyback).  None = no extra frames.
-        row_period_override = None
+        # Which source frame each probe position is, when the file also
+        # holds lead-in / flyback frames (see data.raster_frame_index).
+        # None = frames map 1:1 onto the grid.
+        raster_override = None
+        # Multi-scan HDF5 (scan_01..06, projections/0..5): the dataset the
+        # user picked; None = the file's only / biggest one.
+        h5_ds_choice = None
         # Merlin/Medipix .mib: peek the per-frame header for the detector
         # geometry.  The scan grid is usually NOT stored, so confirm the
         # detected/inferred (Ny, Nx) or prompt for it.
@@ -1280,14 +1284,27 @@ class PrePanel(ctk.CTkFrame):
                     return
                 scan_shape_override = (int(ss[0]), int(ss[1]))
                 if len(ss) > 2:
-                    row_period_override = int(ss[2])
+                    raster_override = ss[2]
         if p.lower().endswith((".h5", ".hdf5")):
             try:
                 import h5py
                 from data import (_h5_find_data_path,
                                       _h5_infer_scan_shape,
                                       _h5_dectris_external_data)
+                import data as _data
+                from data import h5_list_datasets, h5_find_scan_map
                 dpath = None     # unset on the Dectris external-link path
+                _data._H5_PICK.pop(os.path.abspath(p), None)
+                with h5py.File(p, "r") as fh:
+                    _all = h5_list_datasets(fh)
+                if len(_all) > 1:
+                    from gui_app._dialogs import ask_h5_dataset
+                    h5_ds_choice = ask_h5_dataset(self, p, _all)
+                    if h5_ds_choice is None:
+                        return
+                    # every reader of this file (loader, Viewing, NMF,
+                    # eval...) now resolves to the picked scan
+                    _data._H5_PICK[os.path.abspath(p)] = h5_ds_choice
                 with h5py.File(p, "r") as fh:
                     try:
                         dpath, ndim = _h5_find_data_path(fh)
@@ -1308,6 +1325,20 @@ class PrePanel(ctk.CTkFrame):
                     if ndim == 3:
                         scan_shape_override = _h5_infer_scan_shape(
                             fh, s[0])
+                    # the acquisition's own frame map (e.g. "scan indices")
+                    # is exact -- offer it before any guessing/detection
+                    _map = (h5_find_scan_map(fh, s[0])
+                            if ndim == 3 and dpath else None)
+                    if _map is not None:
+                        _ms = tuple(int(x) for x in fh[_map].shape)
+                        if messagebox.askyesno("Scan map found", (
+                                f"This file carries its own scan map "
+                                f"'{_map}' ({_ms[0]} x {_ms[1]} probe "
+                                f"positions out of {s[0]} frames; lead-in "
+                                f"and flyback frames are skipped).\n\n"
+                                f"Use it?  (Recommended.)")):
+                            scan_shape_override = _ms
+                            raster_override = {"map": _map}
             except Exception as e:
                 messagebox.showerror("Error",
                     f"HDF5 peek failed:\n{e}"); return
@@ -1334,7 +1365,7 @@ class PrePanel(ctk.CTkFrame):
                     return
                 scan_shape_override = (int(_ss[0]), int(_ss[1]))
                 if len(_ss) > 2:
-                    row_period_override = int(_ss[2])
+                    raster_override = _ss[2]
         # --- Peek shape/dtype cheaply (no frame load), estimate memory,
         #     and prompt to real-space bin before loading. ---
         shape4d = None; peek_dtype = None; lazy = True
@@ -1419,7 +1450,7 @@ class PrePanel(ctk.CTkFrame):
             if not os.path.exists(out):
                 try:
                     src = _open_lazy(p, scan_shape=scan_shape_override,
-                                     row_period=row_period_override)
+                                     raster=raster_override)
                 except Exception as e:
                     messagebox.showerror("Error", f"Load failed:\n{e}")
                     return
@@ -1429,7 +1460,7 @@ class PrePanel(ctk.CTkFrame):
             used_scan_override = None             # binned .cube.npy is 4D
         try:
             self.cube = _open_lazy(load_path, scan_shape=used_scan_override,
-                                   row_period=row_period_override)
+                                   raster=raster_override)
         except Exception as e:
             messagebox.showerror("Error", f"Load failed:\n{e}")
             return
@@ -1470,7 +1501,8 @@ class PrePanel(ctk.CTkFrame):
         try:
             self.sample_key = register_runtime_sample(
                 p, scan_shape=(Ny, Nx),
-                row_period=row_period_override,
+                raster=raster_override,
+                h5_dataset=h5_ds_choice,
                 vmax=float(self.vmax.get()),
                 center_mask_radius=self._effective_center_mask_radius(),
                 blur_sigma=(float(self.blur_sigma.get())

@@ -26,31 +26,6 @@ from typing import Callable, Optional
 import numpy as np
 
 
-def frame_centres(get_frame: Callable[[int], np.ndarray], n: int,
-                  progress: Optional[Callable[[int, int], None]] = None,
-                  cancel: Optional[Callable[[], bool]] = None) -> np.ndarray:
-    """Per-frame intensity centroid along the detector x axis.
-
-    A centroid is a good enough stand-in for a fitted centre here: we only
-    need the *ramp and its jumps*, not sub-pixel accuracy.
-    """
-    out = np.full(int(n), np.nan, dtype=np.float64)
-    every = max(1, int(n) // 100)
-    for i in range(int(n)):
-        if cancel is not None and cancel():
-            raise RuntimeError("cancelled")
-        a = np.asarray(get_frame(i), dtype=np.float32)
-        if a.ndim == 3:
-            a = a.reshape(-1, a.shape[-1])
-        col = a.sum(axis=0)                      # collapse the slow axis
-        tot = float(col.sum())
-        if tot > 0:
-            out[i] = float((col * np.arange(col.size)).sum() / tot)
-        if progress is not None and ((i + 1) % every == 0 or i + 1 == n):
-            progress(i + 1, int(n))
-    return out
-
-
 def find_raster(centre_x, period: Optional[int] = None,
                 n_flyback: Optional[int] = None,
                 jump_px: float = 10.0) -> dict:
@@ -94,37 +69,13 @@ def find_raster(centre_x, period: Optional[int] = None,
     cnt = np.bincount(jumps % period, minlength=period)
 
     if n_flyback is None:
-        # Preferred estimate: fold every row onto one period and measure the
-        # ramp itself.  The scan part of a row is the longest stretch where
-        # the folded median centre climbs steadily; whatever is left is the
-        # flyback plus its settling.  This beats counting jump phases, which
-        # only sees the single frame where the beam snaps back and therefore
-        # under-reports the block whenever the settling frames sit still.
-        rows = n // period
-        if rows >= 4:
-            fold = np.nanmedian(
-                x[:rows * period].reshape(rows, period), axis=0)
-            step = np.diff(fold, append=fold[0])
-            fwd = step * np.sign(ramp) > 0          # moving along the ramp
-            best_len, best_end = 0, 0
-            run = 0
-            for k in range(2 * period):             # wrap once
-                if fwd[k % period]:
-                    run += 1
-                    if run > best_len:
-                        best_len, best_end = run, k
-                else:
-                    run = 0
-            # a run of `best_len` forward STEPS spans best_len+1 frames
-            n_scan_est = int(min(best_len + 1, period - 1))
-            if n_scan_est >= 2:
-                n_flyback = period - n_scan_est
-
-    if n_flyback is None:
-        # Fallback: the jump-phase cluster.  "smallest window holding 90% of
-        # jumps" is too greedy -- stray jumps at random phases drag the width
-        # from a true 7 up to 19.  Require each phase to carry a real share
-        # of the peak instead.
+        # The jump-phase cluster.  "smallest window holding 90% of jumps" is
+        # too greedy -- stray jumps at random phases drag the width from a
+        # true 7 up to 19.  Require each phase to carry a real share of the
+        # peak instead.  (A fold-the-ramp estimator was tried here and is
+        # worse on real data: it reported 52+5 on all six beamDamage scans
+        # against a recorded 48+9 / 49+8, because real settling frames do
+        # carry jumps and this cluster is what captures them.)
         peak = int(cnt.max())
         hot = cnt >= max(0.25 * peak, 2)
         k0 = int(np.argmax(cnt))
@@ -152,14 +103,185 @@ def find_raster(centre_x, period: Optional[int] = None,
     return dict(period=int(period), n_scan=int(period - n_flyback),
                 n_flyback=int(n_flyback), fly_phase=fly_phase,
                 f0_phase=f0_phase, keep=keep,
-                confidence=float(best / len(jumps)), ramp_px=ramp)
+                confidence=float(best / len(jumps)), ramp_px=ramp,
+                n_jumps=int(len(jumps)))
 
 
-def suggest_grid(n_frames: int, period: int, n_flyback: int) -> dict:
-    """Turn a detected raster into a scan grid the loader can use."""
-    period = int(period)
-    n_scan = int(period - n_flyback)
-    rows = int(n_frames // period)
-    return dict(Ny=rows, Nx=n_scan, period=period,
-                used=rows * period, dropped_flyback=rows * int(n_flyback),
-                dropped_tail=int(n_frames) - rows * period)
+def _bin2(a: np.ndarray, b: int) -> np.ndarray:
+    if b <= 1:
+        return a
+    H, W = (a.shape[0] // b) * b, (a.shape[1] // b) * b
+    return a[:H, :W].reshape(H // b, b, W // b, b).sum(axis=(1, 3))
+
+
+def _disc_centre(p: np.ndarray, r: float) -> tuple:
+    """py4DSTEM-style origin: smooth by the probe radius, take the argmax,
+    then the centre of mass inside 1.2 r of it.  A plain argmax lands on a
+    hot pixel or a reflection; a whole-pattern CoM is dragged by diffuse
+    scattering (cellulose find_centre)."""
+    from scipy.ndimage import gaussian_filter
+    a = np.asarray(p, dtype=np.float64)
+    H, W = a.shape
+    qy, qx = np.unravel_index(
+        np.argmax(gaussian_filter(a, max(r, 1.0), mode="nearest")), (H, W))
+    y0, y1 = max(0, int(qy - 1.2 * r) - 1), min(H, int(qy + 1.2 * r) + 2)
+    x0, x1 = max(0, int(qx - 1.2 * r) - 1), min(W, int(qx + 1.2 * r) + 2)
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    w = a[y0:y1, x0:x1] * (np.hypot(yy - qy, xx - qx) < 1.2 * r)
+    w = np.maximum(w, 0)
+    s = w.sum()
+    if s <= 0:
+        return float(qy), float(qx)
+    return float((w * yy).sum() / s), float((w * xx).sum() / s)
+
+
+def probe_radius(mean_pattern: np.ndarray, cy: float, cx: float) -> int:
+    """Half-maximum radius of the direct beam from the radial profile of a
+    large average (stable, unlike per-frame estimates)."""
+    m = np.asarray(mean_pattern, dtype=np.float64)
+    yy, xx = np.mgrid[0:m.shape[0], 0:m.shape[1]]
+    rmax = int(np.hypot(*m.shape)) + 1
+    ri = np.clip(np.hypot(yy - cy, xx - cx).astype(int), 0, rmax)
+    prof = (np.bincount(ri.ravel(), m.ravel(), rmax + 1)
+            / np.maximum(np.bincount(ri.ravel(), minlength=rmax + 1), 1))
+    core = prof[:4].mean()
+    return max(2, int(np.argmax(prof < core / 2)))
+
+
+def frame_signals(get_frame: Callable[[int], np.ndarray], n: int,
+                  binning: int = 2,
+                  progress: Optional[Callable[[int, int], None]] = None,
+                  cancel: Optional[Callable[[], bool]] = None) -> dict:
+    """One pass over the series: per-frame disc centre (x, y) in FULL-
+    resolution detector pixels, bright-field counts and total counts.
+
+    Frames are binned for speed; centres are converted back so the 10-px
+    flyback-jump threshold keeps its meaning.
+    """
+    n = int(n)
+    b = max(1, int(binning))
+    step = max(1, n // 200)
+    acc = None
+    for i in range(0, n, step):
+        f = _bin2(np.asarray(get_frame(i), dtype=np.float64), b)
+        acc = f if acc is None else acc + f
+    mean = acc / len(range(0, n, step))
+    cy0, cx0 = _disc_centre(mean, 20.0 / b)
+    rb = probe_radius(mean, cy0, cx0)
+    H, W = mean.shape
+    yy, xx = np.mgrid[0:H, 0:W]
+    bfmask = np.hypot(yy - cy0, xx - cx0) < (rb + 2.0 / b)
+    cx = np.full(n, np.nan)
+    cy = np.full(n, np.nan)
+    bf = np.zeros(n)
+    tot = np.zeros(n)
+    every = max(1, n // 100)
+    for i in range(n):
+        if cancel is not None and cancel():
+            raise RuntimeError("cancelled")
+        f = _bin2(np.asarray(get_frame(i), dtype=np.float64), b)
+        py, px = _disc_centre(f, rb)
+        cy[i] = py * b + (b - 1) / 2.0
+        cx[i] = px * b + (b - 1) / 2.0
+        bf[i] = f[bfmask].sum()
+        tot[i] = f.sum()
+        if progress is not None and ((i + 1) % every == 0 or i + 1 == n):
+            progress(i + 1, n)
+    return dict(cx=cx, cy=cy, bf=bf, tot=tot, probe_r=rb * b)
+
+
+def find_scan_start(signal, period: int, n_scan: int, n_rows: int,
+                    phase: Optional[int] = None) -> dict:
+    """First frame of the first row, by image coherence (cellulose
+    find_scan_start).  The descan repeats every row and cannot tell a lead-in
+    row from a real one; a correctly registered image has correlated
+    neighbouring rows and a mis-registered one does not.  Only starts
+    consistent with the raster phase are legal -- searching freely lets the
+    best start land where flyback is inside the kept frames."""
+    s = np.asarray(signal, dtype=np.float64)
+    n = len(s)
+    span = period * n_rows
+    if span > n:
+        raise ValueError(f"{n} frames cannot hold {n_rows} rows of "
+                         f"{period} frames")
+    hi = n - span + 1
+    scores = np.full(hi, -np.inf)
+    cands = (range(hi) if phase is None
+             else range(int(phase) % period, hi, period))
+    for f0 in cands:
+        g = s[f0:f0 + span].reshape(n_rows, period)[:, :n_scan]
+        if not np.all(np.isfinite(g)):
+            continue
+        c = [np.corrcoef(g[i], g[i + 1])[0, 1] for i in range(n_rows - 1)]
+        c = [v for v in c if np.isfinite(v)]
+        if c:
+            scores[f0] = float(np.mean(c))
+    f0 = int(np.argmax(scores))
+    good = scores[np.isfinite(scores)]
+    margin = float(scores[f0] - np.median(good)) if good.size else 0.0
+    return dict(f0=f0, row_corr=float(scores[f0]), margin=margin)
+
+
+def row_quality(centre_x, f0: int, period: int, n_scan: int,
+                n_rows: int, rms_px: float = 2.0) -> np.ndarray:
+    """Per-row slope check: fit a line to the descan over each row's scan
+    frames; a row whose residual RMS exceeds rms_px does not ramp cleanly
+    (typically the row straddling the lead-in) and is rejected."""
+    x = np.asarray(centre_x, dtype=np.float64)
+    t = np.arange(n_scan)
+    ok = np.zeros(n_rows, dtype=bool)
+    for r in range(n_rows):
+        seg = x[f0 + r * period: f0 + r * period + n_scan]
+        if len(seg) < n_scan or not np.all(np.isfinite(seg)):
+            continue
+        a = np.polyfit(t, seg, 1)
+        ok[r] = float((seg - np.polyval(a, t)).std()) < rms_px
+    return ok
+
+
+def detect_raster(sig: dict, n_rows: Optional[int] = None) -> dict:
+    """Full cellulose recipe on the signals from frame_signals.
+
+    raster (period / flyback / phase) -> scan start (coherence) -> per-row
+    slope check -> explicit frame_index (rows x n_scan).  If n_rows is not
+    known, every row that fits is examined and the longest run of rows that
+    pass the slope check is kept.
+    """
+    cx, bf, tot = sig["cx"], sig["bf"], sig["tot"]
+    N = len(cx)
+    ras = find_raster(cx)
+    P, NS = ras["period"], ras["n_scan"]
+    frac = bf / np.maximum(tot, 1)
+    rows_fit = (N - ras["f0_phase"]) // P
+    want = int(n_rows) if n_rows else rows_fit
+    st = find_scan_start(frac, P, NS, want, phase=ras["f0_phase"])
+    f0 = st["f0"]
+    total = (N - f0) // P
+    ok = row_quality(cx, f0, P, NS, total)
+    if n_rows:
+        # keep n_rows, skipping bad rows at the START (lead-in)
+        start = 0
+        while start < total and not ok[start]:
+            start += 1
+        if start + int(n_rows) > total:
+            start = max(0, total - int(n_rows))
+        rows = np.arange(start, start + int(n_rows))
+    else:
+        best, cur, best_end = 0, 0, -1
+        for r in range(total):
+            cur = cur + 1 if ok[r] else 0
+            if cur > best:
+                best, best_end = cur, r
+        rows = np.arange(best_end - best + 1, best_end + 1)
+    fi = (f0 + rows[:, None] * P + np.arange(NS)[None, :]).astype(np.int64)
+    # a confidence a handful of coincident jumps cannot fake: require about
+    # one flyback jump per row before trusting the phase clustering
+    n_jumps = int(ras.get("n_jumps", 0))
+    enough = n_jumps >= 0.5 * max(1, rows_fit)
+    return dict(period=P, n_scan=NS, n_flyback=ras["n_flyback"],
+                fly_phase=ras["fly_phase"], f0=int(fi[0, 0]),
+                n_rows=int(len(rows)), frame_index=fi,
+                raster_conf=float(ras["confidence"]) if enough else 0.0,
+                n_jumps=n_jumps, row_corr=st["row_corr"],
+                start_margin=st["margin"],
+                rows_rejected=int(total - ok[:total].sum()))
