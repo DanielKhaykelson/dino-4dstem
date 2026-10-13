@@ -334,6 +334,12 @@ class ACOMTabPanel(ctk.CTkFrame):
         self._kmax = ctk.DoubleVar(value=2.0)
         ctk.CTkEntry(kmax_row, textvariable=self._kmax,
                        width=70).pack(side="left", padx=2)
+        # where the detector ends (from the calibration) -- k_max beyond
+        # it only adds reflections the camera cannot record
+        self._kedge_lbl = ctk.CTkLabel(kmax_row, text="",
+                                       font=("Segoe UI", 9),
+                                       text_color=("#666", "#aaa"))
+        self._kedge_lbl.pack(side="left", padx=(6, 0))
         self._plan_mode = ctk.StringVar(value="corners")
         # Plan coverage as a clickable segmented button (full / fiber / …).
         plan_row = ctk.CTkFrame(sidebar, fg_color="transparent")
@@ -621,6 +627,43 @@ class ACOMTabPanel(ctk.CTkFrame):
         ctk.CTkButton(tb_frame, text="Save panel (PDF+PNG)",
                        width=170, height=28,
                        command=self._save_panel).pack(side="left", padx=8)
+        # View of the diffraction images (pattern panel + fit panels)
+        from gui_app import display_prefs
+        vb = ctk.CTkFrame(tb_frame, fg_color="transparent")
+        vb.pack(side="left", padx=(6, 0))
+        self._v_stretch = ctk.StringVar(value="log")
+        self._v_gamma = ctk.DoubleVar(value=0.5)
+        self._v_lo = ctk.DoubleVar(value=1.0)
+        self._v_hi = ctk.DoubleVar(value=99.5)
+        self._v_zoom = ctk.DoubleVar(value=0.0)
+        self._v_cmap = ctk.StringVar(
+            value=display_prefs.get_diff_cmap_name())
+        redraw = lambda *_a: self._apply_view()
+        ctk.CTkOptionMenu(vb, variable=self._v_stretch,
+                          values=["log", "power", "linear"], width=80,
+                          command=redraw).pack(side="left", padx=2)
+        for lab, var, w in (("γ", self._v_gamma, 40),
+                            ("low %", self._v_lo, 40),
+                            ("high %", self._v_hi, 46),
+                            ("zoom q", self._v_zoom, 46)):
+            ctk.CTkLabel(vb, text=lab).pack(side="left", padx=(6, 1))
+            e = ctk.CTkEntry(vb, textvariable=var, width=w)
+            e.pack(side="left")
+            e.bind("<Return>", redraw)
+        ctk.CTkOptionMenu(vb, variable=self._v_cmap,
+                          values=display_prefs.DIFF_CMAPS, width=100,
+                          command=lambda v: (display_prefs
+                                             .set_diff_cmap_name(v),
+                                             self._apply_view())
+                          ).pack(side="left", padx=(6, 2))
+        from gui_app.tooltip import add_help_button as _ahb
+        _ahb(vb, "View of the diffraction images.  Stretch: log, power "
+                 "(γ) or linear; low/high % clip the display range "
+                 "(percentiles); zoom q = half-width shown in 1/Å "
+                 "(0 = the whole detector), applied to the pattern and "
+                 "to the fit panels so they show the same q range.  "
+                 "Press Enter after typing a number."
+             ).pack(side="left", padx=4)
         # Initial layout
         self._build_axes()
         self._redraw_all()
@@ -707,6 +750,28 @@ class ACOMTabPanel(ctk.CTkFrame):
         except Exception:
             base = (self._recip_per_px() or 0.0185) * 0.1
         return base * float(getattr(self, "_test_px_factor", 1.0))
+
+    def _detector_edge_q(self):
+        """q (1/Å) at the detector edge for the current pattern:
+        half the (smaller) detector size x the effective calibration.
+        None before a source is loaded."""
+        p = getattr(self, "_test_pattern", None)
+        if p is None:
+            return None
+        try:
+            H, W = np.asarray(p).shape[:2]
+            q = 0.5 * min(H, W) * float(self._eff_inv_ang())
+            return q if q > 0 else None
+        except Exception:
+            return None
+
+    def _update_kedge_label(self):
+        q = self._detector_edge_q()
+        try:
+            self._kedge_lbl.configure(
+                text=(f"detector edge ≈ {q:.2f} 1/Å" if q else ""))
+        except Exception:
+            pass
 
     def _eff_recip_nm(self):
         """Effective nm⁻¹ per display pixel (for hover-q), same scaling."""
@@ -1249,6 +1314,68 @@ class ACOMTabPanel(ctk.CTkFrame):
         self._draw_pattern_panel()
         self._redraw_1d_with_rings()
 
+    def _apply_view(self):
+        """Re-draw the panels the view bar controls."""
+        try:
+            self._draw_pattern_panel()
+        except Exception as e:
+            print(f"[acom view] {e!r}", flush=True)
+        try:
+            self._apply_fit_zoom(self._ax_fit)
+            self._canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _view_q_halfwidth(self):
+        """zoom q (1/Å) if set, else the detector edge, else None."""
+        try:
+            z = float(self._v_zoom.get())
+        except Exception:
+            z = 0.0
+        return z if z > 0 else self._detector_edge_q()
+
+    def _apply_fit_zoom(self, ax):
+        """Frame a q-space fit panel: zoom q, else the detector edge."""
+        if ax is None or ax not in self._fig.axes:
+            return
+        # the NNLS fit is py4DSTEM's figure pasted as an image (pixel
+        # axes), not a q-space plot -- leave it alone
+        if getattr(self, "_fit_is_raster", False):
+            return
+        r = self._view_q_halfwidth()
+        if r:
+            ax.set_xlim(-r, r); ax.set_ylim(r, -r)
+
+    def _stretch_img(self, pat):
+        """(display image, vmin, vmax) per the view bar."""
+        p = np.clip(np.asarray(pat, dtype=np.float64), 0, None)
+        mode = getattr(self, "_v_stretch", None)
+        mode = mode.get() if mode is not None else "log"
+        if mode == "log":
+            img = np.log1p(p)
+        elif mode == "power":
+            try:
+                g = max(float(self._v_gamma.get()), 0.01)
+            except Exception:
+                g = 0.5
+            img = p ** g
+        else:
+            img = p
+        try:
+            lo = float(self._v_lo.get()); hi = float(self._v_hi.get())
+        except Exception:
+            lo, hi = 1.0, 99.5
+        lo = min(max(lo, 0.0), 100.0); hi = min(max(hi, lo + 0.01), 100.0)
+        finite = img[np.isfinite(img)]
+        if finite.size:
+            vlo = float(np.percentile(finite, lo))
+            vhi = float(np.percentile(finite, hi))
+            if vhi <= vlo:
+                vhi = vlo + 1e-6
+        else:
+            vlo, vhi = 0.0, 1.0
+        return img, vlo, vhi
+
     def _draw_pattern_panel(self):
         self._ensure_quad_layout()
         ax = self._ax_pat
@@ -1260,19 +1387,25 @@ class ACOMTabPanel(ctk.CTkFrame):
                      color="#888", transform=ax.transAxes)
             self._redraw_all(); return
         pat = self._test_pattern
-        img = np.log1p(np.clip(pat, 0, None))
-        # Robust display range (1–99.5 pct) so a single saturated
-        # central-beam pixel doesn't wash the whole image to black,
-        # and a low-contrast image still shows its structure.
-        finite = img[np.isfinite(img)]
-        if finite.size:
-            vlo = float(np.percentile(finite, 1.0))
-            vhi = float(np.percentile(finite, 99.5))
-            if vhi <= vlo: vhi = vlo + 1e-6
-        else:
-            vlo, vhi = 0.0, 1.0
-        ax.imshow(img, cmap="inferno", aspect="equal",
+        # view bar: stretch + percentile clip (defaults = log, 1-99.5 %,
+        # so a saturated central beam doesn't wash the image out)
+        img, vlo, vhi = self._stretch_img(pat)
+        try:
+            cmap = self._v_cmap.get()
+        except Exception:
+            cmap = "inferno"
+        ax.imshow(img, cmap=cmap, aspect="equal",
                     interpolation="nearest", vmin=vlo, vmax=vhi)
+        # zoom q -> pixels about the pattern centre
+        try:
+            z = float(self._v_zoom.get())
+            a = float(self._eff_inv_ang())
+            if z > 0 and a > 0 and self._test_center is not None:
+                cy, cx = self._test_center
+                rp = z / a
+                ax.set_xlim(cx - rp, cx + rp); ax.set_ylim(cy + rp, cy - rp)
+        except Exception:
+            pass
         if self._test_peaks is not None and len(self._test_peaks):
             ax.scatter(self._test_peaks[:, 1], self._test_peaks[:, 0],
                         s=70, facecolors="none", edgecolors="cyan",
@@ -1390,6 +1523,25 @@ class ACOMTabPanel(ctk.CTkFrame):
             messagebox.showerror("CIF build",
                 "k_max (1/Å) must be > 0.  Set it to ~1.0–2.0 in "
                 "step 3 before building."); return
+        # k_max never moves a reflection (|g| is fixed by the cell); it
+        # only decides how many are simulated.  Beyond the detector edge
+        # those extra reflections can never be observed but still count
+        # in the template, which lowers every correlation score.
+        q_edge = self._detector_edge_q()
+        if q_edge and kmax > 1.05 * q_edge:
+            if not messagebox.askyesno("k_max beyond the detector",
+                    f"k_max = {kmax:g} 1/Å but this detector ends at "
+                    f"≈ {q_edge:.2f} 1/Å (current calibration).\n\n"
+                    f"Reflections past the edge cannot be recorded but "
+                    f"still enter the template, which lowers the match "
+                    f"correlation (here a few-fold).  Peak positions do "
+                    f"not change with k_max.\n\n"
+                    f"Use k_max = {q_edge:.2f} instead?  (No = keep "
+                    f"{kmax:g})"):
+                pass
+            else:
+                kmax = round(q_edge, 3)
+                self._kmax.set(kmax)
         plan_kw = self._plan_kwargs()
         def _w():
             from gui_app.acom_core import load_crystal, prepare_crystal
@@ -1489,6 +1641,10 @@ class ACOMTabPanel(ctk.CTkFrame):
         return rpx * inv_a, amp
 
     def _redraw_1d_with_rings(self):
+        self._update_kedge_label()
+        return self._redraw_1d_with_rings_impl()
+
+    def _redraw_1d_with_rings_impl(self):
         # Skip the layout guard when rendering into the standalone 1D
         # popup (it swaps self._ax_1d to a foreign axes temporarily).
         if not getattr(self, "_in_1d_popup", False):
@@ -1568,15 +1724,32 @@ class ACOMTabPanel(ctk.CTkFrame):
             # Match tolerance = 1.5 % of visible q-range.
             match_tol = max((rc_inva.max() - rc_inva.min()) * 0.015,
                                  1e-3)
+            # Which rings to draw must NOT depend on k_max: k_max only adds
+            # reflections at higher q, it never moves one.  A global
+            # "strongest N" did (new strong high-q reflections pushed
+            # weaker low-q rings out, so lines seemed to move).  Rank
+            # instead inside fixed q windows: the strongest rings of each
+            # window, plus rings sitting on a detected peak (strongest few
+            # per window).  Raising k_max then only ADDS windows.
+            QBIN, TOP_PER_BIN, MATCH_PER_BIN = 0.05, 2, 3
             near = np.zeros(gleng_vis.size, bool)
             if peak_q.size:
                 near = (np.min(np.abs(gleng_vis[:, None]
                                       - peak_q[None, :]), axis=1)
                         <= match_tol)
-            near_idx = np.flatnonzero(near)
-            MAX_MATCHED = 20
-            matched = set(near_idx[np.argsort(-sint_vis[near_idx])]
-                          [:MAX_MATCHED].tolist())
+            bins = np.floor(gleng_vis / QBIN).astype(int)
+            topN, matched = set(), set()
+            for b in np.unique(bins):
+                ib = np.flatnonzero(bins == b)
+                ib = ib[np.argsort(-sint_vis[ib])]
+                topN.update(ib[:TOP_PER_BIN].tolist())
+                matched.update(ib[near[ib]][:MATCH_PER_BIN].tolist())
+            # opacity relative to the strongest ring below a FIXED q, so a
+            # high-q reflection appearing with larger k_max cannot dim
+            # (re-style) the low-q rings either
+            low = gleng_vis <= 0.25
+            i_max = float(sint_vis[low].max() if low.any()
+                          else sint_vis.max() if sint_vis.size else 1.0)
             for k_idx in range(gleng_vis.size):
                 q = float(gleng_vis[k_idx])
                 I = float(sint_vis[k_idx])
@@ -1587,7 +1760,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                 # Opacity / lw scale with intensity (sqrt).  Matched
                 # weak rings get a small alpha boost so the user can
                 # see they were kept on purpose.
-                base = np.sqrt(I / max(i_max, 1e-12))
+                base = min(1.0, np.sqrt(I / max(i_max, 1e-12)))
                 alpha_ring = 0.20 + 0.70 * base
                 if is_matched and not is_top:
                     alpha_ring = max(alpha_ring, 0.55)
@@ -1827,7 +2000,8 @@ class ACOMTabPanel(ctk.CTkFrame):
     # ------------------------------------------------------------------
     # ---- NNLS multi-phase fit (mirrors the py4DSTEM colab) ---------
     def _build_phase_for_patterns(self, patterns_list,
-                                       centers_list, Rshape):
+                                       centers_list, Rshape,
+                                       drop_center_px=0.0):
         """Build a CrystalPhase + calibrated BV for one OR many test
         patterns.  Runs match_orientations on every phase to populate
         crystal.orientation_map (required by quantify_*).  Returns
@@ -1845,6 +2019,17 @@ class ACOMTabPanel(ctk.CTkFrame):
         )
         peak_arrays = [detect_peaks_2d(p, **detect_kw)
                           for p in patterns_list]
+        if drop_center_px > 0:
+            # the direct beam is not a Bragg reflection; in the NNLS view
+            # its huge intensity turned into a disk covering the pattern
+            kept = []
+            for pk, (cy, cx) in zip(peak_arrays, centers_list):
+                pk = np.asarray(pk)
+                if pk.size:
+                    d = np.hypot(pk[:, 0] - cy, pk[:, 1] - cx)
+                    pk = pk[d > float(drop_center_px)]
+                kept.append(pk)
+            peak_arrays = kept
         bv = build_bragg_vectors(
             peak_arrays, centers=centers_list,
             inv_ang_per_pixel=self._eff_inv_ang(),
@@ -1884,7 +2069,9 @@ class ACOMTabPanel(ctk.CTkFrame):
                 cp, bv = self._build_phase_for_patterns(
                     [self._test_pattern],
                     [self._test_center],
-                    Rshape=(1, 1))
+                    Rshape=(1, 1),
+                    drop_center_px=max(4.0, 0.02 * min(
+                        np.asarray(self._test_pattern).shape)))
                 kmax = float(self._kmax.get())
                 # Auto-scale marker sizes so the experimental (gray)
                 # circles are actually visible — fixed 0.02 makes them
@@ -1973,6 +2160,7 @@ class ACOMTabPanel(ctk.CTkFrame):
             return
         ax = self._ax_fit
         ax.clear()
+        self._fit_is_raster = True
         ax.imshow(arr, aspect="equal")
         ax.set_xticks([]); ax.set_yticks([])
         for s in ax.spines.values():
@@ -2091,6 +2279,7 @@ class ACOMTabPanel(ctk.CTkFrame):
             s_exp = _scale_for(pl)
             from py4DSTEM.process.diffraction import (
                 plot_diffraction_pattern)
+            self._fit_is_raster = False
             plot_diffraction_pattern(
                 fit, bragg_peaks_compare=pl,
                 scale_markers=s_fit,
@@ -2112,13 +2301,19 @@ class ACOMTabPanel(ctk.CTkFrame):
                             va="bottom", clip_on=True)
             except Exception:
                 pass
-            # frame the experimental peaks (+10 %), not every simulated one
+            # Fixed frame = the detector edge, so the view never depends on
+            # k_max or on which orientation won (py4DSTEM autoscales to
+            # the outermost SIMULATED spot, so a larger k_max zoomed out
+            # and every spot appeared to move toward the centre).
             try:
-                ex = np.asarray(pl.data["qx"], float)
-                ey = np.asarray(pl.data["qy"], float)
-                if ex.size:
-                    r = 1.1 * float(np.max(np.hypot(ex, ey))) or 1.0
-                    ax.set_xlim(-r, r); ax.set_ylim(r, -r)
+                r = self._view_q_halfwidth()
+                if not r:
+                    ex = np.asarray(pl.data["qx"], float)
+                    ey = np.asarray(pl.data["qy"], float)
+                    r = (1.1 * float(np.max(np.hypot(ex, ey)))
+                         if ex.size else 1.0)
+                ax.set_xlim(-r, r); ax.set_ylim(r, -r)
+                ax.set_aspect("equal")
             except Exception:
                 pass
         except Exception as e:
