@@ -104,6 +104,21 @@ def _fill_stride(obj, Ny, Nx, stride):
 
 class ACOMTabPanel(ctk.CTkFrame):
 
+    # Batch / full-dataset results each open in their OWN window.  They
+    # used to clf() the main 2x2 step figure: a batch wiped the step
+    # panels, any later refresh wiped the result, and when the two
+    # interleaved the panels overlaid each other.
+    _RESULT_RENDERERS = {
+        "_render_nnls_full_map": "NNLS phase map",
+        "_render_singlephase_full": "single-phase full dataset",
+        "_render_classical_orientation_strain": "orientation + strain",
+        "_render_full_singlephase": "single-phase full dataset",
+        "_render_multiphase_map": "multi-phase full dataset",
+        "_render_batch_cards_singlephase": "batch results",
+        "_render_phase_region_map": "multi-phase phase / zone-axis map",
+        "_render_multiphase_cards": "multi-phase batch results",
+    }
+
     def __init__(self, master, app=None):
         super().__init__(master)
         self.app = app
@@ -141,6 +156,11 @@ class ACOMTabPanel(ctk.CTkFrame):
         self._stop_event = _t.Event()
         self._busy = False
         self._build()
+        self._result_win_active = False
+        for _nm, _title in self._RESULT_RENDERERS.items():
+            _fn = getattr(self, _nm, None)
+            if _fn is not None:
+                setattr(self, _nm, self._result_window_wrapper(_fn, _title))
 
     # ------------------------------------------------------------------
     # API for parent app
@@ -704,14 +724,66 @@ class ACOMTabPanel(ctk.CTkFrame):
                      fontsize=10, color="#888", transform=ax.transAxes)
             ax.set_xticks([]); ax.set_yticks([])
 
+    def _result_window_wrapper(self, fn, title):
+        def _wrapped(*a, **k):
+            return self._render_in_result_window(fn, title, *a, **k)
+        return _wrapped
+
+    def _render_in_result_window(self, fn, title, *a, **k):
+        """Run a batch renderer against a fresh figure in its own window
+        (it draws on self._fig / self._canvas, which are swapped for the
+        call).  Nested renderer calls reuse the same window."""
+        if self._result_win_active:
+            return fn(*a, **k)
+        win = tk.Toplevel(self)
+        win.title(f"ACOM — {title}  ({self._active_sample() or ''})")
+        win.geometry("1150x860")
+        bar = tk.Frame(win, bg="#f4f4f4")
+        bar.pack(side="top", fill="x")
+        fig = Figure(figsize=(11, 8), dpi=95, facecolor="#f4f4f4")
+        canvas = FigureCanvasTkAgg(fig, master=win)
+        canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
+        tb = NavigationToolbar2Tk(canvas, bar, pack_toolbar=False)
+        tb.update(); tb.pack(side="left")
+
+        def _save():
+            from datetime import datetime
+            try:
+                base = self._acom_maps_dir()
+                stamp = datetime.now().strftime("%H%M%S")
+                p = os.path.join(base, f"acom_result_{stamp}.png")
+                fig.savefig(p, dpi=200, bbox_inches="tight",
+                            facecolor="white")
+                fig.savefig(p[:-4] + ".pdf", bbox_inches="tight",
+                            facecolor="white")
+                self._set_status(f"saved -> {p}")
+            except Exception as e:
+                messagebox.showerror("save", repr(e), parent=win)
+        ctk.CTkButton(bar, text="Save (PDF+PNG)", width=130, height=28,
+                      command=_save).pack(side="left", padx=8)
+        main = (self._fig, self._canvas)
+        self._fig, self._canvas = fig, canvas
+        self._result_win_active = True
+        try:
+            return fn(*a, **k)
+        finally:
+            self._result_win_active = False
+            self._fig, self._canvas = main
+            try:
+                canvas.draw_idle()
+                win.lift()
+            except Exception:
+                pass
+
     def _ensure_quad_layout(self):
         """A batch render does self._fig.clf(), destroying the 4 step
         axes.  Before any step-1..4 redraw, rebuild the 2×2 layout if
         the step axes are no longer attached to the figure (otherwise
         the step views draw onto dead axes and the canvas stays stuck
         on the batch output)."""
-        ax = getattr(self, "_ax_pat", None)
-        if ax is None or ax not in self._fig.axes:
+        axs = [getattr(self, n, None)
+               for n in ("_ax_pat", "_ax_1d", "_ax_fit", "_ax_cmap")]
+        if any(a is None or a not in self._fig.axes for a in axs):
             self._build_axes()
             return True
         return False
