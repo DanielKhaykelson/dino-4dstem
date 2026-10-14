@@ -1454,9 +1454,9 @@ class NMFPanel(ctk.CTkFrame):
     def _save_snapshot(self):
         if self._last is None or not self.sample:
             messagebox.showinfo("save", "nothing to save"); return
-        out_dir = os.path.join(
-            self.outdir or ".", "nmf",
-            f"{self.sample}_{_safe_name(self._last['variant'])}")
+        from data import output_dir
+        out_dir = output_dir(self.sample, "nmf",
+                             _safe_name(self._last["variant"]))
         os.makedirs(out_dir, exist_ok=True)
         try:
             self._fig.savefig(os.path.join(out_dir, "summary.png"),
@@ -1487,6 +1487,13 @@ class NMFPanel(ctk.CTkFrame):
             messagebox.showerror("save", repr(e)); return
         self._status_lbl.configure(text=f"saved → {out_dir}  (+ per-item pngs)")
 
+    def _nmf_root(self):
+        try:
+            from data import output_dir
+            return output_dir(self.sample, "nmf") if self.sample else "."
+        except Exception:
+            return "."
+
     def _load_snapshot(self):
         """Reload a previously-saved NMF+clustering snapshot (W/H/labels +
         summary.json) so results can be viewed without recomputing."""
@@ -1494,8 +1501,7 @@ class NMFPanel(ctk.CTkFrame):
         d = filedialog.askdirectory(
             title="Pick a saved NMF snapshot folder "
                   "(contains W.npy, H.npy, summary.json)",
-            initialdir=(os.path.join(self.outdir, "nmf")
-                          if self.outdir else "."))
+            initialdir=self._nmf_root())
         if not d:
             return
         try:
@@ -1739,10 +1745,8 @@ class NMFPanel(ctk.CTkFrame):
                 messagebox.showerror("Compare classes", str(e), parent=win)
 
         def _save():
-            if self.outdir is None:
-                d = os.path.join(os.getcwd(), "nmf_class_averages")
-            else:
-                d = os.path.join(self.outdir, "nmf_class_averages")
+            from data import output_dir
+            d = output_dir(self.sample, "nmf", "class_averages")
             os.makedirs(d, exist_ok=True)
             v_safe = _safe_name(self._last["variant"])
             m_safe = _safe_name(method_var.get())
@@ -1766,16 +1770,9 @@ class NMFPanel(ctk.CTkFrame):
         if not self.sample:
             messagebox.showinfo("Report",
                 "Load a cube in the Data tab (top) first."); return
-        out_root = filedialog.askdirectory(
-            initialdir=self.outdir or os.getcwd(),
-            title="Pick output folder for NMF report  "
-                   "(a 'nmf_report/' sub-folder will be created)",
-            mustexist=False)
-        if not out_root:
-            return
-        out_dir = os.path.join(
-            out_root, "nmf_report",
-            f"{self.sample}_{time.strftime('%Y%m%d-%H%M%S')}")
+        from data import output_dir
+        out_dir = output_dir(self.sample, "nmf", "reports",
+                             time.strftime("%Y%m%d-%H%M%S"))
         png_dir = os.path.join(out_dir, "png")
         os.makedirs(png_dir, exist_ok=True)
         self._compute_running = True

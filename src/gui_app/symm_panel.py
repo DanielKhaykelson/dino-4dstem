@@ -519,7 +519,9 @@ class SymmPanel(ctk.CTkFrame):
         if self._amp is None or self.outdir is None:
             messagebox.showinfo("Symm-map", "Nothing to save yet."); return
         lo, hi = self._annulus_window()
-        out_dir = os.path.join(self.outdir, "symm")
+        from data import output_dir, source_tag
+        out_dir = output_dir(self.sample, "symmetry",
+                             source_tag(run_dir=self.outdir))
         os.makedirs(out_dir, exist_ok=True)
         mode = self._vars["mode"].get().replace(" ", "_")
         n_fold = int(self._vars["n_fold"].get())

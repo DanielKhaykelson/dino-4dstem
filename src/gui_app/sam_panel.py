@@ -217,7 +217,13 @@ class SAMPanel(ctk.CTkFrame):
 
     # ----- per-class config persistence -----------------------------
     def _config_path(self) -> str:
-        return os.path.join(self.outdir, "sam", "sam_config.json")
+        return os.path.join(self._sam_root(), "sam_config.json")
+
+    def _sam_root(self):
+        """<data>_DINO4DSTEM/sam/dino_<run>/"""
+        from data import output_dir, source_tag
+        return output_dir(self.sample, "sam",
+                          source_tag(run_dir=self.outdir))
 
     def _read_per_class_cfg(self):
         self._per_class_cfg = {}
@@ -601,7 +607,7 @@ class SAMPanel(ctk.CTkFrame):
             return
         # Save the class's tuning into per-class config first.
         self._save_class_tuning()
-        outdir = os.path.join(self.outdir, "sam", f"p{c}")
+        outdir = os.path.join(self._sam_root(), f"p{c}")
         kw = self._build_class_kwargs(c)
         self.job = SamRunJob(outdir, kw)
         self.job.start()
@@ -740,7 +746,7 @@ class SAMPanel(ctk.CTkFrame):
         if not self.outdir:
             return
         c = int(self._vars["current_class"].get())
-        png = os.path.join(self.outdir, "sam", f"p{c}", "angle_map.png")
+        png = os.path.join(self._sam_root(), f"p{c}", "angle_map.png")
         if not os.path.exists(png):
             return
         try:

@@ -2051,6 +2051,101 @@ def loaded_sample_keys():
             if isinstance(v, dict) and v.get("_runtime")]
 
 
+# ---------------------------------------------------------------------------
+# Where analysis outputs go: ONE folder next to the data, one sub-folder per
+# tool.  (A DINO run keeps its own checkpoints / eval/inference.npz in the
+# run folder -- reloading a run depends on them.)
+# ---------------------------------------------------------------------------
+OUTPUT_TOOLS = {
+    "nmf": "NMF snapshots (W/H/labels_<method>.npy), class averages, reports",
+    "blob": "Blob detection per class-map source / method / class",
+    "acom": "ACOM maps, result figures, peak cache, parameters",
+    "sam": "SAM masks / angle maps per class",
+    "strain": "strain maps",
+    "symmetry": "symmetry maps",
+    "ordering": "ordering maps",
+    "fluctuation": "fluctuation (FEM-style) maps",
+    "crystallinity": "crystallinity reports",
+}
+
+
+def _safe_part(x) -> str:
+    import re
+    return re.sub(r"[^A-Za-z0-9._+-]+", "_", str(x)).strip("_") or "x"
+
+
+def _dir_writable(d) -> bool:
+    try:
+        os.makedirs(d, exist_ok=True)
+        t = os.path.join(d, ".write_test")
+        with open(t, "w") as f:
+            f.write("ok")
+        os.remove(t)
+        return True
+    except Exception:
+        return False
+
+
+def output_root(sample_or_path, create=True) -> str:
+    """<data folder>/<data name>_DINO4DSTEM for a SAMPLES key or a cube
+    path; ~/DINO-4DSTEM/outputs/<data name> when the data folder is
+    read-only.  A multi-scan HDF5 file gets one root per scan."""
+    cfg = SAMPLES.get(sample_or_path) if isinstance(sample_or_path, str) \
+        else None
+    path = (cfg.get("path") or (cfg.get("paths") or [""])[0]) if cfg \
+        else str(sample_or_path or "")
+    if not path:
+        raise ValueError("no dataset path to put outputs next to")
+    path = os.path.abspath(path)
+    stem = os.path.basename(path)
+    for ext in (".cube.npy", ".npy", ".npz", ".prz", ".hdf5", ".h5",
+                ".mib", ".dm4", ".dm3", ".raw", ".emd"):
+        if stem.lower().endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+    if cfg and cfg.get("h5_dataset"):
+        stem += "_" + _safe_part(cfg["h5_dataset"])
+    root = os.path.join(os.path.dirname(path), f"{stem}_DINO4DSTEM")
+    if create:
+        if not _dir_writable(root):
+            root = os.path.join(os.path.expanduser("~"), "DINO-4DSTEM",
+                                "outputs", stem)
+            os.makedirs(root, exist_ok=True)
+        readme = os.path.join(root, "README.txt")
+        if not os.path.exists(readme):
+            try:
+                with open(readme, "w", encoding="utf-8") as f:
+                    f.write(f"DINO-4DSTEM outputs for\n  {path}\n\n")
+                    for k, v in OUTPUT_TOOLS.items():
+                        f.write(f"{k + '/':16s}{v}\n")
+                    f.write("\nInside a tool folder, results are split by "
+                            "the class map they used:\n  nmf_<method>/   "
+                            "NMF clustering\n  dino_<run>/     a trained "
+                            "DINO run\n")
+            except Exception:
+                pass
+    return root
+
+
+def output_dir(sample_or_path, tool, *sub, create=True) -> str:
+    """output_root/<tool>/<sub...>  (created unless create=False)."""
+    d = os.path.join(output_root(sample_or_path, create=create), tool,
+                     *[_safe_part(x) for x in sub if x not in (None, "")])
+    if create:
+        os.makedirs(d, exist_ok=True)
+    return d
+
+
+def source_tag(run_dir=None, label=None) -> str:
+    """Sub-folder naming the class map a result came from."""
+    if label:
+        return "nmf_" + _safe_part(label)
+    if run_dir:
+        return "dino_" + _safe_part(os.path.basename(
+            os.path.normpath(run_dir)))
+    return "dataset"
+
+
 def _registered_raster(path):
     """Raster (frame map) recorded for this cube in SAMPLES, if any.
 

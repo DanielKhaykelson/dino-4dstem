@@ -256,6 +256,9 @@ class App(ctk.CTk):
         self.destroy()
 
     # ---- session badges --------------------------------------------
+    def _open_outputs_folder(self):
+        _open_outputs_folder_impl(self)
+
     def _on_session_change(self, sess):
         from gui_app._ui import COLOR
         ds = sess.sample or "(none)"
@@ -490,6 +493,11 @@ class App(ctk.CTk):
         self.recip_res = ctk.DoubleVar(value=0.0185)
         cal = ctk.CTkFrame(bar, fg_color="transparent")
         cal.pack(side="right", padx=12)
+        # Every analysis tab saves into ONE folder next to the loaded data
+        # (<data>_DINO4DSTEM/<tool>/...); this opens it.
+        ctk.CTkButton(bar, text="Open outputs folder", width=150,
+                      command=self._open_outputs_folder
+                      ).pack(side="right", padx=(6, 0))
         ctk.CTkLabel(cal, text="real space:").grid(row=0, column=0, sticky="e")
         ctk.CTkEntry(cal, textvariable=self.real_res,
                        width=80).grid(row=0, column=1, padx=2)
@@ -968,6 +976,30 @@ class App(ctk.CTk):
         except Exception:
             pass
         self._sb.configure(text=f"training done.  outputs in {outdir}")
+
+
+def _open_outputs_folder_impl(app):
+    from tkinter import messagebox
+    sess = getattr(app, "session", None)
+    sample = getattr(sess, "sample", None)
+    if not sample:
+        pre = getattr(app, "pre", None)
+        try:
+            sample = pre.get_sample_key() if pre is not None else None
+        except Exception:
+            sample = None
+    if not sample:
+        messagebox.showinfo("Outputs", "Load a dataset first - outputs "
+                            "are saved next to it.")
+        return
+    try:
+        from data import output_root
+        from gui_app._platform import open_path
+        root = output_root(sample)
+        open_path(root)
+    except Exception as e:
+        messagebox.showerror("Outputs", f"could not open the outputs "
+                             f"folder:\n{e!r}")
 
 
 def main():

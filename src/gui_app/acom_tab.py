@@ -877,17 +877,11 @@ class ACOMTabPanel(ctk.CTkFrame):
                 except Exception: pass
 
     def _save_panel(self):
-        ph = getattr(self.app, "posthoc", None)
-        outdir = getattr(ph, "outdir", None) if ph else None
         from datetime import datetime
-        if outdir:
-            out = os.path.join(outdir, "eval", "acom_tab")
-            os.makedirs(out, exist_ok=True)
-        elif self._active_sample() is not None:
-            # no DINO run: save next to the ACOM maps for this dataset
-            out = self._acom_maps_dir()
-        else:
+        if self._active_sample() is None:
             messagebox.showinfo("save", "Load a dataset first."); return
+        from data import output_dir
+        out = output_dir(self._active_sample(), "acom", "panels")
         stamp = datetime.now().strftime("%H%M%S")
         png = os.path.join(out, f"acom_{stamp}.png")
         pdf = os.path.join(out, f"acom_{stamp}.pdf")
@@ -2605,14 +2599,8 @@ class ACOMTabPanel(ctk.CTkFrame):
             {"sample": sample, "stride": stride, "kw": detect_kw,
                "shape": [Ny, Nx]},
             sort_keys=True, default=str).encode()).hexdigest()[:10]
-        ph = self._posthoc()
-        run = getattr(ph, "outdir", None) if ph else None
-        if run and os.path.isdir(run):
-            base = os.path.join(run, "acom")
-        else:
-            base = self._writable_dir(os.path.join(
-                os.path.dirname(SAMPLES[sample]["path"]),
-                "_acom_peakcache"))
+        from data import output_dir
+        base = output_dir(sample, "acom", "peak_cache")
         return os.path.join(base, f"peaks_full_{kh}.npz")
 
     def _peak_cache_info(self, path):
@@ -3219,14 +3207,9 @@ class ACOMTabPanel(ctk.CTkFrame):
             za_color=za_color, za_count=za_count, palette=palette)
 
         # Save dir.
-        ph = self._posthoc()
-        run = getattr(ph, "outdir", None) if ph else None
+        from data import output_dir
         sample = self._active_sample()
-        base = (os.path.join(run, "acom", "maps") if run
-                  else os.path.join(
-                      os.path.dirname(SAMPLES[sample]["path"]),
-                      "_acom_maps"))
-        base = self._writable_dir(base)
+        base = output_dir(sample, "acom", "maps")
         # Persist the raw result arrays (not just PNGs) so the Interpretation
         # tab can reuse them for the DINO-vs-orientation cross-check.
         try:
@@ -3531,12 +3514,8 @@ class ACOMTabPanel(ctk.CTkFrame):
         try:
             import json
             from datetime import datetime
-            ph = self._posthoc()
-            run = getattr(ph, "outdir", None) if ph else None
-            # <run>/acom with a DINO run; else the maps folder itself (never
-            # loose files in the data folder)
-            base = (os.path.dirname(self._acom_maps_dir()) if run
-                    else self._acom_maps_dir())
+            from data import output_dir
+            base = output_dir(self._active_sample(), "acom")
             os.makedirs(base, exist_ok=True)
             pk = self._plan_kwargs()
             cfg = dict(
@@ -3622,14 +3601,9 @@ class ACOMTabPanel(ctk.CTkFrame):
         return rgb
 
     def _acom_maps_dir(self):
-        ph = self._posthoc()
-        run = getattr(ph, "outdir", None) if ph else None
+        from data import output_dir
         sample = self._active_sample()
-        base = (os.path.join(run, "acom", "maps") if run
-                  else os.path.join(
-                      os.path.dirname(SAMPLES[sample]["path"]),
-                      "_acom_maps"))
-        base = self._writable_dir(base)
+        base = output_dir(sample, "acom", "maps")
         return base
 
     def _render_singlephase_full(self, crystal, omap, bv, scan_shape,

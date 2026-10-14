@@ -363,7 +363,7 @@ class StrainPanel(ctk.CTkFrame):
         if not self.outdir:
             return None
         # Use whichever method the Detect tab last wrote.
-        cfg_path = os.path.join(self.outdir, "blob", "blob_config.json")
+        cfg_path = os.path.join(self._blob_base(), "blob_config.json")
         if not os.path.exists(cfg_path):
             return None
         try:
@@ -372,7 +372,17 @@ class StrainPanel(ctk.CTkFrame):
             method = cfg.get("method", "DoG")
         except Exception:
             method = "DoG"
-        return os.path.join(self.outdir, "blob", method)
+        return os.path.join(self._blob_base(), method)
+
+    def _blob_base(self):
+        """Blob results for this run: <data>_DINO4DSTEM/blob/dino_<run>/,
+        or the old <run>/blob/ for results saved before that layout."""
+        from data import output_dir, source_tag
+        new = output_dir(self.sample, "blob",
+                         source_tag(run_dir=self.outdir), create=False)
+        old = os.path.join(self.outdir or "", "blob")
+        return old if (not os.path.isdir(new)
+                       and os.path.isdir(old)) else new
 
     # ----- compute ------------------------------------------------------
     def _ensure_class_avgs(self):
@@ -563,7 +573,9 @@ class StrainPanel(ctk.CTkFrame):
     def _save_snapshot(self):
         if self._last is None or self.outdir is None:
             messagebox.showinfo("Strain", "Run compute first."); return
-        out_dir = os.path.join(self.outdir, "strain")
+        from data import output_dir, source_tag
+        out_dir = output_dir(self.sample, "strain",
+                             source_tag(run_dir=self.outdir))
         os.makedirs(out_dir, exist_ok=True)
         a, b = self._last["a"], self._last["b"]
         tag = f"p{a}__p{b}"

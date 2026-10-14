@@ -240,8 +240,17 @@ class BlobPanel(ctk.CTkFrame):
         self._render_canvas_idle()
 
     # ------------- per-class config persistence -------------------
+    def _blob_root(self) -> str:
+        """<data>_DINO4DSTEM/blob/<nmf_method | dino_run>/"""
+        from data import output_dir, source_tag
+        tag = (source_tag(label=self._label_name.split("(")[0]
+                          .replace("NMF", "").strip())
+               if self._label_map is not None
+               else source_tag(run_dir=self.outdir))
+        return output_dir(self.sample, "blob", tag)
+
     def _config_path(self) -> str:
-        return os.path.join(self.outdir, "blob", "blob_config.json")
+        return os.path.join(self._blob_root(), "blob_config.json")
 
     def _read_per_class_cfg(self):
         self._per_class_cfg = {}
@@ -626,9 +635,8 @@ class BlobPanel(ctk.CTkFrame):
             "Use which NMF clustering from the NMF tab?", list(store))
         if name is None:
             return False
-        base = (getattr(nmf, "outdir", None)
-                or os.path.join(os.path.expanduser("~"), "DINO-4DSTEM"))
-        outdir = os.path.join(base, "nmf_blob", str(sample))
+        from data import output_dir
+        outdir = output_dir(sample, "blob")
         return self._use_label_map(store[name], f"NMF {name}  (NMF tab)",
                                    sample, outdir)
 
@@ -950,7 +958,7 @@ class BlobPanel(ctk.CTkFrame):
             return
         self._save_class_tuning()
         kw = self._gather_current_knobs()
-        outdir = os.path.join(self.outdir, "blob", kw["method"], f"p{c}")
+        outdir = os.path.join(self._blob_root(), kw["method"], f"p{c}")
         os.makedirs(outdir, exist_ok=True)
         # Spawn a worker thread (blob detection releases the GIL via
         # numpy/scipy, and the GUI thread keeps polling).
@@ -1069,7 +1077,7 @@ class BlobPanel(ctk.CTkFrame):
                 idx_arr = np.where(self._assigns == c)[0]
                 if idx_arr.size == 0:
                     continue
-                outdir = os.path.join(self.outdir, "blob", method, f"p{c}")
+                outdir = os.path.join(self._blob_root(), method, f"p{c}")
                 os.makedirs(outdir, exist_ok=True)
                 with self._worker_lock:
                     self._worker_progress = (

@@ -1396,11 +1396,12 @@ class CrystallinityPanel(ctk.CTkFrame):
                          if np.isfinite(thr_var) else 0)
 
             # ---- save everything to one folder ----
-            outdir = (ph.outdir if ph and ph.outdir
-                       else os.path.join("runs", "_crystallinity"))
+            from data import output_dir
+            _smp = (getattr(ph, "sample", None)
+                    or getattr(self, "_vimg_sample", None))
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            folder = os.path.join(outdir, "crystallinity",
-                                   f"report_all_{stamp}")
+            folder = output_dir(_smp, "crystallinity",
+                                f"report_all_{stamp}")
             os.makedirs(folder, exist_ok=True)
             np.save(os.path.join(folder, "_scattered_intensity.npy"),
                       scatter_map)

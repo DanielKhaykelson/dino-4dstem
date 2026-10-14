@@ -590,7 +590,9 @@ class OrderingPanel(ctk.CTkFrame):
     def _save_snapshot(self):
         if self._metrics is None or self.outdir is None:
             messagebox.showinfo("Ordering", "Nothing to save yet."); return
-        out_dir = os.path.join(self.outdir, "ordering")
+        from data import output_dir, source_tag
+        out_dir = output_dir(self.sample, "ordering",
+                             source_tag(run_dir=self.outdir))
         os.makedirs(out_dir, exist_ok=True)
         try:
             self._fig.savefig(os.path.join(out_dir, "ordering_panel.png"),

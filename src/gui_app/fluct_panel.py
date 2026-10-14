@@ -489,7 +489,9 @@ class FluctPanel(ctk.CTkFrame):
         if self._var_prof is None or self.outdir is None:
             messagebox.showinfo("Fluct-map", "Nothing to save yet."); return
         lo, hi = self._annulus_window()
-        out_dir = os.path.join(self.outdir, "fluct")
+        from data import output_dir, source_tag
+        out_dir = output_dir(self.sample, "fluctuation",
+                             source_tag(run_dir=self.outdir))
         os.makedirs(out_dir, exist_ok=True)
         # Save the current (r, dr) variance map as PNG + numpy.
         tag = f"r{(lo+hi)//2}_dr{hi-lo}"
