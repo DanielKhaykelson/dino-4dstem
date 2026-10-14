@@ -2112,8 +2112,9 @@ class ACOMTabPanel(ctk.CTkFrame):
                 # orientation_map slot that quantify handles.
                 print(f"[NNLS] match_orientations fallback: {e!r}",
                       flush=True)
-                from gui_app.acom_core import _match_safe
-                _match_safe(cr, bv, Rshape[0] * Rshape[1])
+                from gui_app.acom_core import match_orientations_progress
+                match_orientations_progress(
+                    cr, bv, min_peaks=self._min_peaks_val())
         cp = CrystalPhase(crystals, crystal_names=names)
         return cp, bv
 
@@ -2977,9 +2978,10 @@ class ACOMTabPanel(ctk.CTkFrame):
                 # per-position fallback leaves those slots empty
                 print(f"[NNLS full] match fallback for {n}: {e!r}",
                       flush=True)
-                from gui_app.acom_core import _match_safe
-                _match_safe(cr, bv, Ny * Nx,
-                            min_peaks=self._min_peaks_val())
+                from gui_app.acom_core import match_orientations_progress
+                match_orientations_progress(
+                    cr, bv, min_peaks=self._min_peaks_val(),
+                    stop_event=self._stop_event)
         if self._stop_event.is_set():
             raise RuntimeError("stopped by user (before NNLS)")
         cp = CrystalPhase(crystals, crystal_names=names)
@@ -2987,17 +2989,27 @@ class ACOMTabPanel(ctk.CTkFrame):
             progress_cb(0, 1, "quantify_phase NNLS")
         # settings of the py4DSTEM Ti alpha/beta tutorial (one pattern per
         # phase, single winning phase per position, strain allowed)
-        cp.quantify_phase(
-            bv, k_max=float(self._kmax.get()),
+        from gui_app.acom_core import quantify_phase_safe
+
+        def _qprog(d, t, stage):
+            if progress_cb is not None:
+                progress_cb(d, t, stage)
+        failed = quantify_phase_safe(
+            cp, bv, progress_cb=_qprog, stop_event=self._stop_event,
+            k_max=float(self._kmax.get()),
             corr_kernel_size=0.04,
             sigma_excitation_error=0.02,
             power_intensity=0.25,
             power_intensity_experiment=0.25,
             max_number_patterns=1,
             single_phase=True,
-            allow_strain=True,
-            progress_bar=False)
+            allow_strain=True)
+        if failed:
+            print(f"[NNLS full] {failed} position(s) could not be fitted "
+                  f"(nothing left to match - e.g. all peaks beyond k_max); "
+                  f"left empty.", flush=True)
         cp._dino_names = names
+        cp._nnls_failed = int(failed)
         return cp
 
     def _render_nnls_full(self, cp, scan_shape, stride, elapsed_s):
@@ -3125,7 +3137,10 @@ class ACOMTabPanel(ctk.CTkFrame):
             print(f"[NNLS full] masked orientation maps failed:\n"
                   f"{traceback.format_exc()}", flush=True)
             self._set_status(f"orientation maps failed: {e!r}"[:160])
+        _nf = int(getattr(cp, "_nnls_failed", 0) or 0)
         self._set_status(
+            (f"{_nf} position(s) had nothing to fit (left empty).  "
+             if _nf else "") +
             "NNLS phase map: " + ", ".join(
                 f"{names[i]} {100*fr[i]:.1f}% indexed / "
                 f"{100*fr_rel[i]:.1f}% reliable" for i in range(n))

@@ -644,7 +644,8 @@ def acom_full_dataset(crystal,
     if progress_cb is not None:
         try: progress_cb(total_pix, total_pix, "match")
         except Exception: pass
-    omap = crystal.match_orientations(bv, min_number_peaks=int(min_peaks))
+    omap = match_orientations_progress(crystal, bv,
+                                       min_peaks=int(min_peaks))
     return omap, bv, (Ny, Nx)
 
 
@@ -737,7 +738,8 @@ def acom_multiphase_full_dataset(crystals_by_name,
             try: progress_cb(pi, len(names), f"match[{name}]")
             except Exception: pass
         cr = crystals_by_name[name]
-        omap = cr.match_orientations(bv, min_number_peaks=int(min_peaks))
+        omap = match_orientations_progress(cr, bv,
+                                           min_peaks=int(min_peaks))
         cv = None
         for attr in ("corr", "correlation"):
             v = getattr(omap, attr, None)
@@ -851,6 +853,58 @@ def match_orientations_progress(crystal, bv, *, min_peaks: int = 3,
             bv, progress_bar=True, min_number_peaks=int(min_peaks))
 
 
+def quantify_phase_safe(cp, bv, *, progress_cb=None, stop_event=None,
+                        **kw):
+    """CrystalPhase.quantify_phase, one position at a time.
+
+    py4DSTEM's loop stops the WHOLE map with 'attempt to get argmin of an
+    empty sequence' as soon as one position has nothing left to fit
+    (e.g. every peak lies beyond k_max).  Here such a position keeps
+    zero weights / reliability and the rest of the map is fitted.
+    Returns the number of positions that could not be fitted."""
+    Ny, Nx = int(bv.shape[0]), int(bv.shape[1])
+    nf = int(getattr(cp, "num_fits", 0) or 0)
+    if nf <= 0:
+        # num_fits is set by quantify_*; probe one position to learn it
+        nf = len(getattr(cp, "crystals", [])) or 1
+    cp.phase_weights = np.zeros((Ny, Nx, nf))
+    cp.phase_residuals = np.zeros((Ny, Nx))
+    cp.phase_reliability = np.zeros((Ny, Nx))
+    cp.int_total = np.zeros((Ny, Nx))
+    cp.single_phase = bool(kw.get("single_phase", False))
+    failed = 0
+    total = Ny * Nx
+    for k in range(total):
+        rx, ry = divmod(k, Nx)
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError("stopped by user")
+        try:
+            pl = bv.cal[rx, ry]
+            if pl is None or len(pl.data) == 0:
+                continue
+            w, res, rel, it = cp.quantify_single_pattern(
+                bv, xy_position=(rx, ry), plot_result=False,
+                verbose=False, returnfig=False, **kw)
+            w = np.asarray(w, dtype=np.float64).ravel()
+            if w.size != cp.phase_weights.shape[2]:
+                grown = np.zeros((Ny, Nx, w.size))
+                m = min(w.size, cp.phase_weights.shape[2])
+                grown[..., :m] = cp.phase_weights[..., :m]
+                cp.phase_weights = grown
+            cp.phase_weights[rx, ry] = w
+            cp.phase_residuals[rx, ry] = float(res)
+            cp.phase_reliability[rx, ry] = float(rel)
+            cp.int_total[rx, ry] = float(it)
+        except Exception:
+            failed += 1
+        if progress_cb is not None and (k % 64 == 0 or k + 1 == total):
+            try:
+                progress_cb(k + 1, total, "quantify_phase NNLS")
+            except Exception:
+                pass
+    return failed
+
+
 def _match_safe(crystal, bv, N, min_peaks: int = 3, progress_bar: bool = False):
     """Run match_orientations, returning (corr[N], rmat[N,3,3]).
 
@@ -882,10 +936,15 @@ def _match_safe(crystal, bv, N, min_peaks: int = 3, progress_bar: bool = False):
     except Exception as e:
         print(f"[acom_core] vectorised match failed ({e!r}); "
                 f"falling back to per-pattern.", flush=True)
-    # Per-pattern fallback.
+    # Per-pattern fallback.  bv is (Ny, Nx) for a scan, (N, 1) for a
+    # batch of patterns -- index it by its own shape.
+    try:
+        _ny, _nx = int(bv.shape[0]), int(bv.shape[1])
+    except Exception:
+        _ny, _nx = N, 1
     for k in range(N):
         try:
-            pl = bv.cal[k, 0]
+            pl = bv.cal[k // _nx, k % _nx]
             if len(pl.data) < int(min_peaks):   # too few peaks to match
                 continue
             orient = crystal.match_single_pattern(
