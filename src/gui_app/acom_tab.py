@@ -3033,6 +3033,8 @@ class ACOMTabPanel(ctk.CTkFrame):
         rgb = np.where((dom >= 0)[..., None], plain * shade, NOFIT)
         REL_MIN = 0.10
         reliable = has & (rel_c >= REL_MIN)
+        self._mpfull = dict(scan_shape=(Ny, Nx), phase_rgb=plain,
+                            za_rgb=rgb, win_corr=rel, kind="NNLS phase map")
         base = self._acom_maps_dir()
         stamp = time.strftime("%H%M%S")
         try:
@@ -3398,16 +3400,24 @@ class ACOMTabPanel(ctk.CTkFrame):
     def _do_overlay(self):
         if getattr(self, "_mpfull", None) is None:
             messagebox.showinfo("Overlay",
-                "Run a multi-phase full-dataset first."); return
+                "Make an ACOM map first: multi-phase on class averages / "
+                "grains, a full-dataset run (any stride) or the NNLS "
+                "phase map.  The overlay uses the most recent one."); return
         self._refresh_label_sources()
         which = self._overlay_src.get()
         labels, reason = self._resolve_overlay_labels(which)
         if labels is None:
             messagebox.showinfo("Overlay not available", reason); return
         base = self._overlay_base.get()
-        bg = {"phase": self._mpfull["phase_rgb"],
-                "zone-axis": self._mpfull["za_rgb"],
+        bg = {"phase": self._mpfull.get("phase_rgb"),
+                "zone-axis": self._mpfull.get("za_rgb"),
                 "mask": self._mpfull.get("mask_rgb")}.get(base, None)
+        corr = self._mpfull.get("win_corr")
+        if bg is None and corr is None:
+            # this result has no such layer: fall back to its phase map
+            bg = self._mpfull.get("phase_rgb")
+            base = "phase"
+        kind = self._mpfull.get("kind", "full dataset")
         Ny, Nx = self._mpfull["scan_shape"]
         import matplotlib.pyplot as plt
         K = int(labels.max()) + 1
@@ -3420,9 +3430,9 @@ class ACOMTabPanel(ctk.CTkFrame):
             if bg is not None:
                 axA.imshow(bg, interpolation="nearest", aspect="equal")
             else:
-                axA.imshow(self._mpfull["win_corr"], cmap="viridis",
+                axA.imshow(corr, cmap="viridis",
                               interpolation="nearest", aspect="equal")
-            axA.set_title(f"ACOM {base}", fontsize=10)
+            axA.set_title(f"ACOM {base}  ({kind})", fontsize=10)
             axB.imshow(labels, cmap=cmapL, interpolation="nearest",
                           aspect="equal", vmin=-0.5, vmax=K - 0.5)
             axB.set_title(f"{which}  (K={K})", fontsize=10)
@@ -3434,7 +3444,7 @@ class ACOMTabPanel(ctk.CTkFrame):
             if bg is not None:
                 ax.imshow(bg, interpolation="nearest", aspect="equal")
             else:
-                ax.imshow(self._mpfull["win_corr"], cmap="viridis",
+                ax.imshow(corr, cmap="viridis",
                              interpolation="nearest", aspect="equal")
             # Contour each cluster's boundary.
             for c in range(K):
@@ -3442,8 +3452,8 @@ class ACOMTabPanel(ctk.CTkFrame):
                 if m.sum() == 0: continue
                 ax.contour(m, levels=[0.5], colors=[cmapL(c % cmapL.N)],
                               linewidths=1.0)
-            ax.set_title(f"ACOM {base}  +  {which} contours (K={K})",
-                            fontsize=10)
+            ax.set_title(f"ACOM {base} ({kind})  +  {which} contours "
+                         f"(K={K})", fontsize=10)
             ax.set_xticks([]); ax.set_yticks([])
             self._add_scalebar(ax, Ny)
         fig.tight_layout()
@@ -4278,6 +4288,10 @@ class ACOMTabPanel(ctk.CTkFrame):
             za_rgb[gm] = za_color[key]
             region_za[k] = (pi, za, gm)
 
+        # stash for 'Overlay' (works on class / grain maps too, not only
+        # on a full-dataset run)
+        self._mpfull = dict(scan_shape=(Ny, Nx), phase_rgb=phase_rgb,
+                            za_rgb=za_rgb, kind=f"{mode} map")
         self._fig.clf()
         # leave the right quarter for the zone-axis legend
         gs = self._fig.add_gridspec(1, 2, wspace=0.08, left=0.03,
