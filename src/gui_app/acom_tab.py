@@ -506,14 +506,14 @@ class ACOMTabPanel(ctk.CTkFrame):
             "with max corr above the threshold (else 'neither').")
         thr_row = ctk.CTkFrame(sidebar, fg_color="transparent")
         thr_row.pack(fill="x", padx=10, pady=1)
-        ctk.CTkLabel(thr_row, text="corr threshold:",
+        ctk.CTkLabel(thr_row, text="corr threshold*:",
                        width=110, anchor="w").pack(side="left")
         self._mp_threshold = ctk.DoubleVar(value=0.02)
         ctk.CTkEntry(thr_row, textvariable=self._mp_threshold,
                        width=60).pack(side="left", padx=2)
         mar_row = ctk.CTkFrame(sidebar, fg_color="transparent")
         mar_row.pack(fill="x", padx=10, pady=1)
-        ctk.CTkLabel(mar_row, text="winner margin:",
+        ctk.CTkLabel(mar_row, text="winner margin*:",
                        width=110, anchor="w").pack(side="left")
         self._mp_margin = ctk.DoubleVar(value=0.0)
         ctk.CTkEntry(mar_row, textvariable=self._mp_margin,
@@ -556,25 +556,27 @@ class ACOMTabPanel(ctk.CTkFrame):
                        width=140,
                        command=lambda: self._run_batch("full")
                        ).pack(side="left", padx=2)
-        ctk.CTkButton(full_btn, text="Multi-phase full ▶",
-                       width=140,
-                       fg_color=("#A23BB0", "#7A2680"),
-                       command=lambda: self._run_batch("mp_full")
-                       ).pack(side="left", padx=2)
-        nnls_row = ctk.CTkFrame(sidebar, fg_color="transparent")
-        nnls_row.pack(fill="x", padx=10, pady=2)
-        ctk.CTkButton(nnls_row, text="Phase map (NNLS, all CIFs) ▶",
-                       width=284,
+        ctk.CTkButton(full_btn, text="Phase map (all CIFs) ▶",
+                       width=150,
                        fg_color=("#2E7D6B", "#1F5A4D"),
-                       command=lambda: self._run_batch("nnls_full")
+                       command=lambda: self._run_batch("phase_full")
                        ).pack(side="left", padx=2)
+        self._nnls_refine = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(sidebar,
+                        text="NNLS refinement (weights + reliability; slower)",
+                        variable=self._nnls_refine
+                        ).pack(anchor="w", padx=10, pady=(2, 0))
         _hint(sidebar,
-            "Multi-phase full = winner of the per-phase correlation.  "
-            "Phase map (NNLS) = py4DSTEM CrystalPhase.quantify_phase "
-            "(the Ti alpha/beta tutorial): fits every pattern with all "
-            "CIFs at once -> phase weights, reliability, dominant-phase "
-            "map and each phase's orientation map masked to where it "
-            "dominates.")
+            "Phase map: peaks are detected once and every CIF is "
+            "orientation-matched at every position.  First result = "
+            "correlation winner per position (uses corr threshold / "
+            "winner margin above).  Correlation scores of different "
+            "CIFs are not strictly comparable (more / stronger "
+            "reflections score higher), so with 'NNLS refinement' the "
+            "same matches are then fitted as a non-negative mix of the "
+            "phases (py4DSTEM CrystalPhase.quantify_phase, as in the Ti "
+            "alpha/beta tutorial) -> phase weights, reliability and "
+            "orientation maps masked by phase.  No second matching pass.")
         # Single-phase full saves stand-alone publication PNGs (out-of-
         # plane orientation, correlation, zone-axis) and opens each in its
         # own window.  In-plane orientation only when this is ticked.
@@ -2510,7 +2512,7 @@ class ACOMTabPanel(ctk.CTkFrame):
         # full / mp_full need only the DATASET; classes/grains need
         # DINO inference (they operate on class avgs / grains).
         self._batch_labels = None
-        if mode in ("full", "mp_full", "nnls_full"):
+        if mode in ("full", "mp_full", "nnls_full", "phase_full"):
             if self._need_dataset() is None: return
         else:
             if self._need_dataset() is None: return
@@ -2533,7 +2535,7 @@ class ACOMTabPanel(ctk.CTkFrame):
         # on the MAIN thread here; the worker honours the flag.
         self._use_cached_peaks = True
         self._peaks_load_path = None
-        if mode in ("full", "mp_full", "nnls_full"):
+        if mode in ("full", "mp_full", "nnls_full", "phase_full"):
             try:
                 stride = max(int(self._full_stride.get()), 1)
                 detect_kw = self._detect_kw_now()
@@ -2646,12 +2648,12 @@ class ACOMTabPanel(ctk.CTkFrame):
             assigns = assigns_grid = None
             src_name = ""
             class_ids = []
-            if mode not in ("full", "mp_full", "nnls_full"):
+            if mode not in ("full", "mp_full", "nnls_full", "phase_full"):
                 assigns_grid, src_name = self._batch_labels
                 assigns = assigns_grid.ravel()
                 class_ids = [int(c) for c in np.unique(assigns) if c >= 0]
 
-            if mode in ("full", "mp_full", "nnls_full"):
+            if mode in ("full", "mp_full", "nnls_full", "phase_full"):
                 from gui_app.posthoc_panel import _open_lazy
                 cube = _open_lazy(cfg["path"], scan_shape=(Ny, Nx))
                 stride = max(int(self._full_stride.get()), 1)
@@ -2697,6 +2699,61 @@ class ACOMTabPanel(ctk.CTkFrame):
                     self.after(0, lambda p=pname:
                         self._render_singlephase_full(
                             cr, omap, bv, scan_shape, stride, dt, p))
+                elif mode == "phase_full":
+                    # ONE detection + ONE matching pass -> correlation
+                    # winner maps; then (optionally) the NNLS fit on the
+                    # same matches.
+                    self._set_status(
+                        f"Phase map: detecting peaks (stride={stride})…")
+                    res = self._run_mp_full_cached(
+                        cube, stride, detect_kw, inv_a, thr, mar,
+                        crystals, _prog, min_peaks=self._min_peaks_val())
+                    bv = res.pop("bragg_peaks", None)
+                    res_disp = dict(res)
+                    _fill_stride(res_disp, Ny, Nx, stride)
+                    dt = time.time() - t0
+                    self.after(0, lambda r=res_disp, d=dt:
+                        self._render_mp_full_three(r, stride, d))
+                    if self._nnls_refine.get() and bv is not None:
+                        from gui_app.acom_core import (
+                            quantify_phase_safe, match_orientations_progress)
+                        from py4DSTEM.process.diffraction.crystal_phase \
+                            import CrystalPhase
+                        # NNLS reads each crystal's orientation_map; the
+                        # matcher's per-pattern fallback does not set it
+                        for nm, cr in crystals.items():
+                            om = getattr(cr, "orientation_map", None)
+                            shp = getattr(getattr(om, "corr", None),
+                                          "shape", (0, 0))
+                            if tuple(shp[:2]) != (Ny, Nx):
+                                match_orientations_progress(
+                                    cr, bv, min_peaks=self._min_peaks_val(),
+                                    stop_event=self._stop_event)
+                        names = list(crystals.keys())
+                        cp = CrystalPhase(list(crystals.values()),
+                                          crystal_names=names)
+                        self.after(0, lambda: self._set_status(
+                            "Phase map: NNLS refinement…"))
+                        failed = quantify_phase_safe(
+                            cp, bv, progress_cb=_prog,
+                            stop_event=self._stop_event,
+                            k_max=float(self._kmax.get()),
+                            corr_kernel_size=0.04,
+                            sigma_excitation_error=0.02,
+                            power_intensity=0.25,
+                            power_intensity_experiment=0.25,
+                            max_number_patterns=1, single_phase=True,
+                            allow_strain=True)
+                        cp._dino_names = names
+                        cp._nnls_failed = int(failed)
+                        _fill_stride(cp, Ny, Nx, stride)
+                        for _cr in crystals.values():
+                            _om = getattr(_cr, "orientation_map", None)
+                            if _om is not None:
+                                _fill_stride(_om, Ny, Nx, stride)
+                        dt = time.time() - t0
+                        self.after(0, lambda: self._render_nnls_full(
+                            cp, (Ny, Nx), stride, dt))
                 elif mode == "nnls_full":
                     self._set_status(
                         f"NNLS phase map: detecting peaks "
@@ -3201,7 +3258,8 @@ class ACOMTabPanel(ctk.CTkFrame):
             if m.any(): win_rmat[m] = rmat_per_g[pi][m]
         return dict(phase_names=names, phase_id=phase_id,
                       winning_corr=win_corr, winning_rmat=win_rmat,
-                      corr_per_phase=corr_per_g, scan_shape=(Ny, Nx))
+                      corr_per_phase=corr_per_g, scan_shape=(Ny, Nx),
+                      bragg_peaks=bv)
 
     def _render_mp_full_three(self, res, stride, elapsed_s):
         """Build phase / zone-axis / correlation maps, save each as its
@@ -3245,6 +3303,7 @@ class ACOMTabPanel(ctk.CTkFrame):
         self._mpfull = dict(
             scan_shape=(Ny, Nx), phase_rgb=phase_rgb, za_rgb=za_rgb,
             win_corr=win_corr, phase_id=phase_id, names=names,
+            kind="phase map, correlation winner",
             za_color=za_color, za_count=za_count, palette=palette)
 
         # Save dir.
