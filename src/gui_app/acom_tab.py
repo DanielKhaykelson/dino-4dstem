@@ -3020,10 +3020,19 @@ class ACOMTabPanel(ctk.CTkFrame):
         pal = self._phase_palette(n)
         from matplotlib.colors import to_rgb
         cols = np.array([to_rgb(c) for c in pal])
-        rgb = np.zeros((Ny, Nx, 3))
+        # Plain map: every indexed position in its phase colour, positions
+        # with no fit in light grey.  Shaded map: colour dimmed by
+        # reliability but never below 30 % -- multiplying straight by
+        # reliability turned low-reliability BLUE pixels black, so a
+        # phase could hold 12 % of the positions and stay invisible.
+        NOFIT = np.array([0.82, 0.82, 0.82])
+        plain = np.tile(NOFIT, (Ny, Nx, 1))
         for i in range(n):
-            rgb[dom == i] = cols[i]
-        rgb *= rel_c[..., None]
+            plain[dom == i] = cols[i]
+        shade = 0.30 + 0.70 * rel_c[..., None]
+        rgb = np.where((dom >= 0)[..., None], plain * shade, NOFIT)
+        REL_MIN = 0.10
+        reliable = has & (rel_c >= REL_MIN)
         base = self._acom_maps_dir()
         stamp = time.strftime("%H%M%S")
         try:
@@ -3037,27 +3046,39 @@ class ACOMTabPanel(ctk.CTkFrame):
             print(f"[NNLS full] array save failed: {e!r}", flush=True)
         fr = [float((dom == i).sum()) / max(int(has.sum()), 1)
               for i in range(n)]
-        # 1) dominant phase + reliability
-        fig = Figure(figsize=(9, 4.6), dpi=110, facecolor="white")
-        ax = fig.add_subplot(1, 2, 1)
+        fr_rel = [float(((dom == i) & reliable).sum())
+                  / max(int(reliable.sum()), 1) for i in range(n)]
+        # 1) dominant phase (plain + reliability-shaded) + reliability
+        fig = Figure(figsize=(13, 4.8), dpi=110, facecolor="white")
+        from matplotlib.patches import Patch
+        handles = [Patch(color=cols[i],
+                         label=f"{names[i]}  {100*fr[i]:.1f}% indexed · "
+                               f"{100*fr_rel[i]:.1f}% reliable")
+                   for i in range(n)]
+        handles.append(Patch(color=NOFIT, label="no fit"))
+        ax0 = fig.add_subplot(1, 3, 1)
+        ax0.imshow(plain, interpolation="nearest")
+        ax0.set_title("dominant phase (every indexed position)",
+                      fontsize=10)
+        ax0.set_xticks([]); ax0.set_yticks([])
+        ax = fig.add_subplot(1, 3, 2)
         ax.imshow(rgb, interpolation="nearest")
-        ax.set_title("dominant phase (brightness = reliability)",
+        ax.set_title("dominant phase, shaded by reliability",
                      fontsize=10)
         ax.set_xticks([]); ax.set_yticks([])
-        from matplotlib.patches import Patch
-        ax.legend(handles=[Patch(color=cols[i],
-                                 label=f"{names[i]}  {100*fr[i]:.1f}%")
-                           for i in range(n)],
-                  loc="upper right", fontsize=8, framealpha=0.85)
-        ax2 = fig.add_subplot(1, 2, 2)
+        fig.legend(handles=handles, loc="lower center",
+                   ncol=min(len(handles), 3), fontsize=8,
+                   framealpha=0.9)
+        ax2 = fig.add_subplot(1, 3, 3)
         im = ax2.imshow(rel, cmap="gray", vmin=0, vmax=1,
                         interpolation="nearest")
         ax2.set_title("phase reliability", fontsize=10)
         ax2.set_xticks([]); ax2.set_yticks([])
         fig.colorbar(im, ax=ax2, fraction=0.046, pad=0.04)
         fig.suptitle(f"NNLS phase map  (stride {stride}, "
-                     f"{elapsed_s:.0f}s)", fontsize=11)
-        fig.tight_layout()
+                     f"{elapsed_s:.0f}s;  reliable = reliability ≥ "
+                     f"{REL_MIN:g})", fontsize=11)
+        fig.tight_layout(rect=[0, 0.10, 1, 0.95])
         fig.savefig(os.path.join(base, f"nnls_dominant_phase_{stamp}.png"),
                     dpi=200, bbox_inches="tight", facecolor="white")
         self._popup_figure(fig, "NNLS dominant phase")
@@ -3104,7 +3125,8 @@ class ACOMTabPanel(ctk.CTkFrame):
             self._set_status(f"orientation maps failed: {e!r}"[:160])
         self._set_status(
             "NNLS phase map: " + ", ".join(
-                f"{names[i]} {100*fr[i]:.1f}%" for i in range(n))
+                f"{names[i]} {100*fr[i]:.1f}% indexed / "
+                f"{100*fr_rel[i]:.1f}% reliable" for i in range(n))
             + f"  -> {base}")
 
     # ==================================================================
