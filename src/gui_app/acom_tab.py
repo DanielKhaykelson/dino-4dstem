@@ -606,9 +606,9 @@ class ACOMTabPanel(ctk.CTkFrame):
             variable=self._overlay_src, values=["(none yet)"],
             width=160)
         self._ov_menu.pack(side="left", padx=2)
-        self._overlay_mode = ctk.StringVar(value="contour")
+        self._overlay_mode = ctk.StringVar(value="borders")
         ctk.CTkOptionMenu(ov_row, variable=self._overlay_mode,
-            values=["contour", "side-by-side"],
+            values=["borders", "tint", "side-by-side"],
             width=120).pack(side="left", padx=2)
         ov_base = ctk.CTkFrame(sidebar, fg_color="transparent")
         ov_base.pack(fill="x", padx=10, pady=1)
@@ -3046,7 +3046,8 @@ class ACOMTabPanel(ctk.CTkFrame):
         REL_MIN = 0.10
         reliable = has & (rel_c >= REL_MIN)
         self._mpfull = dict(scan_shape=(Ny, Nx), phase_rgb=plain,
-                            za_rgb=rgb, win_corr=rel, kind="NNLS phase map")
+                            za_rgb=rgb, win_corr=rel, kind="NNLS phase map",
+                            phase_id=dom, names=names)
         base = self._acom_maps_dir()
         stamp = time.strftime("%H%M%S")
         try:
@@ -3095,7 +3096,8 @@ class ACOMTabPanel(ctk.CTkFrame):
         fig.tight_layout(rect=[0, 0.10, 1, 0.95])
         fig.savefig(os.path.join(base, f"nnls_dominant_phase_{stamp}.png"),
                     dpi=200, bbox_inches="tight", facecolor="white")
-        self._popup_figure(fig, "NNLS dominant phase")
+        self._popup_figure(fig, "NNLS dominant phase",
+                           inspect_axes=[ax0, ax, ax2], scan_shape=(Ny, Nx))
         # 2) per-phase weights
         fig = Figure(figsize=(4.2 * n, 4.0), dpi=110, facecolor="white")
         for i in range(n):
@@ -3386,9 +3388,11 @@ class ACOMTabPanel(ctk.CTkFrame):
         fig.tight_layout()
         self._popup_figure(fig, "enlarged panel")
 
-    def _popup_figure(self, fig, title):
+    def _popup_figure(self, fig, title, inspect_axes=None, scan_shape=None):
         """Show a matplotlib Figure full-size in its own tk window
-        (plain tk widgets only, to avoid the CTk resize clash)."""
+        (plain tk widgets only, to avoid the CTk resize clash).
+        inspect_axes: scan-map axes where a LEFT click opens that
+        position's pattern + matched phase.  Returns the canvas."""
         from matplotlib.backends.backend_tkagg import (
             FigureCanvasTkAgg, NavigationToolbar2Tk)
         win = tk.Toplevel(self); win.title(title)
@@ -3399,7 +3403,167 @@ class ACOMTabPanel(ctk.CTkFrame):
         tbf = tk.Frame(win); tbf.pack(side="bottom", fill="x")
         tb = NavigationToolbar2Tk(c, tbf, pack_toolbar=False)
         tb.update(); tb.pack(side="left")
+        if inspect_axes:
+            self._attach_inspector(c, list(inspect_axes), scan_shape, tb)
+            tk.Label(tbf, text="left-click a pixel: pattern + matched phase",
+                     fg="#555").pack(side="left", padx=10)
         c.draw_idle()
+        return c
+
+    # ---- click a scan pixel -> its pattern + matched phase ----------
+    def _attach_inspector(self, canvas, axes, scan_shape, toolbar=None):
+        def _click(ev):
+            if ev.button != 1 or ev.inaxes not in axes or ev.xdata is None:
+                return
+            if toolbar is not None and getattr(toolbar, "mode", ""):
+                return                    # zoom / pan tool active
+            Ny, Nx = scan_shape or self._mpfull["scan_shape"]
+            x = max(0, min(Nx - 1, int(round(ev.xdata))))
+            y = max(0, min(Ny - 1, int(round(ev.ydata))))
+            self._inspect_position(y, x)
+        return canvas.mpl_connect("button_press_event", _click)
+
+    def _map_phase_at(self, y, x):
+        """What the last ACOM map assigned to (y, x)."""
+        mp = getattr(self, "_mpfull", None) or {}
+        pid, names = mp.get("phase_id"), mp.get("names")
+        if pid is None or names is None:
+            return None
+        try:
+            v = int(np.asarray(pid)[y, x])
+        except Exception:
+            return None
+        return {-1: "neither", -2: "ambiguous", -3: "not mapped"}.get(
+            v, names[v] if 0 <= v < len(names) else f"#{v}")
+
+    def _inspect_position(self, y, x):
+        """Pattern at scan (y, x) + Match-single against every built CIF
+        (same detection + calibration as the batch), in a popup."""
+        if self._active_sample() is None:
+            return
+        try:
+            Ny, Nx = SAMPLES[self._active_sample()]["scan_shape"]
+            pat = self._raw_ds().get_raw(int(y) * int(Nx) + int(x)
+                                         ).astype(np.float32)
+        except Exception as e:
+            messagebox.showerror("inspect", repr(e)); return
+        map_txt = self._map_phase_at(y, x)
+        H, W = pat.shape
+        center = (H / 2.0, W / 2.0)
+        crystals = dict(self._phase_crystals)
+        inv_a = float(self._inv_ang.get())       # raw frame: factor 1
+        det = dict(min_sigma=float(self._det_min.get()),
+                   max_sigma=float(self._det_max.get()),
+                   num_sigma=int(self._det_num.get()),
+                   threshold=float(self._det_thr.get()),
+                   log_stretch=bool(self._det_log.get()))
+        self._set_status(f"matching ({y}, {x}) against "
+                         f"{len(crystals)} phase(s)…")
+
+        def _w():
+            from gui_app.acom_core import (acom_single_pattern,
+                                           zone_axis_from_matrix,
+                                           detect_peaks_2d)
+            res = {}
+            for nm, cr in crystals.items():
+                try:
+                    r = acom_single_pattern(cr, pat, center=center,
+                                            inv_ang_per_pixel=inv_a,
+                                            detect_kw=det)
+                    try:
+                        za, mis = zone_axis_from_matrix(
+                            np.asarray(r["orientation"].matrix)[0])
+                    except Exception:
+                        za, mis = None, None
+                    r["za"], r["mis"] = za, mis
+                    res[nm] = r
+                except Exception as e:
+                    res[nm] = dict(error=repr(e))
+            try:
+                peaks = detect_peaks_2d(pat, **det)
+            except Exception:
+                peaks = np.zeros((0, 3))
+            self.after(0, lambda: self._show_inspect(
+                y, x, pat, peaks, res, map_txt, inv_a))
+        threading.Thread(target=_w, daemon=True).start()
+
+    def _show_inspect(self, y, x, pat, peaks, res, map_txt, inv_a):
+        ok = {n: r for n, r in res.items()
+              if "error" not in r and np.isfinite(r.get("corr", np.nan))}
+        best = max(ok, key=lambda n: ok[n]["corr"]) if ok else None
+        fig = Figure(figsize=(12.5, 6.0), dpi=100, facecolor="white")
+        a1 = fig.add_subplot(1, 2, 1)
+        img, vlo, vhi = self._stretch_img(pat)
+        try:
+            cmap = self._v_cmap.get()
+        except Exception:
+            cmap = "inferno"
+        a1.imshow(img, cmap=cmap, vmin=vlo, vmax=vhi,
+                  interpolation="nearest")
+        if len(peaks):
+            a1.scatter(peaks[:, 1], peaks[:, 0], s=60, facecolors="none",
+                       edgecolors="cyan", linewidths=1.1)
+        a1.set_title(f"pattern @ (y={y}, x={x})   {len(peaks)} peaks",
+                     fontsize=10)
+        a1.set_xticks([]); a1.set_yticks([])
+        a2 = fig.add_subplot(1, 2, 2)
+        if best is not None and ok[best].get("fit_pattern") is not None:
+            r = ok[best]
+            try:
+                from py4DSTEM.process.diffraction import (
+                    plot_diffraction_pattern)
+                fit, pl = r["fit_pattern"], r["calibrated_pl"]
+
+                def _sc(o, t=80.0):
+                    it = np.asarray(o.data["intensity"], float)
+                    it = it[it > 0]
+                    return float(t / np.median(it)) if it.size else 1.0
+                plot_diffraction_pattern(
+                    fit, bragg_peaks_compare=pl, scale_markers=_sc(fit),
+                    scale_markers_compare=_sc(pl), min_marker_size=2,
+                    add_labels=False, input_fig_handle=(fig, [a2]))
+                qx = np.asarray(fit.data["qx"], float)
+                qy = np.asarray(fit.data["qy"], float)
+                it = np.asarray(fit.data["intensity"], float)
+                hh = [np.asarray(fit.data[c]) for c in ("h", "k", "l")]
+                for j in np.argsort(-it)[:12]:
+                    a2.text(qy[j], qx[j] + 0.03,
+                            f"{int(hh[0][j])}{int(hh[1][j])}{int(hh[2][j])}",
+                            fontsize=6, color="#c00", ha="center",
+                            clip_on=True)
+                rq = 0.5 * min(pat.shape) * inv_a
+                a2.set_xlim(-rq, rq); a2.set_ylim(rq, -rq)
+                a2.set_aspect("equal")
+            except Exception as e:
+                a2.text(0.5, 0.5, f"plot error: {e!r}", ha="center",
+                        transform=a2.transAxes, fontsize=8)
+            za = r.get("za")
+            a2.set_title(f"best match: {best}  corr {r['corr']:.3f}"
+                         + (f"  ZA [{za[0]} {za[1]} {za[2]}]" if za is not None
+                            else "")
+                         + "\n(red = CIF hkl, cyan = experimental peaks)",
+                         fontsize=10)
+        else:
+            a2.text(0.5, 0.5, ("build at least one CIF (step 3)"
+                               if not res else "no phase could be matched "
+                               "here (too few peaks within k_max)"),
+                    ha="center", va="center", transform=a2.transAxes)
+            a2.set_xticks([]); a2.set_yticks([])
+        lines = []
+        for n, r in res.items():
+            if "error" in r:
+                lines.append(f"{n}: no match ({r['error'][:40]})")
+            else:
+                za = r.get("za")
+                lines.append(f"{n}: corr {r['corr']:.3f}"
+                             + (f", ZA [{za[0]} {za[1]} {za[2]}]"
+                                if za is not None else ""))
+        fig.suptitle((f"map says: {map_txt}    |    " if map_txt else "")
+                     + "    ".join(lines), fontsize=10)
+        fig.tight_layout(rect=[0, 0, 1, 0.94])
+        self._popup_figure(fig, f"pattern @ ({y}, {x})"
+                           + (f" — map: {map_txt}" if map_txt else ""))
+        self._set_status(f"({y}, {x}): " + ";  ".join(lines))
 
     # ---- overlay a label map (DINO / NMF / DINO+cluster) -----------
     def _resolve_overlay_labels(self, which):
@@ -3438,41 +3602,97 @@ class ACOMTabPanel(ctk.CTkFrame):
         K = int(labels.max()) + 1
         cmapL = (plt.get_cmap("tab10") if K <= 10
                    else plt.get_cmap("tab20"))
-        if self._overlay_mode.get() == "side-by-side":
-            fig = Figure(figsize=(13, 6.2), dpi=115, facecolor="white")
+        mode = self._overlay_mode.get()
+        if bg is None:
+            # correlation layer -> grey-scaled image to draw on
+            cn = np.nan_to_num(np.asarray(corr, float))
+            lo, hi = np.percentile(cn, [1, 99]) if cn.size else (0, 1)
+            g = np.clip((cn - lo) / max(hi - lo, 1e-9), 0, 1)
+            bg = plt.get_cmap("viridis")(g)[..., :3]
+        lab = np.asarray(labels)
+        segs = self._label_boundaries(lab)
+        from matplotlib.collections import LineCollection
+
+        def _edges(ax):
+            # crisp class borders along pixel edges: white over a thin
+            # dark halo, readable on any phase colour
+            ax.add_collection(LineCollection(segs, colors="black",
+                                             linewidths=2.2, alpha=0.55))
+            ax.add_collection(LineCollection(segs, colors="white",
+                                             linewidths=0.9))
+        if mode == "side-by-side":
+            fig = Figure(figsize=(13, 6.2), dpi=110, facecolor="white")
             axA = fig.add_subplot(1, 2, 1)
-            axB = fig.add_subplot(1, 2, 2)
-            if bg is not None:
-                axA.imshow(bg, interpolation="nearest", aspect="equal")
-            else:
-                axA.imshow(corr, cmap="viridis",
-                              interpolation="nearest", aspect="equal")
-            axA.set_title(f"ACOM {base}  ({kind})", fontsize=10)
-            axB.imshow(labels, cmap=cmapL, interpolation="nearest",
-                          aspect="equal", vmin=-0.5, vmax=K - 0.5)
-            axB.set_title(f"{which}  (K={K})", fontsize=10)
-            for a in (axA, axB):
-                a.set_xticks([]); a.set_yticks([])
+            axB = fig.add_subplot(1, 2, 2, sharex=axA, sharey=axA)
+            axA.imshow(bg, interpolation="nearest", aspect="equal")
+            _edges(axA)
+            axA.set_title(f"ACOM {base}  ({kind})\n+ {which} borders",
+                          fontsize=10)
+            axB.imshow(np.ma.masked_less(lab, 0), cmap=cmapL,
+                       interpolation="nearest", aspect="equal",
+                       vmin=-0.5, vmax=K - 0.5)
+            _edges(axB)
+            axB.set_title(f"{which}  (K={K})\nzoom / pan linked",
+                          fontsize=10)
+            for a_ in (axA, axB):
+                a_.set_xticks([]); a_.set_yticks([])
+            inspect = [axA, axB]
         else:
-            fig = Figure(figsize=(7.5, 6.8), dpi=120, facecolor="white")
+            fig = Figure(figsize=(7.8, 7.0), dpi=115, facecolor="white")
             ax = fig.add_subplot(111)
-            if bg is not None:
-                ax.imshow(bg, interpolation="nearest", aspect="equal")
+            if mode == "tint":
+                # classes as a translucent colour wash over the phase map
+                cl = cmapL(np.mod(np.clip(lab, 0, None), cmapL.N))[..., :3]
+                img = np.where((lab >= 0)[..., None],
+                               0.62 * np.asarray(bg, float) + 0.38 * cl,
+                               np.asarray(bg, float))
+                ax.imshow(img, interpolation="nearest", aspect="equal")
+                ttl = "tinted by"
             else:
-                ax.imshow(corr, cmap="viridis",
-                             interpolation="nearest", aspect="equal")
-            # Contour each cluster's boundary.
-            for c in range(K):
-                m = (labels == c).astype(float)
-                if m.sum() == 0: continue
-                ax.contour(m, levels=[0.5], colors=[cmapL(c % cmapL.N)],
-                              linewidths=1.0)
-            ax.set_title(f"ACOM {base} ({kind})  +  {which} contours "
-                         f"(K={K})", fontsize=10)
+                ax.imshow(bg, interpolation="nearest", aspect="equal")
+                ttl = "+ borders of"
+            _edges(ax)
+            ax.set_title(f"ACOM {base} ({kind})  {ttl}  {which}  (K={K})",
+                         fontsize=10)
             ax.set_xticks([]); ax.set_yticks([])
             self._add_scalebar(ax, Ny)
+            inspect = [ax]
         fig.tight_layout()
-        self._popup_figure(fig, f"overlay — {which} on {base}")
+        self._popup_figure(fig, f"overlay — {which} on {base} ({mode})",
+                           inspect_axes=inspect, scan_shape=(Ny, Nx))
+
+    @staticmethod
+    def _label_boundaries(lab):
+        """Pixel-edge segments between different labels, merged into
+        straight runs (a few hundred lines instead of contour blobs)."""
+        lab = np.asarray(lab)
+        Ny, Nx = lab.shape
+        segs = []
+        dv = lab[:, 1:] != lab[:, :-1]            # vertical edges
+        for j in range(Nx - 1):
+            col = dv[:, j]
+            i = 0
+            while i < Ny:
+                if col[i]:
+                    i0 = i
+                    while i < Ny and col[i]:
+                        i += 1
+                    segs.append([(j + 0.5, i0 - 0.5), (j + 0.5, i - 0.5)])
+                else:
+                    i += 1
+        dh = lab[1:, :] != lab[:-1, :]            # horizontal edges
+        for i in range(Ny - 1):
+            row = dh[i]
+            j = 0
+            while j < Nx:
+                if row[j]:
+                    j0 = j
+                    while j < Nx and row[j]:
+                        j += 1
+                    segs.append([(j0 - 0.5, i + 0.5), (j - 0.5, i + 0.5)])
+                else:
+                    j += 1
+        return segs
 
     def _render_nnls_full_map(self, cp, stride, elapsed_s):
         """Render py4DSTEM CrystalPhase outputs as a 2×2:
@@ -4305,8 +4525,12 @@ class ACOMTabPanel(ctk.CTkFrame):
 
         # stash for 'Overlay' (works on class / grain maps too, not only
         # on a full-dataset run)
+        _pid = np.full((Ny, Nx), -3, dtype=np.int16)
+        for _k, _gm in enumerate(region_masks):
+            _pid[_gm] = int(phase_id[_k])
         self._mpfull = dict(scan_shape=(Ny, Nx), phase_rgb=phase_rgb,
-                            za_rgb=za_rgb, kind=f"{mode} map")
+                            za_rgb=za_rgb, kind=f"{mode} map",
+                            phase_id=_pid, names=names)
         self._fig.clf()
         # leave the right quarter for the zone-axis legend
         gs = self._fig.add_gridspec(1, 2, wspace=0.08, left=0.03,
@@ -4439,8 +4663,9 @@ class ACOMTabPanel(ctk.CTkFrame):
                 title = (f"grain @ ({y},{x})  p{gi['cls']}  "
                            f"{gi['n_pix']}px  →  phase: {phase_txt}")
             else:
-                pat = self._raw_ds().get_raw(y * Nx + x).astype(np.float32)
-                title = (f"single ({y},{x})  →  phase: {phase_txt}")
+                # left click: pattern + Match-single, like step 4
+                self._inspect_position(y, x)
+                return
         except Exception as e:
             messagebox.showerror("inspect", repr(e)); return
         self._popup_diffraction(pat, title)
