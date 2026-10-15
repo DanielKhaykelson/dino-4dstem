@@ -125,6 +125,35 @@ original — your raw file is never modified.
 
 ---
 
+## More than classes — the full 4D-STEM toolbox
+
+The learned class map is the centre of the app, but the everyday 4D-STEM
+workflow is all there too — on the same loaded scan, no scripting.
+
+| Tab | What you can do |
+|---|---|
+| **Data ▸ Viewing** | **Virtual BF / HAADF** images of the scan; drag an *n × m* window for a live **mean diffraction pattern**; exposure + log stretch; **distance**, **radial** and **azimuthal** profile tools; **iCOM (DPC)** |
+| **Data ▸ Load + Pre-process** | **Flyback** detection for continuously streamed scans (finds lead-in / flyback frames and the real scan grid); **hot / dead pixel** removal; **NBED centering**; **ellipticity** correction; real-space **binning**; **denoising** and radial **flattening** (above) |
+| **Clustering ▸ NMF + cluster** | Model-free **NMF + clustering** baseline (k-means, agglomerative, HDBSCAN, fuzzy c-means) on polar or Cartesian patterns; interactive class map with a **live pattern** under the mouse and **class A − class B** difference patterns |
+| **Diffraction ▸ ACOM** (orientation & phase mapping) | Load **CIFs**, calibrate against the CIF rings, **match a single pattern**, then map **class averages**, **grains** or the **full scan**: phase map, zone-axis map, correlation, optional **NNLS phase refinement** (phase weights + reliability). Overlay the DINO / NMF classes on the result and **click any pixel** to see its pattern with the matched phase. A *fiber* search can be restricted to one viewing direction **[u v w]**. |
+| **Diffraction ▸ Blob** | Bragg-disk / blob detection per class (on DINO *or* NMF classes), strain and crystallinity maps |
+
+**Orientation and phase mapping is py4DSTEM's.** That tab is a graphical
+front end to py4DSTEM's crystal orientation and phase mapping
+(`Crystal.orientation_plan` / `match_orientations`,
+`CrystalPhase.quantify_phase`) — the matching and the NNLS phase fit are
+py4DSTEM's work, not ours. If you use it, please cite
+[py4DSTEM](https://github.com/py4dstem/py4DSTEM) (Savitzky *et al.*,
+*Microscopy and Microanalysis* 2021) and its orientation-mapping paper
+(Ophus *et al.*, *Microscopy and Microanalysis* 2022).
+
+**Where results go.** Every analysis tab saves into one folder next to your
+data — `<data name>_DINO4DSTEM/` with a sub-folder per tool (`nmf/`, `blob/`,
+`acom/`, …) and a README inside. The **Open outputs folder** button in the top
+bar takes you there.
+
+---
+
 ## Get started — pick your platform
 
 Each bundle is the whole app with the right launchers for your OS. All three
