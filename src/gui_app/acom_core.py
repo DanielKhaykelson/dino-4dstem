@@ -81,7 +81,14 @@ def load_crystal(cif_path: str):
     if not os.path.exists(cif_path):
         raise FileNotFoundError(cif_path)
     try:
-        return Crystal.from_CIF(cif_path)
+        # Keep the CIF's own axes: pymatgen's standardisation (py4DSTEM's
+        # default) can reorder a/b/c, and then a typed view direction
+        # [u v w] would refer to different axes than the file's.
+        try:
+            return Crystal.from_CIF(cif_path, primitive=False,
+                                    conventional_standard_structure=False)
+        except TypeError:
+            return Crystal.from_CIF(cif_path)
     except Exception as e_pmg:
         # Fall back to ASE (handles multi-block / SHELX-laden CIFs).
         try:
