@@ -2876,6 +2876,8 @@ class ACOMTabPanel(ctk.CTkFrame):
                         dt = time.time() - t0
                         self.after(0, lambda: self._render_nnls_full(
                             cp, (Ny, Nx), stride, dt))
+                        self.after(0, lambda r=res_disp: self._render_phase_compare(
+                            r, cp, (Ny, Nx), stride))
                 elif mode == "nnls_full":
                     self._set_status(
                         f"NNLS phase map: detecting peaks "
@@ -3190,6 +3192,72 @@ class ACOMTabPanel(ctk.CTkFrame):
         cp._dino_names = names
         cp._nnls_failed = int(failed)
         return cp
+
+    def _render_phase_compare(self, res, cp, scan_shape, stride):
+        """Correlation winner vs NNLS, side by side, plus where they agree.
+        Correlation rewards predicted spots that hit peaks (CIFs with more
+        reflections score higher); NNLS fits the intensities and penalises
+        predicted spots that are missing -- so they can disagree."""
+        from matplotlib.colors import to_rgb
+        from matplotlib.patches import Patch
+        Ny, Nx = scan_shape
+        names = list(res.get("phase_names") or getattr(cp, "_dino_names", []))
+        n = len(names)
+        pc = np.asarray(res["phase_id"]).reshape(Ny, Nx)       # -1/-2 = none
+        w = np.asarray(cp.phase_weights, float).reshape(Ny, Nx, -1)[..., :n]
+        has = w.sum(-1) > 0
+        pn = np.where(has, np.argmax(w, axis=-1), -1)
+        pal = self._phase_palette(n)
+        cols = np.array([to_rgb(c) for c in pal])
+        NONE = np.array([0.82, 0.82, 0.82])
+
+        def _rgb(pid):
+            out = np.tile(NONE, (Ny, Nx, 1))
+            for i in range(n):
+                out[pid == i] = cols[i]
+            return out
+        both = (pc >= 0) & (pn >= 0)
+        agree = both & (pc == pn)
+        ag = np.tile(NONE, (Ny, Nx, 1))
+        ag[both] = (0.85, 0.25, 0.25)                         # disagree
+        ag[agree] = (0.20, 0.65, 0.30)                        # agree
+        pct = 100.0 * agree.sum() / max(int(both.sum()), 1)
+        # correlation -> NNLS table
+        rows = []
+        for i in range(n):
+            m = both & (pc == i)
+            if m.any():
+                parts = ", ".join(f"{names[j]} {int((m & (pn == j)).sum())}"
+                                  for j in range(n))
+                rows.append(f"corr {names[i]} ({int(m.sum())}) -> NNLS: {parts}")
+        fig = Figure(figsize=(14, 5.6), dpi=105, facecolor="white")
+        axs = [fig.add_subplot(1, 3, k + 1) for k in range(3)]
+        for a, img, ttl in ((axs[0], _rgb(pc), "correlation winner"),
+                            (axs[1], _rgb(pn), "NNLS dominant phase"),
+                            (axs[2], ag, f"agreement: {pct:.1f}% of "
+                                         f"positions with both")):
+            a.imshow(img, interpolation="nearest", aspect="equal")
+            a.set_title(ttl, fontsize=11)
+            a.set_xticks([]); a.set_yticks([])
+        handles = [Patch(color=cols[i], label=names[i]) for i in range(n)]
+        handles += [Patch(color=NONE, label="no result / neither"),
+                    Patch(color=(0.20, 0.65, 0.30), label="agree"),
+                    Patch(color=(0.85, 0.25, 0.25), label="disagree")]
+        fig.legend(handles=handles, loc="lower center",
+                   ncol=min(len(handles), 6), fontsize=8.5, framealpha=0.9)
+        fig.suptitle("Correlation vs NNLS  (stride %d)\n" % stride
+                     + "\n".join(rows), fontsize=9.5)
+        fig.tight_layout(rect=[0, 0.07, 1, 0.88 - 0.03 * len(rows)])
+        try:
+            fig.savefig(os.path.join(self._acom_maps_dir(),
+                                     "phase_corr_vs_nnls.png"),
+                        dpi=180, bbox_inches="tight", facecolor="white")
+        except Exception:
+            pass
+        self._popup_figure(fig, "Phase map: correlation vs NNLS",
+                           inspect_axes=axs, scan_shape=(Ny, Nx))
+        self._set_status(f"correlation vs NNLS: {pct:.1f}% agree.  "
+                         + "  |  ".join(rows))
 
     def _render_nnls_full(self, cp, scan_shape, stride, elapsed_s):
         """Notebook cells 54-57: dominant phase (brightness =
