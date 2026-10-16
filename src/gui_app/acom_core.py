@@ -314,6 +314,7 @@ def detect_peaks_2d(pattern: np.ndarray,
                        threshold: float = 0.02,
                        overlap: float = 0.4,
                        log_stretch: bool = True,
+                       vmax: float = 0.0,
                        py4dstem_params: Optional[dict] = None
                        ) -> np.ndarray:
     """Detect Bragg peaks on a single 2D pattern.
@@ -332,6 +333,11 @@ def detect_peaks_2d(pattern: np.ndarray,
     pat = np.asarray(pattern, dtype=np.float32)
     if pat.ndim != 2:
         raise ValueError(f"pattern must be 2D, got shape {pat.shape}")
+    # vmax (counts, 0 = off): clip before detection.  The detector scales
+    # each pattern by its maximum -- usually the direct beam -- so without
+    # a cap weak reflections fall under the threshold.
+    if vmax and float(vmax) > 0:
+        pat = np.minimum(pat, np.float32(vmax))
 
     if probe_kernel is not None:
         # py4DSTEM template matching path.
