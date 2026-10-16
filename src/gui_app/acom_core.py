@@ -117,6 +117,7 @@ def _ensure_cuda_dll_path():
 
 def prepare_crystal(crystal,
                      k_max: float = 2.0,
+                     k_min: float = 0.0,
                      accel_voltage: float = 300e3,
                      plan_mode: str = "fiber",
                      fiber_axis: Sequence[float] = (0.0, 0.0, 1.0),
@@ -158,6 +159,20 @@ def prepare_crystal(crystal,
         raise
     except TypeError:
         crystal.calculate_structure_factors(k_max)
+    # q window: drop reflections below k_min (the orientation plan and the
+    # simulated patterns both read these per-reflection arrays)
+    if k_min and float(k_min) > 0:
+        if float(k_min) >= k_max:
+            raise ValueError(f"k_min ({k_min}) must be below k_max "
+                             f"({k_max}).")
+        keep = np.asarray(crystal.g_vec_leng) >= float(k_min)
+        crystal.g_vec_all = np.asarray(crystal.g_vec_all)[:, keep]
+        crystal.g_vec_leng = np.asarray(crystal.g_vec_leng)[keep]
+        crystal.hkl = np.asarray(crystal.hkl)[:, keep]
+        crystal.struct_factors = np.asarray(crystal.struct_factors)[keep]
+        crystal.struct_factors_int = np.asarray(
+            crystal.struct_factors_int)[keep]
+        crystal.k_min = float(k_min)
     # Sanity: if still empty, give a clear message.
     gl = getattr(crystal, "g_vec_leng", None)
     if gl is not None and len(gl) == 0:
@@ -402,11 +417,27 @@ def detect_peaks_2d(pattern: np.ndarray,
 # BraggVectors construction (per pattern OR list of patterns)
 # ---------------------------------------------------------------------------
 
+# Lower edge of the fitting window (1/Å).  The GUI's k_min: measured peaks
+# below it are dropped when BraggVectors are built, and prepare_crystal
+# drops simulated reflections below it, so matching / NNLS only compare
+# k_min <= |g| <= k_max.
+_Q_MIN = 0.0
+
+
+def set_q_min(q_min) -> None:
+    global _Q_MIN
+    try:
+        _Q_MIN = max(float(q_min or 0.0), 0.0)
+    except Exception:
+        _Q_MIN = 0.0
+
+
 def build_bragg_vectors(peak_lists: Sequence[np.ndarray],
                           *,
                           centers: Optional[Sequence[Tuple[float, float]]] = None,
                           inv_ang_per_pixel: float = 0.00185,
                           Rshape: Optional[Tuple[int, int]] = None,
+                          q_min: Optional[float] = None,
                           ):
     """Wrap a sequence of peak arrays into a calibrated BraggVectors.
 
@@ -470,6 +501,10 @@ def build_bragg_vectors(peak_lists: Sequence[np.ndarray],
             cx, cy = centers[k]
             qx -= float(cx)
             qy -= float(cy)
+        qm = _Q_MIN if q_min is None else float(q_min)
+        if qm > 0:
+            keep = np.hypot(qx, qy) * float(inv_ang_per_pixel) >= qm
+            qx, qy, inten = qx[keep], qy[keep], inten[keep]
         arr = np.zeros(len(qx), dtype=dt)
         arr["qx"] = qx; arr["qy"] = qy; arr["intensity"] = inten
         pla[rx, ry] = _make_point_list(arr)

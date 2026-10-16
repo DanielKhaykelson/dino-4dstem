@@ -364,7 +364,16 @@ class ACOMTabPanel(ctk.CTkFrame):
                        width=92, anchor="w").pack(side="left")
         self._kmax = ctk.DoubleVar(value=2.0)
         ctk.CTkEntry(kmax_row, textvariable=self._kmax,
-                       width=70).pack(side="left", padx=2)
+                       width=56).pack(side="left", padx=2)
+        # lower edge of the fitting window: reflections / measured peaks
+        # with |g| < k_min are left out of matching and NNLS
+        ctk.CTkLabel(kmax_row, text="k_min:").pack(side="left",
+                                                  padx=(6, 2))
+        self._kmin = ctk.DoubleVar(value=0.0)
+        _e_kmin = ctk.CTkEntry(kmax_row, textvariable=self._kmin,
+                               width=46)
+        _e_kmin.pack(side="left", padx=2)
+        _e_kmin.bind("<Return>", lambda _e: self._apply_kmin())
         # where the detector ends (from the calibration) -- k_max beyond
         # it only adds reflections the camera cannot record
         self._kedge_lbl = ctk.CTkLabel(kmax_row, text="",
@@ -1622,6 +1631,10 @@ class ACOMTabPanel(ctk.CTkFrame):
             else:
                 kmax = round(q_edge, 3)
                 self._kmax.set(kmax)
+        kmin = self._apply_kmin()
+        if kmin >= kmax:
+            messagebox.showerror("CIF build",
+                f"k_min ({kmin:g}) must be below k_max ({kmax:g})."); return
         plan_kw = self._plan_kwargs()
         def _w():
             from gui_app.acom_core import load_crystal, prepare_crystal
@@ -1630,7 +1643,7 @@ class ACOMTabPanel(ctk.CTkFrame):
             for i, (name, cif) in enumerate(self._phases):
                 # cache key includes ALL plan params so changing the
                 # angular resolution / mode triggers a rebuild.
-                key = (cif, kmax, plan, plan_kw["angle_step_zone_axis"],
+                key = (cif, kmax, kmin, plan, plan_kw["angle_step_zone_axis"],
                        plan_kw["angle_step_in_plane"],
                        tuple(plan_kw["fiber_axis"]),
                        tuple(plan_kw["fiber_angles"]),
@@ -1644,7 +1657,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                             text=f"building [{i+1}/{len(self._phases)}] "
                                   f"{n}…"))
                     cr = load_crystal(cif)
-                    prepare_crystal(cr, k_max=kmax, **plan_kw)
+                    prepare_crystal(cr, k_max=kmax, k_min=kmin, **plan_kw)
                     self._phase_crystals[name] = cr
                     self._phase_keys[name] = key
                 except Exception as e:
@@ -1868,6 +1881,24 @@ class ACOMTabPanel(ctk.CTkFrame):
                 Line2D([0], [0], marker="o", color="#e0144c",
                           markeredgecolor="white", markersize=6,
                           lw=0, label=f"detected peaks ({peak_q.size})"))
+        # fitting window k_min .. k_max: grey out what the fit ignores
+        try:
+            _kmin = max(float(self._kmin.get()), 0.0)
+            _kmax = float(self._kmax.get())
+            _xr = float(rc_inva.max())
+            if _kmin > 0:
+                ax.axvspan(0.0, min(_kmin, _xr), color="#888", alpha=0.18,
+                           zorder=0, lw=0)
+            if 0 < _kmax < _xr:
+                ax.axvspan(_kmax, _xr, color="#888", alpha=0.18, zorder=0,
+                           lw=0)
+            if _kmin > 0 or 0 < _kmax < _xr:
+                from matplotlib.patches import Patch as _P
+                leg_handles.append(_P(color="#888", alpha=0.35,
+                                      label="outside k_min..k_max "
+                                            "(not fitted)"))
+        except Exception:
+            pass
         ax.legend(handles=leg_handles, loc="upper right",
                     fontsize=8, framealpha=0.6)
         ax.set_xlabel("q  (1/Å)")
@@ -2593,6 +2624,28 @@ class ACOMTabPanel(ctk.CTkFrame):
         threading.Thread(
             target=lambda: self._batch_worker(mode),
             daemon=True).start()
+
+    def _apply_kmin(self) -> float:
+        """Read k_min, push it to acom_core (measured peaks below it are
+        dropped wherever BraggVectors are built) and redraw the window on
+        the 1D panel.  Simulated reflections follow on the next 'Build
+        all'.  Returns k_min."""
+        try:
+            km = max(float(self._kmin.get()), 0.0)
+        except Exception:
+            km = 0.0
+        from gui_app.acom_core import set_q_min
+        set_q_min(km)
+        built = {round(float(getattr(c, "k_min", 0.0)), 6)
+                 for c in self._phase_crystals.values()}
+        if self._phase_crystals and built != {round(km, 6)}:
+            self._set_status(f"k_min = {km:g}: press 'Build all' so the "
+                             f"simulated reflections use the same window.")
+        try:
+            self._redraw_1d_with_rings()
+        except Exception:
+            pass
+        return km
 
     def _det_vmax_val(self) -> float:
         try:
@@ -3571,11 +3624,19 @@ class ACOMTabPanel(ctk.CTkFrame):
         threading.Thread(target=_w, daemon=True).start()
 
     def _show_inspect(self, y, x, pat, peaks, res, map_txt, inv_a):
+        """Pattern + best match, with check boxes that show / hide the
+        found peaks, the matched (simulated) spots and the hkl labels in
+        BOTH panels -- the matched spots are also drawn on the pattern."""
+        from matplotlib.backends.backend_tkagg import (
+            FigureCanvasTkAgg, NavigationToolbar2Tk)
         ok = {n: r for n, r in res.items()
               if "error" not in r and np.isfinite(r.get("corr", np.nan))}
         best = max(ok, key=lambda n: ok[n]["corr"]) if ok else None
+        H, W = pat.shape
+        cy0, cx0 = H / 2.0, W / 2.0
         fig = Figure(figsize=(12.5, 6.0), dpi=100, facecolor="white")
         a1 = fig.add_subplot(1, 2, 1)
+        a2 = fig.add_subplot(1, 2, 2)
         img, vlo, vhi = self._stretch_img(pat)
         try:
             cmap = self._v_cmap.get()
@@ -3583,53 +3644,71 @@ class ACOMTabPanel(ctk.CTkFrame):
             cmap = "inferno"
         a1.imshow(img, cmap=cmap, vmin=vlo, vmax=vhi,
                   interpolation="nearest")
-        if len(peaks):
-            a1.scatter(peaks[:, 1], peaks[:, 0], s=60, facecolors="none",
-                       edgecolors="cyan", linewidths=1.1)
-        a1.set_title(f"pattern @ (y={y}, x={x})   {len(peaks)} peaks",
-                     fontsize=10)
         a1.set_xticks([]); a1.set_yticks([])
-        a2 = fig.add_subplot(1, 2, 2)
-        if best is not None and ok[best].get("fit_pattern") is not None:
+        groups = {"found": [], "matched": [], "hkl": []}
+        if len(peaks):
+            groups["found"].append(a1.scatter(
+                peaks[:, 1], peaks[:, 0], s=60, facecolors="none",
+                edgecolors="cyan", linewidths=1.1, zorder=3))
+        a1.set_title(f"pattern @ (y={y}, x={x})   {len(peaks)} peaks found",
+                     fontsize=10)
+        rq = 0.5 * min(H, W) * inv_a
+        if best is not None:
             r = ok[best]
+            pl, fit = r.get("calibrated_pl"), r.get("fit_pattern")
+            # found peaks in q (what the matcher compared against)
             try:
-                from py4DSTEM.process.diffraction import (
-                    plot_diffraction_pattern)
-                fit, pl = r["fit_pattern"], r["calibrated_pl"]
-
-                def _sc(o, t=80.0):
-                    it = np.asarray(o.data["intensity"], float)
-                    it = it[it > 0]
-                    return float(t / np.median(it)) if it.size else 1.0
-                plot_diffraction_pattern(
-                    fit, bragg_peaks_compare=pl, scale_markers=_sc(fit),
-                    scale_markers_compare=_sc(pl), min_marker_size=2,
-                    add_labels=False, input_fig_handle=(fig, [a2]))
-                qx = np.asarray(fit.data["qx"], float)
-                qy = np.asarray(fit.data["qy"], float)
-                it = np.asarray(fit.data["intensity"], float)
-                hh = [np.asarray(fit.data[c]) for c in ("h", "k", "l")]
-                for j in np.argsort(-it)[:12]:
-                    a2.text(qy[j], qx[j] + 0.03,
-                            f"{int(hh[0][j])}{int(hh[1][j])}{int(hh[2][j])}",
-                            fontsize=6, color="#c00", ha="center",
-                            clip_on=True)
-                rq = 0.5 * min(pat.shape) * inv_a
-                a2.set_xlim(-rq, rq); a2.set_ylim(rq, -rq)
-                a2.set_aspect("equal")
-            except Exception as e:
-                a2.text(0.5, 0.5, f"plot error: {e!r}", ha="center",
-                        transform=a2.transAxes, fontsize=8)
+                ex = np.asarray(pl.data["qx"], float)
+                ey = np.asarray(pl.data["qy"], float)
+                ei = np.asarray(pl.data["intensity"], float)
+                sz = 30 + 220 * np.sqrt(ei / max(ei.max(), 1e-12))
+                groups["found"].append(a2.scatter(
+                    ey, ex, s=sz, facecolors="none", edgecolors="#0aa",
+                    linewidths=1.0, zorder=3))
+            except Exception:
+                pass
+            if fit is not None:
+                fx = np.asarray(fit.data["qx"], float)
+                fy = np.asarray(fit.data["qy"], float)
+                fi = np.asarray(fit.data["intensity"], float)
+                fs = 20 + 200 * np.sqrt(fi / max(fi.max(), 1e-12))
+                groups["matched"].append(a2.scatter(
+                    fy, fx, s=fs, marker="+", c="red", linewidths=1.2,
+                    zorder=4))
+                # same spots on the pattern (pixels)
+                rows, cols = cy0 + fx / inv_a, cx0 + fy / inv_a
+                inside = ((rows >= 0) & (rows < H) & (cols >= 0)
+                          & (cols < W))
+                groups["matched"].append(a1.scatter(
+                    cols[inside], rows[inside], s=fs[inside], marker="+",
+                    c="red", linewidths=1.2, zorder=4))
+                try:
+                    hh = [np.asarray(fit.data[c]) for c in ("h", "k", "l")]
+                    for j in np.argsort(-fi)[:12]:
+                        t = (f"{int(hh[0][j])}{int(hh[1][j])}"
+                             f"{int(hh[2][j])}")
+                        groups["hkl"].append(a2.text(
+                            fy[j], fx[j] + 0.03 * rq / 0.5, t, fontsize=6,
+                            color="#c00", ha="center", clip_on=True))
+                        if inside[j]:
+                            groups["hkl"].append(a1.text(
+                                cols[j], rows[j] - 6, t, fontsize=6,
+                                color="#f66", ha="center", clip_on=True))
+                except Exception:
+                    pass
+            a2.set_xlim(-rq, rq); a2.set_ylim(rq, -rq)
+            a2.set_aspect("equal")
+            a2.set_xlabel("q (1/Å)"); a2.set_ylabel("q (1/Å)")
             za = r.get("za")
             a2.set_title(f"best match: {best}  corr {r['corr']:.3f}"
                          + (f"  ZA [{za[0]} {za[1]} {za[2]}]" if za is not None
                             else "")
-                         + "\n(red = CIF hkl, cyan = experimental peaks)",
-                         fontsize=10)
+                         + "\n(red + = matched CIF spots, cyan o = found "
+                           "peaks)", fontsize=10)
         else:
             a2.text(0.5, 0.5, ("build at least one CIF (step 3)"
                                if not res else "no phase could be matched "
-                               "here (too few peaks within k_max)"),
+                               "here (too few peaks in k_min..k_max)"),
                     ha="center", va="center", transform=a2.transAxes)
             a2.set_xticks([]); a2.set_yticks([])
         lines = []
@@ -3644,8 +3723,31 @@ class ACOMTabPanel(ctk.CTkFrame):
         fig.suptitle((f"map says: {map_txt}    |    " if map_txt else "")
                      + "    ".join(lines), fontsize=10)
         fig.tight_layout(rect=[0, 0, 1, 0.94])
-        self._popup_figure(fig, f"pattern @ ({y}, {x})"
-                           + (f" — map: {map_txt}" if map_txt else ""))
+
+        win = tk.Toplevel(self)
+        win.title(f"pattern @ ({y}, {x})"
+                  + (f" — map: {map_txt}" if map_txt else ""))
+        win.geometry("1250x700")
+        bar = tk.Frame(win); bar.pack(side="top", fill="x")
+        canvas = FigureCanvasTkAgg(fig, master=win)
+        canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
+        tbf = tk.Frame(win); tbf.pack(side="bottom", fill="x")
+        tb = NavigationToolbar2Tk(canvas, tbf, pack_toolbar=False)
+        tb.update(); tb.pack(side="left")
+        tk.Label(bar, text="show:").pack(side="left", padx=(8, 2))
+        for key, label in (("found", "found peaks (cyan o)"),
+                           ("matched", "matched spots (red +)"),
+                           ("hkl", "hkl labels")):
+            v = tk.BooleanVar(value=True)
+
+            def _toggle(k=key, var=v):
+                for art in groups[k]:
+                    art.set_visible(bool(var.get()))
+                canvas.draw_idle()
+            tk.Checkbutton(bar, text=label, variable=v,
+                           command=_toggle).pack(side="left", padx=6)
+            win.__dict__.setdefault("_vars", []).append(v)  # keep alive
+        canvas.draw_idle()
         self._set_status(f"({y}, {x}): " + ";  ".join(lines))
 
     # ---- overlay a label map (DINO / NMF / DINO+cluster) -----------
