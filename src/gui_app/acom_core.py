@@ -126,7 +126,8 @@ def prepare_crystal(crystal,
                      angle_step_zone_axis: float = 2.0,
                      angle_step_in_plane: float = 2.0,
                      corr_kernel_size: float = 0.05,
-                     use_cuda: bool = False):
+                     use_cuda: bool = False,
+                     positions_only: bool = False):
     """Compute structure factors + orientation plan in one shot.
 
     Defaults match what `blob_acom_panel.py` uses in the GUI — fiber
@@ -193,7 +194,11 @@ def prepare_crystal(crystal,
         corr_kernel_size=float(corr_kernel_size),
         # power knobs — names changed between 0.13 and 0.14
         power_radial=1.0, radial_power=1.0,
-        power_intensity=0.25, intensity_power=0.25,
+        # positions_only: every reflection / peak weighs 1, so the match
+        # depends on spot POSITIONS only (exponent 0 on both intensities)
+        power_intensity=0.0 if positions_only else 0.25,
+        intensity_power=0.0 if positions_only else 0.25,
+        power_intensity_experiment=0.0 if positions_only else 0.25,
         tol_distance=0.01, tol_intensity=1e-3,
         progress_bar=False,
     )

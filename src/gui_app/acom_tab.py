@@ -433,8 +433,27 @@ class ACOMTabPanel(ctk.CTkFrame):
                        width=40).pack(side="left", padx=2)
         # GPU (CUDA) — only effective if cupy is installed.
         self._use_gpu = ctk.BooleanVar(value=False)
+        # match / fit spot POSITIONS only (intensity exponent 0): robust to
+        # dynamical / thickness intensity changes; part of the crystal key
+        self._pos_only = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(fib_row, text="GPU", variable=self._use_gpu,
                           width=50).pack(side="left", padx=(8, 2))
+        pos_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        pos_row.pack(fill="x", padx=10, pady=1)
+        ctk.CTkCheckBox(pos_row,
+            text="positions only (ignore intensities)",
+            variable=self._pos_only).pack(side="left")
+        from gui_app.tooltip import add_help_button
+        add_help_button(pos_row,
+            "Match and NNLS-fit spot POSITIONS only: every reflection and "
+            "every measured peak weighs 1 (py4DSTEM intensity exponents "
+            "power_intensity = power_intensity_experiment = 0; default "
+            "0.25).  Use when intensities are unreliable (thickness, "
+            "dynamical scattering, beam damage).  Positions-only "
+            "CORRELATION still favours CIFs with denser reflection sets; "
+            "NNLS penalises predicted spots that are missing, which "
+            "corrects for that.  Press 'Build all' after changing it."
+            ).pack(side="left", padx=4)
         from gui_app.tooltip import add_help_button
         add_help_button(fib_row,
             "Orientation-search coverage = py4DSTEM orientation_plan's "
@@ -1611,7 +1630,8 @@ class ACOMTabPanel(ctk.CTkFrame):
                      angle_step_in_plane=ip,
                      fiber_axis=fib,
                      fiber_angles=(tilt, 360.0),
-                     use_cuda=bool(self._use_gpu.get()))
+                     use_cuda=bool(self._use_gpu.get()),
+                     positions_only=bool(self._pos_only.get()))
 
     def _build_all_phases(self):
         if not self._phases:
@@ -1660,7 +1680,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                        plan_kw["angle_step_in_plane"],
                        tuple(plan_kw["fiber_axis"]),
                        tuple(plan_kw["fiber_angles"]),
-                       plan_kw["use_cuda"])
+                       plan_kw["use_cuda"], plan_kw["positions_only"])
                 if (self._phase_keys.get(name) == key
                         and name in self._phase_crystals):
                     continue
@@ -2125,7 +2145,7 @@ class ACOMTabPanel(ctk.CTkFrame):
     # ---- NNLS multi-phase fit (mirrors the py4DSTEM colab) ---------
     def _build_phase_for_patterns(self, patterns_list,
                                        centers_list, Rshape,
-                                       drop_center_px=0.0):
+                                       drop_center_px=0.0, inv_a=None):
         """Build a CrystalPhase + calibrated BV for one OR many test
         patterns.  Runs match_orientations on every phase to populate
         crystal.orientation_map (required by quantify_*).  Returns
@@ -2158,7 +2178,8 @@ class ACOMTabPanel(ctk.CTkFrame):
             peak_arrays = kept
         bv = build_bragg_vectors(
             peak_arrays, centers=centers_list,
-            inv_ang_per_pixel=self._eff_inv_ang(),
+            inv_ang_per_pixel=(float(inv_a) if inv_a is not None
+                               else self._eff_inv_ang()),
             Rshape=Rshape)
         names = list(self._phase_crystals.keys())
         crystals = list(self._phase_crystals.values())
@@ -2238,8 +2259,8 @@ class ACOMTabPanel(ctk.CTkFrame):
                 bv, xy_position=(0, 0), k_max=kmax,
                 corr_kernel_size=0.04,
                 sigma_excitation_error=0.02,
-                power_intensity=0.25,
-                power_intensity_experiment=0.25,
+                power_intensity=self._int_pow(),
+                power_intensity_experiment=self._int_pow(),
                 max_number_patterns=1,
                 allow_strain=False,
                 plot_result=True, returnfig=True,
@@ -2663,6 +2684,13 @@ class ACOMTabPanel(ctk.CTkFrame):
             pass
         return km
 
+    def _int_pow(self) -> float:
+        """Intensity exponent for NNLS: 0 = positions only."""
+        try:
+            return 0.0 if bool(self._pos_only.get()) else 0.25
+        except Exception:
+            return 0.25
+
     def _det_vmax_val(self) -> float:
         try:
             return max(float(self._det_vmax.get()), 0.0)
@@ -2834,8 +2862,8 @@ class ACOMTabPanel(ctk.CTkFrame):
                             k_max=float(self._kmax.get()),
                             corr_kernel_size=0.04,
                             sigma_excitation_error=0.02,
-                            power_intensity=0.25,
-                            power_intensity_experiment=0.25,
+                            power_intensity=self._int_pow(),
+                            power_intensity_experiment=self._int_pow(),
                             max_number_patterns=1, single_phase=True,
                             allow_strain=True)
                         cp._dino_names = names
@@ -3150,8 +3178,8 @@ class ACOMTabPanel(ctk.CTkFrame):
             k_max=float(self._kmax.get()),
             corr_kernel_size=0.04,
             sigma_excitation_error=0.02,
-            power_intensity=0.25,
-            power_intensity_experiment=0.25,
+            power_intensity=self._int_pow(),
+            power_intensity_experiment=self._int_pow(),
             max_number_patterns=1,
             single_phase=True,
             allow_strain=True)
@@ -3198,6 +3226,7 @@ class ACOMTabPanel(ctk.CTkFrame):
         reliable = has & (rel_c >= REL_MIN)
         self._mpfull = dict(scan_shape=(Ny, Nx), phase_rgb=plain,
                             za_rgb=rgb, win_corr=rel, kind="NNLS phase map",
+                            stride=int(stride),
                             phase_id=dom, names=names)
         base = self._acom_maps_dir()
         stamp = time.strftime("%H%M%S")
@@ -3391,7 +3420,7 @@ class ACOMTabPanel(ctk.CTkFrame):
         self._mpfull = dict(
             scan_shape=(Ny, Nx), phase_rgb=phase_rgb, za_rgb=za_rgb,
             win_corr=win_corr, phase_id=phase_id, names=names,
-            kind="phase map, correlation winner",
+            kind="phase map, correlation winner", stride=int(stride),
             za_color=za_color, za_count=za_count, palette=palette)
 
         # Save dir.
@@ -3588,6 +3617,14 @@ class ACOMTabPanel(ctk.CTkFrame):
         (same detection + calibration as the batch), in a popup."""
         if self._active_sample() is None:
             return
+        # On a strided map every value was computed at the corner of its
+        # stride x stride block; analyse THAT position so the comparison
+        # with the map is like for like.
+        mp = getattr(self, "_mpfull", None) or {}
+        st = int(mp.get("stride", 1) or 1)
+        y_click, x_click = int(y), int(x)
+        if st > 1:
+            y, x = (y_click // st) * st, (x_click // st) * st
         try:
             Ny, Nx = SAMPLES[self._active_sample()]["scan_shape"]
             pat = self._raw_ds().get_raw(int(y) * int(Nx) + int(x)
@@ -3595,6 +3632,11 @@ class ACOMTabPanel(ctk.CTkFrame):
         except Exception as e:
             messagebox.showerror("inspect", repr(e)); return
         map_txt = self._map_phase_at(y, x)
+        if map_txt:
+            map_txt = f"{map_txt}  ({mp.get('kind', 'map')})"
+            if (y, x) != (y_click, x_click):
+                map_txt += (f";  clicked ({y_click}, {x_click}) -> value "
+                            f"sampled at ({y}, {x}), stride {st}")
         H, W = pat.shape
         center = (H / 2.0, W / 2.0)
         crystals = dict(self._phase_crystals)
@@ -3632,11 +3674,36 @@ class ACOMTabPanel(ctk.CTkFrame):
                 peaks = detect_peaks_2d(pat, **det)
             except Exception:
                 peaks = np.zeros((0, 3))
+            # NNLS on this one pattern -- the same fit the NNLS phase map
+            # uses -- so both methods are shown side by side
+            nnls = None
+            if len(crystals) >= 2:
+                try:
+                    cp, bv = self._build_phase_for_patterns(
+                        [pat], [center], Rshape=(1, 1), inv_a=inv_a)
+                    w, _res, rel, _it = cp.quantify_single_pattern(
+                        bv, xy_position=(0, 0),
+                        k_max=float(self._kmax.get()),
+                        corr_kernel_size=0.04, sigma_excitation_error=0.02,
+                        power_intensity=self._int_pow(), power_intensity_experiment=self._int_pow(),
+                        max_number_patterns=1, single_phase=True,
+                        allow_strain=True, plot_result=False, verbose=False,
+                        returnfig=False)
+                    w = np.asarray(w, float).ravel()
+                    per = np.zeros(len(crystals))
+                    for fi, (pi, _) in enumerate(cp.crystal_identity):
+                        if fi < w.size:
+                            per[pi] += w[fi]
+                    nnls = dict(names=list(crystals), weights=per,
+                                reliability=float(rel))
+                except Exception as e:
+                    nnls = dict(error=repr(e)[:60])
             self.after(0, lambda: self._show_inspect(
-                y, x, pat, peaks, res, map_txt, inv_a))
+                y, x, pat, peaks, res, map_txt, inv_a, nnls))
         threading.Thread(target=_w, daemon=True).start()
 
-    def _show_inspect(self, y, x, pat, peaks, res, map_txt, inv_a):
+    def _show_inspect(self, y, x, pat, peaks, res, map_txt, inv_a,
+                      nnls=None):
         """Pattern + best match, with check boxes that show / hide the
         found peaks, the matched (simulated) spots and the hkl labels in
         BOTH panels -- the matched spots are also drawn on the pattern."""
@@ -3733,9 +3800,25 @@ class ACOMTabPanel(ctk.CTkFrame):
                 lines.append(f"{n}: corr {r['corr']:.3f}"
                              + (f", ZA [{za[0]} {za[1]} {za[2]}]"
                                 if za is not None else ""))
-        fig.suptitle((f"map says: {map_txt}    |    " if map_txt else "")
-                     + "    ".join(lines), fontsize=10)
-        fig.tight_layout(rect=[0, 0, 1, 0.94])
+        # three lines, one per source, so the methods are not confused
+        sup = []
+        if map_txt:
+            sup.append(f"map: {map_txt}")
+        sup.append("correlation (Match single):  " + "    ".join(lines))
+        if nnls is not None:
+            if "error" in nnls:
+                sup.append(f"NNLS here: failed ({nnls['error']})")
+            else:
+                wsum = float(nnls["weights"].sum())
+                parts = [f"{n} {100*w/wsum:.0f}%" if wsum > 0 else f"{n} 0"
+                         for n, w in zip(nnls["names"], nnls["weights"])]
+                win_n = (nnls["names"][int(np.argmax(nnls["weights"]))]
+                         if wsum > 0 else "none")
+                sup.append(f"NNLS here: {win_n}   ("
+                           + ", ".join(parts)
+                           + f";  reliability {nnls['reliability']:.2f})")
+        fig.suptitle("\n".join(sup), fontsize=9.5)
+        fig.tight_layout(rect=[0, 0, 1, 0.90])
 
         win = tk.Toplevel(self)
         win.title(f"pattern @ ({y}, {x})"
@@ -3761,7 +3844,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                            command=_toggle).pack(side="left", padx=6)
             win.__dict__.setdefault("_vars", []).append(v)  # keep alive
         canvas.draw_idle()
-        self._set_status(f"({y}, {x}): " + ";  ".join(lines))
+        self._set_status(f"({y}, {x}): " + "  |  ".join(sup))
 
     # ---- overlay a label map (DINO / NMF / DINO+cluster) -----------
     def _resolve_overlay_labels(self, which):
@@ -4141,7 +4224,8 @@ class ACOMTabPanel(ctk.CTkFrame):
         self._mpfull = dict(
             scan_shape=(Ny, Nx), phase_rgb=phase_rgb, za_rgb=za_rgb,
             win_corr=win_corr, phase_id=phase_id, names=[phase_name],
-            mask_rgb=mask_rgb, matched=matched,
+            mask_rgb=mask_rgb, matched=matched, stride=int(stride),
+            kind="single-phase full dataset",
             za_color={(0, k): v for k, v in za_color.items()},
             za_count={(0, k): v for k, v in za_count.items()},
             palette=self._phase_palette(1))
