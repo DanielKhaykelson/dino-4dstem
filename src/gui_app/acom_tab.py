@@ -3197,19 +3197,19 @@ class ACOMTabPanel(ctk.CTkFrame):
         fr_rel = [float(((dom == i) & reliable).sum())
                   / max(int(reliable.sum()), 1) for i in range(n)]
         # 1) dominant phase (plain + reliability-shaded) + reliability
-        fig = Figure(figsize=(13, 4.8), dpi=110, facecolor="white")
+        fig = Figure(figsize=(10, 5.0), dpi=110, facecolor="white")
         from matplotlib.patches import Patch
         handles = [Patch(color=cols[i],
                          label=f"{names[i]}  {100*fr[i]:.1f}% indexed · "
                                f"{100*fr_rel[i]:.1f}% reliable")
                    for i in range(n)]
         handles.append(Patch(color=NOFIT, label="no fit"))
-        ax0 = fig.add_subplot(1, 3, 1)
+        ax0 = fig.add_subplot(1, 2, 1)
         ax0.imshow(plain, interpolation="nearest")
         ax0.set_title("dominant phase (every indexed position)",
                       fontsize=10)
         ax0.set_xticks([]); ax0.set_yticks([])
-        ax = fig.add_subplot(1, 3, 2)
+        ax = fig.add_subplot(1, 2, 2)
         ax.imshow(rgb, interpolation="nearest")
         ax.set_title("dominant phase, shaded by reliability",
                      fontsize=10)
@@ -3217,12 +3217,6 @@ class ACOMTabPanel(ctk.CTkFrame):
         fig.legend(handles=handles, loc="lower center",
                    ncol=min(len(handles), 3), fontsize=8,
                    framealpha=0.9)
-        ax2 = fig.add_subplot(1, 3, 3)
-        im = ax2.imshow(rel, cmap="gray", vmin=0, vmax=1,
-                        interpolation="nearest")
-        ax2.set_title("phase reliability", fontsize=10)
-        ax2.set_xticks([]); ax2.set_yticks([])
-        fig.colorbar(im, ax=ax2, fraction=0.046, pad=0.04)
         fig.suptitle(f"NNLS phase map  (stride {stride}, "
                      f"{elapsed_s:.0f}s;  reliable = reliability ≥ "
                      f"{REL_MIN:g})", fontsize=11)
@@ -3230,7 +3224,7 @@ class ACOMTabPanel(ctk.CTkFrame):
         fig.savefig(os.path.join(base, f"nnls_dominant_phase_{stamp}.png"),
                     dpi=200, bbox_inches="tight", facecolor="white")
         self._popup_figure(fig, "NNLS dominant phase",
-                           inspect_axes=[ax0, ax, ax2], scan_shape=(Ny, Nx))
+                           inspect_axes=[ax0, ax], scan_shape=(Ny, Nx))
         # 2) per-phase weights
         fig = Figure(figsize=(4.2 * n, 4.0), dpi=110, facecolor="white")
         for i in range(n):
@@ -3428,8 +3422,7 @@ class ACOMTabPanel(ctk.CTkFrame):
             ("zone_axis", lambda ax: (ax.imshow(za_rgb,
                 interpolation="nearest", aspect="equal"),
                 _legend_za(ax))),
-            ("correlation", lambda ax: self._fig_corr(ax, win_corr)),
-        ]
+        ]   # (correlation stays available as an overlay layer)
         from datetime import datetime
         try:
             stamp = "%s" % (int(elapsed_s))
@@ -3453,7 +3446,8 @@ class ACOMTabPanel(ctk.CTkFrame):
                 saved.append(png)
             except Exception as e:
                 print(f"[mpfull] save {nm} failed: {e!r}")
-            self._popup_figure(fig, f"ACOM full — {nm}")
+            self._popup_figure(fig, f"ACOM full — {nm}",
+                               inspect_axes=[ax], scan_shape=(Ny, Nx))
         self._set_status(
             f"multi-phase full done ({elapsed_s:.0f}s).  saved "
             f"{len(saved)} maps → {base}")
