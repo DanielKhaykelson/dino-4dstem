@@ -591,13 +591,53 @@ def _apply_tiled(model, x, tile: int, overlap: int, use_amp: bool):
     return acc / wsum.clamp_min(1e-8)
 
 
+def beam_centre(frame: np.ndarray, win: int = 12):
+    """Direct-beam centre (row, col) of one pattern: centre of mass of the
+    pixels above half the maximum, within ``win`` px of the brightest
+    pixel."""
+    f = np.asarray(frame, dtype=np.float32)
+    H, W = f.shape
+    by, bx = np.unravel_index(int(np.argmax(f)), f.shape)
+    y0, y1 = max(0, by - win), min(H, by + win + 1)
+    x0, x1 = max(0, bx - win), min(W, bx + win + 1)
+    sub = f[y0:y1, x0:x1]
+    w = np.clip(sub - 0.5 * sub.max(), 0, None)
+    if w.sum() <= 0:
+        return float(by), float(bx)
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    return float((w * yy).sum() / w.sum()), float((w * xx).sum() / w.sum())
+
+
+def friedel_fold(frame: np.ndarray, centre=None) -> np.ndarray:
+    """Two-fold (Friedel, 180 deg) fold about the beam centre:
+    0.5 * (I + I rotated by 180 deg about the centre).  The centre is
+    rounded to the nearest half pixel so the rotation is an exact pixel
+    permutation (no interpolation; total counts preserved).  As in the
+    cellulose pipeline: suppresses noise and the one-sided glow, but also
+    removes any genuine Friedel imbalance -- keep the unfolded output too
+    when that matters."""
+    f = np.asarray(frame, dtype=np.float32)
+    H, W = f.shape
+    cy, cx = centre if centre is not None else beam_centre(f)
+    sy = int(round(2 * cy)) - (H - 1)
+    sx = int(round(2 * cx)) - (W - 1)
+    rot = np.roll(np.flip(f, (0, 1)), (sy, sx), (0, 1))
+    return 0.5 * (f + rot)
+
+
 @torch.no_grad()
 def denoise_cube_into(model, cube, out, *, device: Optional[str] = None,
                       batch_size: int = 32, quantum: float = 1.0,
                       tile: int = 0, overlap: int = 48,
                       progress: Optional[Callable[[int, int], None]] = None,
-                      cancel: Optional[Callable[[], bool]] = None):
+                      cancel: Optional[Callable[[], bool]] = None,
+                      fold_out=None, fold_only: bool = False):
     """Apply ``model`` to every pattern of ``cube`` -> ``out`` (Ny,Nx,H,W).
+
+    Two-fold option: ``fold_only`` writes the Friedel-folded result to
+    ``out`` instead; ``fold_out`` (a second array) receives the folded
+    result while ``out`` keeps the unfolded one.  Each pattern is folded
+    about its own beam centre (descan moves it).
 
     ``out`` is any array-like that supports ``out[y, x0:x1] = block`` (e.g. a
     ``np.lib.format.open_memmap``).  Streams a scan row at a time so an
@@ -643,6 +683,12 @@ def denoise_cube_into(model, cube, out, *, device: Optional[str] = None,
             res[s:s + batch_size] = p.float().cpu().numpy()[:, 0]
         if quantum != 1.0:
             res *= np.float32(quantum)               # back to input units
+        if fold_only or fold_out is not None:
+            folded = np.stack([friedel_fold(f) for f in res], 0)
+            if fold_out is not None:
+                fold_out[y] = folded
+            if fold_only:
+                res = folded
         out[y] = res
         if progress is not None:
             progress(y + 1, Ny)

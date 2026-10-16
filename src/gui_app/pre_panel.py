@@ -543,6 +543,22 @@ class PrePanel(ctk.CTkFrame):
             width=300, fg_color=("#2D5FA8", "#1F4E8F"),
             command=self._denoise_apply_all)
         self._denoise_btn.pack(side="left")
+        fold_row = ctk.CTkFrame(dn_box, fg_color="transparent")
+        fold_row.pack(fill="x", padx=8, pady=(0, 2))
+        ctk.CTkLabel(fold_row, text="output:").pack(side="left")
+        self._denoise_fold = ctk.StringVar(value="unfolded")
+        ctk.CTkOptionMenu(fold_row, variable=self._denoise_fold,
+            values=["unfolded", "two-fold (Friedel)", "both"],
+            width=170).pack(side="left", padx=4)
+        add_help_button(fold_row,
+            "Two-fold (Friedel) fold: each denoised pattern is averaged "
+            "with itself rotated 180° about its own beam centre.  Exact "
+            "(no interpolation), counts preserved; halves the remaining "
+            "noise in Friedel pairs and removes one-sided glow.  But it "
+            "also erases any REAL Friedel imbalance (dynamical scattering, "
+            "thickness) - so, as in the cellulose pipeline, 'both' keeps "
+            "the unfolded cube active and writes <base>_n2n_fold2.cube.npy "
+            "next to it.").pack(side="left", padx=(4, 0))
         self._denoise_status = ctk.CTkLabel(dn_box, text="",
             font=("Consolas", 9), wraplength=300, justify="left",
             text_color=("#444", "#aaa"))
@@ -2724,11 +2740,24 @@ class PrePanel(ctk.CTkFrame):
             # trained on crops, apply it tile-by-tile (blended), otherwise a
             # whole large frame is an input distribution it never saw.
             _crop = hist.get("crop")
+            fmode = self._denoise_fold.get()
+            fold_out = None
+            if fmode == "both":
+                fold_path = os.path.join(tmp_dir,
+                                         new_basename + "_fold2.cube.npy")
+                fold_out = np.lib.format.open_memmap(
+                    fold_path, mode="w+", dtype=np.float32,
+                    shape=(Ny, Nx, H, W))
             denoise_cube_into(model, self.cube, out, device=dev,
                               quantum=hist.get("quantum", 1.0),
                               tile=int(_crop[0]) if _crop else 0,
-                              progress=_infer_prog, cancel=cancelled)
+                              progress=_infer_prog, cancel=cancelled,
+                              fold_out=fold_out,
+                              fold_only=fmode.startswith("two-fold"))
             out.flush(); del out
+            if fold_out is not None:
+                fold_out.flush(); del fold_out
+            hist["fold"] = fmode
             self._post(lambda: (self._progress_close("denoise"),
                                    self._denoise_finish(
                                        tmp_path, base, new_basename, hist)))
@@ -2826,11 +2855,25 @@ class PrePanel(ctk.CTkFrame):
             f"{geo}"
             f"  {steps} steps"
             f"{', quantum %.3f' % hist['quantum'] if hist.get('quantum', 1.0) != 1.0 else ''}\n"
-            f"  val loss {vl:.4f}  (no-op baseline {vi:.4f})"
+            f"  val loss {vl:.4f}  (no-op baseline {vi:.4f})\n"
+            f"  output: {hist.get('fold', 'unfolded')}"
+            + ("  (+ _fold2 cube alongside)" if hist.get("fold") == "both"
+               else "") +
             f"{quality}\n\n"
             f"Save permanently to:\n  {permanent_path}\n\n"
             f"  Yes → keep file (re-loadable in future sessions).\n"
             f"  No  → keep this run only; temp file deleted on exit.")
+        fold_tmp = tmp_path.replace(".cube.npy", "_fold2.cube.npy")
+        if save and os.path.exists(fold_tmp):
+            # 'both': the folded cube travels with the unfolded one
+            try:
+                shutil.move(fold_tmp, permanent_path.replace(
+                    ".cube.npy", "_fold2.cube.npy"))
+            except Exception as e:
+                messagebox.showerror("save failed",
+                    f"Could not move the two-fold cube:\n{e}")
+        elif os.path.exists(fold_tmp):
+            _register_atexit_cleanup(fold_tmp)
         if save:
             try:
                 shutil.move(tmp_path, permanent_path)

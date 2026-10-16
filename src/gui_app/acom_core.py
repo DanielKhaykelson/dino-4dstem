@@ -320,6 +320,26 @@ def detect_peaks_cached(patterns, detect_kw, cache_path,
     return out
 
 
+def pattern_reflection_level(pat: np.ndarray) -> float:
+    """Robust intensity of a pattern's reflections: the 99.5th percentile
+    of the (lightly smoothed) pattern OUTSIDE the direct beam (a disc of
+    6 % of the detector around the brightest pixel), above the median
+    background."""
+    from scipy.ndimage import gaussian_filter
+    # lightly smoothed: at low dose single-pixel Poisson noise would
+    # otherwise set the 'reflection level' and normalise noise into peaks
+    p = gaussian_filter(np.asarray(pat, dtype=np.float32), 1.5)
+    H, W = p.shape
+    by, bx = np.unravel_index(int(np.argmax(p)), p.shape)
+    yy, xx = np.ogrid[:H, :W]
+    out = (yy - by) ** 2 + (xx - bx) ** 2 > (0.06 * min(H, W)) ** 2
+    vals = p[out]
+    if vals.size == 0:
+        return float(p.max()) or 1.0
+    lvl = float(np.percentile(vals, 99.5) - np.median(vals))
+    return lvl if lvl > 0 else (float(p.max()) or 1.0)
+
+
 def detect_peaks_2d(pattern: np.ndarray,
                        probe_kernel: Optional[np.ndarray] = None,
                        *,
@@ -330,6 +350,7 @@ def detect_peaks_2d(pattern: np.ndarray,
                        overlap: float = 0.4,
                        log_stretch: bool = True,
                        vmax: float = 0.0,
+                       normalize: bool = False,
                        py4dstem_params: Optional[dict] = None
                        ) -> np.ndarray:
     """Detect Bragg peaks on a single 2D pattern.
@@ -348,9 +369,15 @@ def detect_peaks_2d(pattern: np.ndarray,
     pat = np.asarray(pattern, dtype=np.float32)
     if pat.ndim != 2:
         raise ValueError(f"pattern must be 2D, got shape {pat.shape}")
-    # vmax (counts, 0 = off): clip before detection.  The detector scales
-    # each pattern by its maximum -- usually the direct beam -- so without
-    # a cap weak reflections fall under the threshold.
+    # normalize: divide by the pattern's own reflection level (99.5th
+    # percentile outside the direct beam) so intensities -- and vmax -- are
+    # in the same units for every pattern / dataset / dose.
+    if normalize:
+        pat = pat / np.float32(pattern_reflection_level(pat))
+    # vmax (0 = off): clip before detection -- counts, or x reflection
+    # level when normalised.  The detector scales each pattern by its
+    # maximum (usually the direct beam), so without a cap weak reflections
+    # fall under the threshold.
     if vmax and float(vmax) > 0:
         pat = np.minimum(pat, np.float32(vmax))
 

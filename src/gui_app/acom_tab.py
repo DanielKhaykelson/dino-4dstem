@@ -298,13 +298,15 @@ class ACOMTabPanel(ctk.CTkFrame):
         self._det_max  = ctk.DoubleVar(value=8.0)
         self._det_num  = ctk.IntVar(value=6)
         self._det_log  = ctk.BooleanVar(value=True)
-        # clip the pattern at this many counts before detection (0 = off)
+        # clip the pattern at this level before detection (0 = off):
+        # x reflection level when 'normalize' is on, else raw counts
         self._det_vmax = ctk.DoubleVar(value=0.0)
+        self._det_norm = ctk.BooleanVar(value=True)
         for label, var, w in (("threshold", self._det_thr, 60),
                                   ("min sigma", self._det_min, 60),
                                   ("max sigma", self._det_max, 60),
                                   ("num sigma", self._det_num, 60),
-                                  ("vmax (cts)", self._det_vmax, 60)):
+                                  ("vmax", self._det_vmax, 60)):
             row = ctk.CTkFrame(sidebar, fg_color="transparent")
             row.pack(fill="x", padx=10, pady=1)
             ctk.CTkLabel(row, text=label, width=80,
@@ -313,13 +315,23 @@ class ACOMTabPanel(ctk.CTkFrame):
             e.pack(side="left", padx=2)
             e.bind("<Return>", lambda _e: self._detect_and_redraw())
         _hint(sidebar,
-            "vmax (cts): clip the pattern at this many counts before "
-            "detection, so the direct beam no longer sets the scale and "
-            "weak reflections clear the threshold.  0 = off.  Use it "
+            "vmax: clip the pattern before detection so the direct beam "
+            "no longer sets the scale and weak reflections clear the "
+            "threshold.  0 = off.  With 'normalize' on (default) every "
+            "pattern is divided by its own reflection level, so vmax is in "
+            "x reflection level (try 2-3; 1 clips AT the reflections and "
+            "lets noise through) and the same value works across "
+            "patterns, doses and datasets; off = raw counts.  Very low "
+            "dose (reflections of a few counts): denoise first.  Use it "
             "INSTEAD of log stretch (untick it): with log on, a low vmax "
             "mostly lifts noise into peaks.  The max of the current "
             "pattern is in the step-1 panel title.  Applies everywhere "
             "(single match, batches, full scan).")
+        ctk.CTkCheckBox(sidebar,
+            text="normalize each pattern (vmax in × reflection level)",
+            variable=self._det_norm,
+            command=self._detect_and_redraw).pack(anchor="w", padx=10,
+                                                  pady=2)
         ctk.CTkCheckBox(sidebar, text="log stretch before detection",
                           variable=self._det_log,
                           command=self._detect_and_redraw
@@ -1393,6 +1405,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                 threshold=float(self._det_thr.get()),
                 log_stretch=bool(self._det_log.get()),
                 vmax=self._det_vmax_val(),
+                normalize=bool(self._det_norm.get()),
             )
             self._test_peaks = peaks
             self._det_status.configure(
@@ -2128,6 +2141,7 @@ class ACOMTabPanel(ctk.CTkFrame):
             threshold=float(self._det_thr.get()),
             log_stretch=bool(self._det_log.get()),
                 vmax=self._det_vmax_val(),
+                normalize=bool(self._det_norm.get()),
         )
         peak_arrays = [detect_peaks_2d(p, **detect_kw)
                           for p in patterns_list]
@@ -2317,6 +2331,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                             threshold=float(self._det_thr.get()),
                             log_stretch=bool(self._det_log.get()),
                 vmax=self._det_vmax_val(),
+                normalize=bool(self._det_norm.get()),
                         ))
                 except Exception as e:
                     res = {"error": repr(e)}
@@ -2467,6 +2482,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                         threshold=float(self._det_thr.get()),
                         log_stretch=bool(self._det_log.get()),
                 vmax=self._det_vmax_val(),
+                normalize=bool(self._det_norm.get()),
                     ))
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror(
@@ -2660,7 +2676,8 @@ class ACOMTabPanel(ctk.CTkFrame):
             num_sigma=int(self._det_num.get()),
             threshold=float(self._det_thr.get()),
             log_stretch=bool(self._det_log.get()),
-                vmax=self._det_vmax_val())
+                vmax=self._det_vmax_val(),
+                normalize=bool(self._det_norm.get()))
 
     def _peak_cache_path(self, stride, detect_kw):
         """Path of the peak cache for (run, stride, detect params).
@@ -2712,6 +2729,7 @@ class ACOMTabPanel(ctk.CTkFrame):
                 threshold=float(self._det_thr.get()),
                 log_stretch=bool(self._det_log.get()),
                 vmax=self._det_vmax_val(),
+                normalize=bool(self._det_norm.get()),
             )
             thr = float(self._mp_threshold.get())
             mar = float(self._mp_margin.get())
@@ -3586,7 +3604,8 @@ class ACOMTabPanel(ctk.CTkFrame):
                    num_sigma=int(self._det_num.get()),
                    threshold=float(self._det_thr.get()),
                    log_stretch=bool(self._det_log.get()),
-                vmax=self._det_vmax_val())
+                vmax=self._det_vmax_val(),
+                normalize=bool(self._det_norm.get()))
         self._set_status(f"matching ({y}, {x}) against "
                          f"{len(crystals)} phase(s)…")
 
