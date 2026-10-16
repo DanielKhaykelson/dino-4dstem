@@ -340,6 +340,10 @@ class ACOMTabPanel(ctk.CTkFrame):
                        width=240,
                        command=self._detect_and_redraw
                        ).pack(anchor="w", padx=10, pady=2)
+        ctk.CTkButton(sidebar, text="Auto-tune detection ▶",
+                       width=240, fg_color=("#6B4FA0", "#4E3878"),
+                       command=self._autotune_detection
+                       ).pack(anchor="w", padx=10, pady=(0, 2))
         self._det_status = ctk.CTkLabel(sidebar,
             text="(no peaks detected yet)",
             font=("Consolas", 9),
@@ -2690,6 +2694,139 @@ class ACOMTabPanel(ctk.CTkFrame):
             return 0.0 if bool(self._pos_only.get()) else 0.25
         except Exception:
             return 0.25
+
+    def _autotune_detection(self):
+        """Quick search over detection settings (see acom_core.
+        autotune_detection): split-half reproducibility on ~12 scan
+        positions, then -- if CIFs are built -- the top 5 re-ranked by how
+        much of what they detect the best-matching phase explains."""
+        s_key = self._active_sample()
+        if s_key is None:
+            messagebox.showinfo("Auto-tune", "Load a dataset first."); return
+        if getattr(self, "_autotune_busy", False):
+            return
+        self._autotune_busy = True
+        Ny, Nx = SAMPLES[s_key]["scan_shape"]
+        try:
+            ds = self._raw_ds()
+            # 12 positions on a grid across the scan, preferring the
+            # brighter (sample, not vacuum) half
+            ys = np.linspace(0, Ny - 1, 5).astype(int)
+            xs = np.linspace(0, Nx - 1, 5).astype(int)
+            cand = [(y, x) for y in ys for x in xs]
+            pats = [ds.get_raw(int(y) * Nx + int(x)).astype(np.float32)
+                    for y, x in cand]
+            tot = np.array([p.sum() for p in pats])
+            keep = np.argsort(-tot)[:8]
+            pats = [pats[i] for i in keep]
+        except Exception as e:
+            self._autotune_busy = False
+            messagebox.showerror("Auto-tune", repr(e)); return
+        try:
+            from denoise_n2n import estimate_count_quantum, looks_like_counts
+            stack = np.stack(pats[:6])
+            counts_ok = bool(looks_like_counts(stack))
+            quantum = float(estimate_count_quantum(stack)) if counts_ok else 1.0
+        except Exception:
+            counts_ok, quantum = False, 1.0
+        base = dict(min_sigma=float(self._det_min.get()),
+                    max_sigma=float(self._det_max.get()),
+                    num_sigma=int(self._det_num.get()))
+        grid = []
+        for log in (False, True):
+            for vm in (0.0, 2.0, 3.0):
+                for thr in (0.05, 0.08, 0.12, 0.2):
+                    grid.append(dict(base, threshold=thr, log_stretch=log,
+                                     vmax=vm, normalize=True))
+        crystals = dict(self._phase_crystals)
+        inv_a = float(self._inv_ang.get())
+        H, W = pats[0].shape
+        center = (H / 2.0, W / 2.0)
+        self._set_status(f"auto-tune: {len(grid)} settings x {len(pats)} "
+                         f"positions (split-half)…")
+
+        def _w():
+            from gui_app.acom_core import (autotune_detection,
+                                           explained_fraction)
+            t0 = time.time()
+            try:
+                def _prog(d, t):
+                    if d % 24 == 0 or d == t:
+                        self.after(0, lambda d=d, t=t: self._set_status(
+                            f"auto-tune: split-half {d}/{t}  "
+                            f"({time.time()-t0:.0f}s)"))
+                ranked = autotune_detection(pats, grid, quantum=quantum,
+                                            progress=_prog)
+                top = ranked[:5]
+                if crystals:
+                    sub = pats[:4]
+                    for i, r in enumerate(top[:3]):
+                        self.after(0, lambda i=i: self._set_status(
+                            f"auto-tune: CIF check {i + 1}/3…"))
+                        fr = []
+                        for p in sub:
+                            best = 0.0
+                            for cr in crystals.values():
+                                try:
+                                    best = max(best, explained_fraction(
+                                        cr, p, center=center,
+                                        inv_ang_per_pixel=inv_a,
+                                        detect_kw=r["kw"]))
+                                except Exception:
+                                    pass
+                            fr.append(best)
+                        r["explained"] = float(np.mean(fr)) if fr else 0.0
+                        r["final"] = r["score"] * (0.25 + r["explained"])
+                    for r in top[3:]:
+                        r["final"] = -1.0
+                    top.sort(key=lambda r: -r["final"])
+                dt = time.time() - t0
+                self.after(0, lambda: self._autotune_done(
+                    top, counts_ok, quantum, bool(crystals), dt))
+            except Exception as e:
+                err = repr(e)
+                self.after(0, lambda: (messagebox.showerror("Auto-tune", err),
+                                       self._set_status(f"auto-tune failed: "
+                                                        f"{err[:100]}")))
+            finally:
+                self._autotune_busy = False
+        threading.Thread(target=_w, daemon=True).start()
+
+    def _autotune_done(self, top, counts_ok, quantum, used_cif, dt):
+        if not top:
+            return
+        best = top[0]["kw"]
+        self._det_thr.set(best["threshold"])
+        self._det_log.set(bool(best["log_stretch"]))
+        self._det_vmax.set(best["vmax"])
+        self._det_norm.set(True)
+        lines = []
+        for i, r in enumerate(top):
+            k = r["kw"]
+            lines.append(
+                f"{i + 1}. threshold {k['threshold']:<5g} vmax "
+                f"{k['vmax']:<4g} log {'on ' if k['log_stretch'] else 'off'}"
+                f" | {r['reproduced']:5.1f} real peaks/pattern, "
+                f"{100 * r['precision']:3.0f}% reproduced"
+                + (f", {100 * r['explained']:3.0f}% explained by a CIF"
+                   if "explained" in r else ""))
+        note = ("" if counts_ok else
+                "\n\nNote: the data do not look like raw counts, so the "
+                "split-half test is approximate.")
+        messagebox.showinfo("Auto-tune detection",
+            f"Applied #1 (normalize on).  {dt:.0f}s.\n\n"
+            + "\n".join(lines)
+            + ("\n\nRanking: split-half reproducibility"
+               + (" x share of peaks explained by the best CIF match."
+                  if used_cif else " (build CIFs for the CIF check).")
+               ) + note)
+        self._set_status("auto-tune: applied threshold "
+                         f"{best['threshold']:g}, vmax {best['vmax']:g}, "
+                         f"log {'on' if best['log_stretch'] else 'off'}")
+        try:
+            self._detect_and_redraw()
+        except Exception:
+            pass
 
     def _det_vmax_val(self) -> float:
         try:

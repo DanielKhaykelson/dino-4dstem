@@ -1220,3 +1220,96 @@ def zone_axis_from_matrix(rmat: np.ndarray,
     best = tuple(z)
     mis_deg = float(np.degrees(np.arccos(np.clip(best_cos, -1.0, 1.0))))
     return (best, mis_deg)
+
+
+
+# ---------------------------------------------------------------------------
+# Auto-tune peak detection: split-half reproducibility (+ optional CIF check)
+# ---------------------------------------------------------------------------
+
+def _match_count(a: np.ndarray, b: np.ndarray, tol: float) -> int:
+    """Peaks of ``a`` that have a peak of ``b`` within ``tol`` px."""
+    if len(a) == 0 or len(b) == 0:
+        return 0
+    d = np.hypot(a[:, None, 0] - b[None, :, 0], a[:, None, 1] - b[None, :, 1])
+    return int((d.min(axis=1) <= tol).sum())
+
+
+def autotune_detection(patterns, grid, *, quantum: float = 1.0,
+                       tol_px: float = 2.0, seed: int = 0,
+                       progress=None, stop=None) -> list:
+    """Score detection settings without ground truth.
+
+    Each pattern (raw counts / ``quantum``) is split binomially into two
+    independent half-dose exposures (Poisson thinning).  Real reflections
+    are found in BOTH halves; noise peaks rarely are.  For each setting in
+    ``grid`` (list of detect_peaks_2d kwargs):
+
+      reproduced  = mean # peaks found in both halves (per pattern),
+                    MINUS the coincidences expected at random for that
+                    peak density (dense noise otherwise 'reproduces' by
+                    chance within the tolerance)
+      precision   = reproduced / mean # peaks per half
+      score       = reproduced * precision**2   (rewards many real peaks,
+                    punishes noise hard)
+
+    Settings are tuned on half-dose data, so on the full pattern they are
+    slightly conservative.  Returns the grid entries as dicts with those
+    numbers, best first."""
+    rng = np.random.default_rng(seed)
+    halves = []
+    for p in patterns:
+        k = np.clip(np.round(np.asarray(p, np.float64) / quantum), 0, None)
+        h1 = rng.binomial(k.astype(np.int64), 0.5).astype(np.float32)
+        h2 = (k - h1).astype(np.float32)
+        # the direct beam is always 'reproduced' -- it must not score
+        by, bx = np.unravel_index(int(np.argmax(k)), k.shape)
+        halves.append((h1, h2, (by, bx), 0.06 * min(k.shape)))
+    out = []
+    total = len(grid) * len(halves)
+    done = 0
+    for kw in grid:
+        rep = per_half = 0.0
+        for h1, h2, (by, bx), rb in halves:
+            if stop is not None and stop():
+                raise RuntimeError("stopped")
+            a = detect_peaks_2d(h1, **kw)
+            b = detect_peaks_2d(h2, **kw)
+            if len(a):
+                a = a[np.hypot(a[:, 0] - by, a[:, 1] - bx) > rb]
+            if len(b):
+                b = b[np.hypot(b[:, 0] - by, b[:, 1] - bx) > rb]
+            m = 0.5 * (_match_count(a, b, tol_px) + _match_count(b, a, tol_px))
+            # chance level: P(random point has a partner within tol)
+            area = float(h1.shape[0] * h1.shape[1])
+            pa = 1.0 - np.exp(-len(b) / area * np.pi * tol_px ** 2)
+            pb = 1.0 - np.exp(-len(a) / area * np.pi * tol_px ** 2)
+            chance = 0.5 * (len(a) * pa + len(b) * pb)
+            m = max(m - chance, 0.0)
+            rep += m
+            per_half += 0.5 * (len(a) + len(b))
+            done += 1
+            if progress is not None:
+                progress(done, total)
+        n = max(len(halves), 1)
+        rep /= n; per_half /= n
+        prec = rep / per_half if per_half > 0 else 0.0
+        out.append(dict(kw=dict(kw), reproduced=rep, per_half=per_half,
+                        precision=prec, score=rep * prec ** 2))
+    out.sort(key=lambda r: -r["score"])
+    return out
+
+
+def explained_fraction(crystal, pattern, *, center, inv_ang_per_pixel,
+                       detect_kw, tol_px: float = 2.0) -> float:
+    """Fraction of detected peaks that the best match of ``crystal``
+    predicts (within tol_px) -- the CIF check (B) for the top settings."""
+    r = acom_single_pattern(crystal, pattern, center=center,
+                            inv_ang_per_pixel=inv_ang_per_pixel,
+                            detect_kw=detect_kw)
+    pl, fit = r.get("calibrated_pl"), r.get("fit_pattern")
+    if pl is None or fit is None or len(pl.data) == 0:
+        return 0.0
+    ex = np.stack([pl.data["qx"], pl.data["qy"]], 1) / inv_ang_per_pixel
+    fx = np.stack([fit.data["qx"], fit.data["qy"]], 1) / inv_ang_per_pixel
+    return _match_count(ex, fx, tol_px) / len(ex)
