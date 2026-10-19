@@ -391,6 +391,38 @@ class PrePanel(ctk.CTkFrame):
                           "radius ≈ polar_mask_cols / 2 (so 45 here "
                           "= ~22 px disk in 192-frame).")
 
+        # Cellulose 'median per annulus' flattening (verbatim flatten_cart),
+        # applied on the fly like COM / blur / log
+        fa_row = ctk.CTkFrame(ctrl, fg_color="transparent")
+        fa_row.pack(fill="x", padx=8, pady=(4, 0))
+        self.flatten_ann = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(fa_row, text="Flatten (median per annulus)",
+                        variable=self.flatten_ann,
+                        command=self._on_flatten_toggle).pack(side="left")
+        ctk.CTkLabel(fa_row, text="r").pack(side="left", padx=(6, 1))
+        self._flat_rmin = ctk.StringVar(value="auto")
+        _e1 = ctk.CTkEntry(fa_row, textvariable=self._flat_rmin, width=42)
+        _e1.pack(side="left")
+        ctk.CTkLabel(fa_row, text="–").pack(side="left", padx=1)
+        self._flat_rmax = ctk.StringVar(value="auto")
+        _e2 = ctk.CTkEntry(fa_row, textvariable=self._flat_rmax, width=42)
+        _e2.pack(side="left")
+        for _e in (_e1, _e2):
+            _e.bind("<Return>", lambda _ev: self._on_flatten_toggle())
+        add_help_button(fa_row,
+            "The cellulose project's flattening, copied verbatim "
+            "(step154_cartesian.py::flatten_cart): for every 1-px annulus "
+            "about the beam centre subtract the MEDIAN of the pattern on "
+            "that annulus, zero everything outside r_min..r_max, divide by "
+            "the pattern's std inside the annulus.  No interpolation.\n\n"
+            "Applied to the RAW frame first, on the fly, everywhere the "
+            "model looks (preview, training, NMF, eval) - like COM.  The "
+            "result is a signed, unit-variance residual, so vmax is then "
+            "in standard deviations (try 3-5) and negatives clip to 0.  "
+            "'auto' r = 1.5 x the direct-beam radius .. half the detector.  "
+            "ACOM keeps reading the raw counts."
+            ).pack(side="left", padx=(4, 0))
+
         # COM centering
         com_row = ctk.CTkFrame(ctrl, fg_color="transparent")
         com_row.pack(fill="x", padx=8, pady=4)
@@ -543,37 +575,6 @@ class PrePanel(ctk.CTkFrame):
             width=300, fg_color=("#2D5FA8", "#1F4E8F"),
             command=self._denoise_apply_all)
         self._denoise_btn.pack(side="left")
-        # cellulose-project flattening (verbatim flatten_cart), next to
-        # the denoiser it is normally paired with
-        af_row = ctk.CTkFrame(dn_box, fg_color="transparent")
-        af_row.pack(fill="x", padx=8, pady=(0, 2))
-        self._annflat_btn = ctk.CTkButton(af_row,
-            text="Flatten (median per annulus)…", width=200,
-            fg_color=("#2D5FA8", "#1F4E8F"),
-            command=self._annulus_flatten_apply)
-        self._annflat_btn.pack(side="left")
-        ctk.CTkLabel(af_row, text="r").pack(side="left", padx=(6, 1))
-        self._annflat_rmin = ctk.StringVar(value="auto")
-        ctk.CTkEntry(af_row, textvariable=self._annflat_rmin,
-                     width=44).pack(side="left")
-        ctk.CTkLabel(af_row, text="–").pack(side="left", padx=1)
-        self._annflat_rmax = ctk.StringVar(value="auto")
-        ctk.CTkEntry(af_row, textvariable=self._annflat_rmax,
-                     width=44).pack(side="left")
-        ctk.CTkLabel(af_row, text="px").pack(side="left", padx=(1, 0))
-        add_help_button(af_row,
-            "The cellulose project's flattening, copied verbatim "
-            "(step154_cartesian.py::flatten_cart): for every 1-px-wide "
-            "annulus about the beam centre subtract the MEDIAN of the "
-            "pattern on that annulus (Bragg spots are sparse in angle, so "
-            "the median is the background); zero everything outside "
-            "r_min..r_max; divide each pattern by its standard deviation "
-            "inside that annulus.  The data are never interpolated.\n\n"
-            "Output is a signed, unit-variance residual - the same input "
-            "the cellulose denoiser / analysis uses.  'auto' = r_min just "
-            "outside the direct beam, r_max = half the detector.  Writes a "
-            "new <base>_annflat.cube.npy; original untouched."
-            ).pack(side="left", padx=(4, 0))
         fold_row = ctk.CTkFrame(dn_box, fg_color="transparent")
         fold_row.pack(fill="x", padx=8, pady=(0, 2))
         ctk.CTkLabel(fold_row, text="output:").pack(side="left")
@@ -2124,6 +2125,46 @@ class PrePanel(ctk.CTkFrame):
         except Exception:
             pass
 
+    def _flatten_params(self):
+        """Centre + annulus for the cellulose flatten, measured once per
+        cube (mean of up to 64 frames) and cached; None if unavailable."""
+        if self.cube is None:
+            return None
+        key = (str(self.path), str(self._flat_rmin.get()),
+               str(self._flat_rmax.get()))
+        cached = getattr(self, "_flat_cache", None)
+        if cached and cached[0] == key:
+            return cached[1]
+        try:
+            from celldenoise_flatten import auto_params
+            Ny, Nx, H, W = self.cube.shape
+            idx = np.linspace(0, Ny * Nx - 1, min(64, Ny * Nx)).astype(int)
+            acc = np.zeros((H, W), np.float64)
+            for i in idx:
+                yy, xx = divmod(int(i), Nx)
+                acc += np.asarray(self.cube[yy, xx], dtype=np.float64)
+            prm = auto_params(acc / len(idx), self._flat_rmin.get(),
+                              self._flat_rmax.get())
+        except Exception as e:
+            messagebox.showerror("Flatten", f"cannot set up the annulus:\n"
+                                 f"{e}")
+            self.flatten_ann.set(False)
+            return None
+        self._flat_cache = (key, prm)
+        return prm
+
+    def _on_flatten_toggle(self):
+        prm = self._flatten_params() if self.flatten_ann.get() else None
+        try:
+            self._info.configure(text=(
+                f"flatten: centre ({prm['centre'][0]:.1f}, "
+                f"{prm['centre'][1]:.1f}), r {prm['r_min']}-{prm['r_max']} "
+                f"px; vmax now in std units" if prm else ""))
+        except Exception:
+            pass
+        self._propagate_filters_quiet()
+        self._refresh()
+
     def _propagate_filters_quiet(self):
         """Push blur / log / ellipticity into the SAMPLES entry WITHOUT
         triggering a redraw.  Safe to call from inside ``_refresh``.
@@ -2145,6 +2186,8 @@ class PrePanel(ctk.CTkFrame):
             cfg["log_stretch"] = bool(self.log_stretch.get())
             cfg["ellipticity_ab"] = float(self.ellip_ab.get())
             cfg["ellipticity_theta_deg"] = float(self.ellip_theta.get())
+            cfg["flatten_annulus"] = (self._flatten_params()
+                                      if self.flatten_ann.get() else None)
         except Exception as e:
             print(f"[pre] propagate filters: {e!r}", flush=True)
 
@@ -2995,76 +3038,6 @@ class PrePanel(ctk.CTkFrame):
         threading.Thread(target=self._flatten_worker,
                          args=(mode,), daemon=True).start()
 
-    def _annulus_flatten_apply(self):
-        """Cellulose-style flattening (median per annulus, unit variance)."""
-        if self.cube is None:
-            messagebox.showinfo("cube", "Load a cube first."); return
-        if (self._flatten_busy or self._denoise_busy or self._blur_busy
-                or self._nbed_busy or self._ellip_busy or self._bin_busy
-                or self._hotpix_busy):
-            messagebox.showinfo("flatten",
-                "Another full-cube op is in progress — wait first."); return
-        Ny, Nx, H, W = self.cube.shape
-        # beam centre from the mean of up to 64 frames across the scan
-        try:
-            from denoise_n2n import beam_centre
-            idx = np.linspace(0, Ny * Nx - 1, min(64, Ny * Nx)).astype(int)
-            acc = np.zeros((H, W), np.float64)
-            for i in idx:
-                y, x = divmod(int(i), Nx)
-                acc += np.asarray(self.cube[y, x], dtype=np.float64)
-            mean = acc / len(idx)
-            cy, cx = beam_centre(mean)
-            # beam radius: where the mean falls to half its peak
-            yy, xx = np.mgrid[0:H, 0:W]
-            rr = np.hypot(yy - cy, xx - cx).astype(int)
-            prof = (np.bincount(rr.ravel(), mean.ravel())
-                    / np.maximum(np.bincount(rr.ravel()), 1))
-            r_beam = int(np.argmax(prof < 0.5 * prof[0])) or 4
-        except Exception as e:
-            messagebox.showerror("flatten", f"beam centre failed: {e!r}")
-            return
-
-        def _px(v, auto):
-            v = str(v).strip().lower()
-            return auto if v in ("", "auto") else int(float(v))
-        try:
-            r_min = _px(self._annflat_rmin.get(), int(round(1.5 * r_beam)))
-            r_max = _px(self._annflat_rmax.get(), int(min(H, W) // 2))
-        except Exception:
-            messagebox.showerror("flatten", "r_min / r_max must be numbers "
-                                 "or 'auto'."); return
-        if not (0 <= r_min < r_max):
-            messagebox.showerror("flatten",
-                f"need 0 <= r_min < r_max (got {r_min}, {r_max})."); return
-        if not messagebox.askyesno(
-                "Flatten (median per annulus)",
-                f"Cellulose-project flattening of every pattern of this "
-                f"{Ny}×{Nx} scan (H×W = {H}×{W}):\n\n"
-                f"  beam centre ({cy:.1f}, {cx:.1f}) px, direct beam "
-                f"r ≈ {r_beam} px\n"
-                f"  annulus r = {r_min} … {r_max} px (outside -> 0)\n"
-                f"  per 1-px annulus: subtract the median;  then divide by "
-                f"the pattern's std inside the annulus\n\n"
-                f"Output: signed, unit-variance residual.  Writes a new "
-                f".cube.npy; before/after preview, then you choose whether "
-                f"to save.\n\nProceed?"):
-            return
-        self._annflat_params = dict(centre=(cy, cx), r_min=r_min,
-                                    r_max=r_max)
-        self._flatten_busy = True
-        for b in ("_flatten_btn", "_annflat_btn"):
-            try:
-                getattr(self, b).configure(state="disabled")
-            except Exception:
-                pass
-        self._flatten_status.configure(text="flatten (annulus): starting…")
-        self._progress_popup(
-            "flatten", "Flattening (median per annulus)…",
-            f"Flattening {Ny*Nx} patterns  (r {r_min}-{r_max} px)")
-        threading.Thread(target=self._flatten_worker,
-                         args=("annulus",), daemon=True).start()
-
     def _flatten_worker(self, mode: str):
         tmp_path = None
         try:
@@ -3072,8 +3045,7 @@ class PrePanel(ctk.CTkFrame):
             Ny, Nx, H, W = self.cube.shape
             base = os.path.splitext(self.path)[0]
             base = base[:-5] if base.endswith(".cube") else base
-            new_basename = os.path.basename(base) + (
-                "_annflat" if mode == "annulus" else "_flat")
+            new_basename = os.path.basename(base) + "_flat"
             tmp_dir = self._mktemp_beside("dinosr_flat_")
             tmp_path = os.path.join(tmp_dir, new_basename + ".cube.npy")
             out = np.lib.format.open_memmap(
@@ -3087,16 +3059,9 @@ class PrePanel(ctk.CTkFrame):
                            f"({100*row/ntot:.0f}%)"
                            f"{self._eta_text(row, ntot, t0)}")
 
-            _cancel = lambda: bool(getattr(self, "_flatten_cancel", False))
-            if mode == "annulus":
-                # the cellulose project's flatten_cart, verbatim
-                from celldenoise_flatten import (
-                    flatten_cube_into as _annulus_into)
-                _annulus_into(self.cube, out, progress=_prog,
-                              cancel=_cancel, **self._annflat_params)
-            else:
-                flatten_cube_into(self.cube, out, mode=mode, progress=_prog,
-                                  cancel=_cancel)
+            flatten_cube_into(
+                self.cube, out, mode=mode, progress=_prog,
+                cancel=lambda: bool(getattr(self, "_flatten_cancel", False)))
             out.flush(); del out
             self._post(lambda: (self._progress_close("flatten"),
                                    self._flatten_finish(
@@ -3119,11 +3084,10 @@ class PrePanel(ctk.CTkFrame):
             self._flatten_busy = False
 
     def _flatten_reenable(self):
-        for b in ("_flatten_btn", "_annflat_btn"):
-            try:
-                getattr(self, b).configure(state="normal")
-            except Exception:
-                pass
+        try:
+            self._flatten_btn.configure(state="normal")
+        except Exception:
+            pass
 
     def _flatten_preview(self, tmp_path: str, mode: str):
         try:
@@ -3150,14 +3114,12 @@ class PrePanel(ctk.CTkFrame):
         ax0.set_title("raw (log)", fontsize=11)
         ax0.set_xticks([]); ax0.set_yticks([])
         ax1 = fig.add_subplot(1, 2, 2)
-        if mode in ("subtract", "annulus"):
+        if mode == "subtract":
             # signed residual — symmetric limits about 0
             lim = float(np.percentile(np.abs(after), 99.0)) or 1.0
             ax1.imshow(after, cmap="RdBu_r", vmin=-lim, vmax=lim,
                        interpolation="nearest")
-            ax1.set_title("flattened (median per annulus, unit variance)"
-                          if mode == "annulus"
-                          else "flattened (median-subtracted)", fontsize=11)
+            ax1.set_title("flattened (median-subtracted)", fontsize=11)
         else:
             ax1.imshow(after, cmap=cmap, vmin=0,
                        vmax=float(np.percentile(after, 99.0)) or 1.0,
@@ -3171,9 +3133,7 @@ class PrePanel(ctk.CTkFrame):
 
     def _flatten_finish(self, tmp_path, original_base, new_basename, mode):
         self._flatten_preview(tmp_path, mode)
-        permanent_path = (self._undo_tempdir(original_base)
-                          + ("_annflat" if mode == "annulus" else "_flat")
-                          + ".cube.npy")
+        permanent_path = self._undo_tempdir(original_base) + "_flat.cube.npy"
         save = messagebox.askyesno(
             "Save flattened cube?",
             f"Radial-background flattening ({mode}) applied to every "
@@ -3854,6 +3814,10 @@ class PrePanel(ctk.CTkFrame):
         idx = int(self.idx.get())
         y, x = divmod(idx, Nx)
         raw = np.asarray(self.cube[y, x]).astype(np.float32)
+        fa = self._flatten_params() if self.flatten_ann.get() else None
+        if fa:
+            from celldenoise_flatten import flatten_one
+            raw = flatten_one(raw, fa["centre"], fa["r_min"], fa["r_max"])
         vmax = float(self.vmax.get())
         norm = rescale_like_vmax(raw, vmax=vmax)
         # Live ellipticity correction (a/b ≠ 1).  Applied BEFORE

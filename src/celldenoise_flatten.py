@@ -54,6 +54,50 @@ def flatten_cart(img):
 # ---- end verbatim ---------------------------------------------------------
 
 
+import threading
+_LOCK = threading.Lock()
+_GEOM = None       # (H, W, cy, cx, r_min, r_max) currently in RD/RMIN/RMAX
+
+
+def flatten_one(frame, centre, r_min: int, r_max: int) -> np.ndarray:
+    """flatten_cart on ONE (H, W) pattern; the geometry is rebuilt only
+    when it changes, and a lock keeps concurrent callers (preview, NMF,
+    training loader) from swapping RD / RMIN / RMAX under each other."""
+    global _GEOM
+    f = np.asarray(frame, dtype=np.float32)
+    H, W = f.shape
+    key = (H, W, float(centre[0]), float(centre[1]), int(r_min), int(r_max))
+    with _LOCK:
+        if _GEOM != key:
+            set_geometry(H, W, centre, r_min, r_max)
+            _GEOM = key
+        return flatten_cart(f[None])[0]
+
+
+def auto_params(mean_pattern, r_min="auto", r_max="auto") -> dict:
+    """Beam centre (from the mean pattern) and the analysis annulus:
+    'auto' r_min = 1.5 x the direct-beam half-maximum radius, 'auto'
+    r_max = half the detector."""
+    from denoise_n2n import beam_centre
+    m = np.asarray(mean_pattern, dtype=np.float64)
+    H, W = m.shape
+    cy, cx = beam_centre(m)
+    yy, xx = np.mgrid[0:H, 0:W]
+    rr = np.hypot(yy - cy, xx - cx).astype(int)
+    prof = (np.bincount(rr.ravel(), m.ravel())
+            / np.maximum(np.bincount(rr.ravel()), 1))
+    r_beam = int(np.argmax(prof < 0.5 * prof[0])) or 4
+
+    def _px(v, auto):
+        v = str(v).strip().lower()
+        return int(auto) if v in ("", "auto") else int(float(v))
+    lo = _px(r_min, round(1.5 * r_beam))
+    hi = _px(r_max, min(H, W) // 2)
+    if not (0 <= lo < hi):
+        raise ValueError(f"need 0 <= r_min < r_max (got {lo}, {hi})")
+    return dict(centre=[float(cy), float(cx)], r_min=lo, r_max=hi)
+
+
 def flatten_cube_into(cube, out, *, centre, r_min: int, r_max: int,
                       progress=None, cancel=None) -> None:
     """Apply flatten_cart to every pattern of ``cube`` (Ny, Nx, H, W) ->

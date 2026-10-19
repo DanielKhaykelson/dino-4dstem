@@ -1735,6 +1735,7 @@ class LoadPRZ:
                         if ellipticity_theta_deg is None:
                             ellipticity_theta_deg = float(
                                 _v.get("ellipticity_theta_deg", 0.0))
+                        self._flatten_annulus = _v.get("flatten_annulus")
                         break
             except Exception:
                 pass
@@ -1788,6 +1789,13 @@ class LoadPRZ:
         img = np.asarray(img, dtype=np.float32)
         if not np.isfinite(img).all():
             img = np.nan_to_num(img, copy=False)
+        # Cellulose 'median per annulus' flattening, on the RAW frame
+        # (before resize / vmax), when ticked in Pre-processing.  Output
+        # is a signed unit-variance residual, so vmax is then in std units.
+        fa = getattr(self, "_flatten_annulus", None)
+        if fa:
+            from celldenoise_flatten import flatten_one
+            img = flatten_one(img, fa["centre"], fa["r_min"], fa["r_max"])
         if img.shape[0] != self.resize or img.shape[1] != self.resize:
             img = cv2.resize(img, (self.resize, self.resize),
                              interpolation=self._interp)
