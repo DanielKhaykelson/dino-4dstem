@@ -2155,15 +2155,125 @@ class PrePanel(ctk.CTkFrame):
 
     def _on_flatten_toggle(self):
         prm = self._flatten_params() if self.flatten_ann.get() else None
-        try:
-            self._info.configure(text=(
-                f"flatten: centre ({prm['centre'][0]:.1f}, "
-                f"{prm['centre'][1]:.1f}), r {prm['r_min']}-{prm['r_max']} "
-                f"px; vmax now in std units" if prm else ""))
-        except Exception:
-            pass
         self._propagate_filters_quiet()
         self._refresh()
+        if prm:
+            self._flatten_status.configure(
+                text=f"flatten (annulus): centre ({prm['centre'][0]:.1f}, "
+                     f"{prm['centre'][1]:.1f}), r {prm['r_min']}-"
+                     f"{prm['r_max']} px - applied on the fly; vmax is now "
+                     f"in std units.  Flattening the whole cube…")
+            self._flatten_bake_start(prm)
+
+    # ---- after ticking: flatten the whole cube, then offer to save ----
+    def _flatten_bake_start(self, prm):
+        if (self._flatten_busy or self._denoise_busy or self._blur_busy
+                or self._nbed_busy or self._ellip_busy or self._bin_busy
+                or self._hotpix_busy):
+            return              # on-the-fly flatten still applies
+        Ny, Nx, H, W = self.cube.shape
+        self._flatten_busy = True
+        self._progress_popup(
+            "flatten", "Flattening (median per annulus)…",
+            f"Flattening {Ny*Nx} patterns  (r {prm['r_min']}-"
+            f"{prm['r_max']} px)")
+        threading.Thread(target=self._flatten_bake_worker,
+                         args=(dict(prm),), daemon=True).start()
+
+    def _flatten_bake_worker(self, prm):
+        tmp_path = None
+        try:
+            from celldenoise_flatten import flatten_cube_into
+            Ny, Nx, H, W = self.cube.shape
+            base = os.path.splitext(self.path)[0]
+            base = base[:-5] if base.endswith(".cube") else base
+            new_basename = os.path.basename(base) + "_annflat"
+            tmp_dir = self._mktemp_beside("dinosr_annflat_")
+            tmp_path = os.path.join(tmp_dir, new_basename + ".cube.npy")
+            out = np.lib.format.open_memmap(
+                tmp_path, mode="w+", dtype=np.float32, shape=(Ny, Nx, H, W))
+            t0 = time.time()
+
+            def _prog(row, ntot):
+                self._post(self._progress_update, "flatten", row / ntot,
+                           f"row {row}/{ntot}  ({100*row/ntot:.0f}%)"
+                           f"{self._eta_text(row, ntot, t0)}")
+            flatten_cube_into(
+                self.cube, out, centre=prm["centre"], r_min=prm["r_min"],
+                r_max=prm["r_max"], progress=_prog,
+                cancel=lambda: bool(getattr(self, "_flatten_cancel", False)))
+            out.flush(); del out
+            self._post(lambda: (self._progress_close("flatten"),
+                                self._flatten_bake_finish(
+                                    tmp_path, base, prm)))
+        except Exception as e:
+            err = repr(e)
+            if tmp_path:
+                _register_atexit_cleanup(
+                    tmp_path, cleanup_dir=os.path.dirname(tmp_path))
+            self._post(lambda: self._progress_close("flatten"))
+            self._post(lambda: self._flatten_status.configure(
+                text="flatten (annulus): whole-cube save cancelled - still "
+                     "applied on the fly" if "cancel" in err.lower()
+                     else f"flatten (annulus) bake failed: {err} - still "
+                          f"applied on the fly"))
+        finally:
+            self._flatten_busy = False
+
+    def _flatten_bake_finish(self, tmp_path, original_base, prm):
+        permanent_path = (self._undo_tempdir(original_base)
+                          + "_annflat.cube.npy")
+        save = messagebox.askyesno(
+            "Save flattened cube?",
+            f"Flattening (median per annulus) is done for every pattern.\n"
+            f"  centre ({prm['centre'][0]:.1f}, {prm['centre'][1]:.1f}) px,"
+            f"  annulus r {prm['r_min']}-{prm['r_max']} px\n\n"
+            f"Save it to:\n  {permanent_path}\n\n"
+            f"  Yes -> save, switch to the flattened cube (the checkbox is "
+            f"unticked so it is not flattened twice).\n"
+            f"  No  -> discard the file; keep flattening on the fly.")
+        if not save:
+            _register_atexit_cleanup(
+                tmp_path, cleanup_dir=os.path.dirname(tmp_path))
+            self._flatten_status.configure(
+                text="flatten (annulus): not saved - applied on the fly")
+            return
+        try:
+            shutil.move(tmp_path, permanent_path)
+            try: os.rmdir(os.path.dirname(tmp_path))
+            except Exception: pass
+        except Exception as e:
+            messagebox.showerror("save failed",
+                f"Could not move the flattened cube:\n{e}")
+            _register_atexit_cleanup(tmp_path)
+            return
+        try:
+            self.cube = np.load(permanent_path, mmap_mode="r",
+                                allow_pickle=True)
+            Ny, Nx, _H, _W = self.cube.shape
+            self.path = permanent_path
+            self._path_var.set(permanent_path)
+            self.flatten_ann.set(False)       # data are flattened now
+            self.sample_key = register_runtime_sample(
+                permanent_path, scan_shape=(Ny, Nx),
+                vmax=float(self.vmax.get()),
+                center_mask_radius=self._effective_center_mask_radius())
+            self._propagate_filters_quiet()
+        except Exception as e:
+            messagebox.showerror("reload failed",
+                f"Flattened cube saved to:\n{permanent_path}\n\nbut reload "
+                f"failed: {e}")
+            return
+        self._refresh()
+        self._flatten_status.configure(
+            text=f"flatten (annulus) saved -> {os.path.basename(permanent_path)}"
+                 f"  (active sample: {self.sample_key})")
+        try:
+            if self.on_state_change is not None:
+                self.on_state_change("loaded", sample_key=self.sample_key,
+                                     path=permanent_path)
+        except Exception:
+            pass
 
     def _propagate_filters_quiet(self):
         """Push blur / log / ellipticity into the SAMPLES entry WITHOUT
