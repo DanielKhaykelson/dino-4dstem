@@ -136,20 +136,24 @@ workflow is all there too — on the same loaded scan, no scripting.
 | **Data ▸ Load + Pre-process** | **Flyback** detection for continuously streamed scans (finds lead-in / flyback frames and the real scan grid); **hot / dead pixel** removal; **NBED centering**; **ellipticity** correction; real-space **binning**; **denoising** and radial **flattening** (above) |
 | **Clustering ▸ NMF + cluster** | Model-free **NMF + clustering** baseline (k-means, agglomerative, HDBSCAN, fuzzy c-means) on polar or Cartesian patterns; interactive class map with a **live pattern** under the mouse and **class A − class B** difference patterns |
 | **Diffraction ▸ ACOM** (orientation & phase mapping) | Load **CIFs**, calibrate against the CIF rings, **match a single pattern**, then map **class averages**, **grains** or the **full scan**: phase map, zone-axis map, correlation, optional **NNLS phase refinement** (phase weights + reliability). Overlay the DINO / NMF classes on the result and **click any pixel** to see its pattern with the matched phase. A *fiber* search can be restricted to one viewing direction **[u v w]**. |
-| **Diffraction ▸ Blob** | Bragg-disk / blob detection per class (on DINO *or* NMF classes), strain and crystallinity maps |
+| **Diffraction ▸ ACOM ▸ Data reference** | No CIF needed: a **measured** pattern (scan position, grain, ROI box or class average) is the reference — its detected spots are the template. Every pattern gets a **match score** and its **in-plane rotation** relative to the reference; several references give a **phase / zone-axis map**. Right-drag a box on the result to turn that region into a new reference. A CIF simulated at a zone axis can be added as a reference too. |
+| **Diffraction ▸ ACOM ▸ Strain** | Per-pattern **lattice strain** (εxx, εyy, εxy) and **lattice rotation** against any reference: a measured region (relative strain) or a CIF at a zone axis (absolute strain). Sub-pixel spot positions; click a pixel to see the fitted lattice. |
+| **Diffraction ▸ Crystallinity** | 1D **peak/halo** and **spottiness** maps (degree of crystallinity, no spot detection needed) |
 
-**Orientation and phase mapping is py4DSTEM's.** That tab is a graphical
-front end to py4DSTEM's crystal orientation and phase mapping
+**Orientation and phase mapping is py4DSTEM's.** The ACOM tab's *CIF* mode
+is a graphical front end to py4DSTEM's crystal orientation and phase mapping
 (`Crystal.orientation_plan` / `match_orientations`,
 `CrystalPhase.quantify_phase`) — the matching and the NNLS phase fit are
-py4DSTEM's work, not ours. If you use it, please cite
+py4DSTEM's work, not ours (the *Data reference* and *Strain* modes are
+DINO-4DSTEM's own spot matching and lattice fitting; a CIF reference there
+uses py4DSTEM only to simulate the spot positions). If you use it, please cite
 [py4DSTEM](https://github.com/py4dstem/py4DSTEM) (Savitzky *et al.*,
 *Microscopy and Microanalysis* 2021) and its orientation-mapping paper
 (Ophus *et al.*, *Microscopy and Microanalysis* 2022).
 
 **Where results go.** Every analysis tab saves into one folder next to your
-data — `<data name>_DINO4DSTEM/` with a sub-folder per tool (`nmf/`, `blob/`,
-`acom/`, …) and a README inside. The **Open outputs folder** button in the top
+data — `<data name>_DINO4DSTEM/` with a sub-folder per tool (`nmf/`,
+`acom/maps`, `acom/dataref`, `acom/strain`, …) and a README inside. The **Open outputs folder** button in the top
 bar takes you there.
 
 ---

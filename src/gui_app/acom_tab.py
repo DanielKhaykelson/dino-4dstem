@@ -47,6 +47,8 @@ from matplotlib.backends.backend_tkagg import (FigureCanvasTkAgg,
 from matplotlib.colors import ListedColormap
 
 from data import SAMPLES, LoadPRZ
+from gui_app.acom_dataref import DataRefMixin
+from gui_app.acom_strain import StrainMixin
 
 
 def _section_header(parent, text):
@@ -66,6 +68,30 @@ def _hint(parent, text):
                   text_color=("#666", "#aaa"),
                   wraplength=270, justify="left",
                   anchor="w").pack(anchor="w", padx=10, pady=(0, 2))
+
+
+def _find_nmf_label_files(d) -> dict:
+    """{method: path} of labels_<method>.npy in d, its parent and
+    its direct sub-folders (NMF saves them next to 'maps/')."""
+    out = {}
+    cands = [d, os.path.dirname(os.path.normpath(d))]
+    try:
+        cands += [os.path.join(d, x) for x in sorted(os.listdir(d))
+                  if os.path.isdir(os.path.join(d, x))]
+    except Exception:
+        pass
+    for c in cands:
+        try:
+            names = sorted(os.listdir(c))
+        except Exception:
+            continue
+        for n in names:
+            if n.startswith("labels_") and n.endswith(".npy"):
+                m = n[len("labels_"):-len(".npy")]
+                if m in out:
+                    m = f"{m}  ({os.path.basename(c)})"
+                out[m] = os.path.join(c, n)
+    return out
 
 
 def _fill_stride(obj, Ny, Nx, stride):
@@ -102,7 +128,7 @@ def _fill_stride(obj, Ny, Nx, stride):
 
 # ---------------------------------------------------------------------------
 
-class ACOMTabPanel(ctk.CTkFrame):
+class ACOMTabPanel(DataRefMixin, StrainMixin, ctk.CTkFrame):
 
     # Batch / full-dataset results each open in their OWN window.  They
     # used to clf() the main 2x2 step figure: a batch wiped the step
@@ -239,7 +265,8 @@ class ACOMTabPanel(ctk.CTkFrame):
                 ("scan pos (y, x) — DATASET only", "scan_pos"),
                 ("class avg  (DINO / NMF / DINO+cluster classes)",
                  "class_avg"),
-                ("grain @ click  (same classes)", "grain")):
+                ("grain @ click  (same classes)", "grain"),
+                ("ROI box  (two clicks on the class map)", "roi")):
             ctk.CTkRadioButton(src_row, text=label,
                                 variable=self._source_var,
                                 value=val
@@ -350,6 +377,22 @@ class ACOMTabPanel(ctk.CTkFrame):
             text_color=("#666", "#aaa"),
             wraplength=290, justify="left", anchor="w")
         self._det_status.pack(anchor="w", padx=10, pady=(2, 4))
+
+        # === Reference: CIF (steps 3-5) or measured data ==============
+        _section_header(sidebar, "Reference")
+        self._ref_mode = ctk.StringVar(value="CIF")
+        ctk.CTkSegmentedButton(sidebar, variable=self._ref_mode,
+            values=["CIF", "Data reference", "Strain"],
+            command=self._show_ref_mode).pack(fill="x", padx=10,
+                                              pady=(2, 4))
+        _ref_holder = ctk.CTkFrame(sidebar, fg_color="transparent")
+        _ref_holder.pack(fill="x")
+        self._ref_frames = {
+            "CIF": ctk.CTkFrame(_ref_holder, fg_color="transparent"),
+            "Data reference": ctk.CTkFrame(_ref_holder,
+                                           fg_color="transparent"),
+            "Strain": ctk.CTkFrame(_ref_holder, fg_color="transparent")}
+        _sidebar_main, sidebar = sidebar, self._ref_frames["CIF"]
 
         # === STEP 3: CIF + calibration ================================
         _section_header(sidebar, "3.  CIF + pixel-size calibration")
@@ -648,6 +691,12 @@ class ACOMTabPanel(ctk.CTkFrame):
                        command=self._stop_batch_run
                        ).pack(anchor="w", padx=10, pady=2)
 
+        # data-reference mode (acom_dataref.DataRefMixin)
+        self._dr_build(self._ref_frames["Data reference"])
+        self._st_build(self._ref_frames["Strain"])
+        sidebar = _sidebar_main
+        self._show_ref_mode("CIF")
+
         # ── Overlay (on the last full-dataset result) ────────────────
         _section_header(sidebar, "6.  Overlay a label map")
         _hint(sidebar,
@@ -764,6 +813,16 @@ class ACOMTabPanel(ctk.CTkFrame):
             text="(double-click any panel to enlarge it)",
             font=("Segoe UI", 9), text_color=("#888", "#888")
             ).pack(side="bottom", anchor="e", padx=8)
+
+    def _show_ref_mode(self, mode):
+        for n, fr in self._ref_frames.items():
+            if n == mode:
+                fr.pack(fill="x")
+            else:
+                fr.pack_forget()
+        self._ref_mode.set(mode)
+        if mode == "Strain":
+            self._st_refresh_refs()
 
     def _build_axes(self):
         self._fig.clf()
@@ -1022,7 +1081,6 @@ class ACOMTabPanel(ctk.CTkFrame):
         """Pick an NMF results folder (or its 'maps' / any sub-folder):
         its labels_<method>.npy become class-label sources; asks which
         one to use when there are several."""
-        from gui_app.blob_panel import BlobPanel
         from gui_app._dialogs import ask_choice
         s = self._active_sample()
         if s is None:
@@ -1031,7 +1089,7 @@ class ACOMTabPanel(ctk.CTkFrame):
         d = filedialog.askdirectory(title="Pick an NMF results folder")
         if not d:
             return
-        files = BlobPanel._find_nmf_label_files(d)
+        files = _find_nmf_label_files(d)
         if not files:
             messagebox.showinfo("ACOM",
                 f"No labels_<method>.npy in\n{d}\n(nor one level up or "
@@ -1358,6 +1416,12 @@ class ACOMTabPanel(ctk.CTkFrame):
             self._source_status.configure(
                 text=f"loaded: {which} class {cid} avg  ({H}x{W}, "
                      f"{n} positions)")
+        elif src == "roi":
+            self._roi_first = None
+            self._source_status.configure(
+                text="click two opposite corners of the box on the class "
+                     "map (bottom-right).")
+            return
         else:
             # grain / scan_pos require a click on the classmap
             self._source_status.configure(
@@ -1410,6 +1474,38 @@ class ACOMTabPanel(ctk.CTkFrame):
             self._src_class.set(str(int(grid[y, x])))
             self._load_source()
             return
+        elif src == "roi":
+            first = getattr(self, "_roi_first", None)
+            if first is None:
+                self._roi_first = (y, x)
+                self._ax_cmap.plot(x, y, "w+", ms=12, mew=2)
+                self._redraw_all()
+                self._source_status.configure(
+                    text=f"corner 1 = ({y}, {x}); click the opposite "
+                         f"corner.")
+                return
+            self._roi_first = None
+            (y0, y1), (x0, x1) = sorted((first[0], y)), sorted((first[1], x))
+            idx = (np.arange(y0, y1 + 1)[:, None] * Nx
+                   + np.arange(x0, x1 + 1)[None, :]).ravel()
+            if idx.size > 1024:
+                idx = np.random.default_rng(42).choice(idx, 1024,
+                                                       replace=False)
+            self._source_status.configure(
+                text=f"averaging {idx.size} patterns ...")
+            self.update_idletasks()
+            self._test_pattern = self._mean_raw(idx)
+            self._test_px_factor = 1.0
+            H, W = self._test_pattern.shape
+            self._test_center = (H / 2.0, W / 2.0)
+            self._test_origin = f"ROI y{y0}-{y1} x{x0}-{x1}"
+            from matplotlib.patches import Rectangle
+            self._ax_cmap.add_patch(Rectangle(
+                (x0 - 0.5, y0 - 0.5), x1 - x0 + 1, y1 - y0 + 1, fill=False,
+                ec="w", lw=1.5))
+            self._source_status.configure(
+                text=f"loaded: ROI rows {y0}-{y1}, cols {x0}-{x1}  "
+                     f"({(y1 - y0 + 1) * (x1 - x0 + 1)} positions)")
         self._detect_and_redraw()
 
     # ------------------------------------------------------------------

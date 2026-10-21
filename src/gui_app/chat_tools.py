@@ -164,8 +164,14 @@ TAB_ROUTES = {
         app._group_tabs["Clustering"].set("DINO + cluster")),
     "sam": lambda app: (app._tabs.set("Clustering"),
         app._group_tabs["Clustering"].set("SAM"), app._on_tab_change()),
+    "crystallinity": lambda app: (app._tabs.set("Diffraction"),
+        app._group_tabs["Diffraction"].set("Crystallinity"),
+        app._on_tab_change()),
+    # the Blob tab (detect / strain) is now part of ACOM
     "blob": lambda app: (app._tabs.set("Diffraction"),
-        app._group_tabs["Diffraction"].set("Blob"), app._on_tab_change()),
+        app._group_tabs["Diffraction"].set("ACOM")),
+    "strain": lambda app: (app._tabs.set("Diffraction"),
+        app._group_tabs["Diffraction"].set("ACOM")),
     "acom": lambda app: (app._tabs.set("Diffraction"),
         app._group_tabs["Diffraction"].set("ACOM")),
     "transfer": lambda app: (app._tabs.set("Model"),
@@ -1144,7 +1150,8 @@ def _build_all_tabs(app):
     except Exception:
         pass
     # Top-level + interpretation (these route through the app's lazy builders).
-    for k in ("interpretation", "sam", "blob", "transfer", "dino-cluster",
+    for k in ("interpretation", "sam", "crystallinity", "transfer",
+              "dino-cluster",
               "acom", "nmf", "eval", "training", "pre-processing"):
         r = TAB_ROUTES.get(k)
         if r:
@@ -1152,17 +1159,6 @@ def _build_all_tabs(app):
                 r(app)
             except Exception:
                 pass
-    # Blob sub-tabs (Strain / Crystallinity) — built on sub-tab visit.
-    try:
-        bt = getattr(app, "_blob_tabs", None)
-        if bt is not None:
-            for nm in ("Strain", "Crystallinity", "Detect"):
-                try:
-                    bt.set(nm); app._on_blob_subtab()
-                except Exception:
-                    pass
-    except Exception:
-        pass
     # Synthetic sub-tab under Data ▸ Pre-processing.
     try:
         app._tabs.set("Data")
@@ -1218,7 +1214,7 @@ def _reveal_widget(app, w):
         # CTkTabview.set() doesn't fire the tabview 'command' the app uses
         # to lazy-build content → a just-selected tab can be an empty gray
         # frame.  Fire the app's build handlers (what a real click does).
-        for h in ("_on_tab_change", "_on_blob_subtab", "_on_posthoc_subtab"):
+        for h in ("_on_tab_change", "_on_posthoc_subtab"):
             fn = getattr(app, h, None)
             if callable(fn):
                 try:
@@ -1244,7 +1240,7 @@ def _reveal_widget(app, w):
 
 
 _PANEL_ATTRS = ("pre", "train", "eval_panel", "nmf", "posthoc", "acom2",
-                "sam", "blob", "strain", "crystallinity", "transfer",
+                "sam", "crystallinity", "transfer",
                 "synth", "interpret", "dino_cluster")
 
 

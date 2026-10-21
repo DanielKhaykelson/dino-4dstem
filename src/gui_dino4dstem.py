@@ -91,8 +91,6 @@ from gui_app.train_panel import TrainPanel
 from gui_app.eval_panel import EvalPanel
 from gui_app.posthoc_panel import PostHocPanel
 from gui_app.sam_panel import SAMPanel
-from gui_app.blob_panel import BlobPanel
-from gui_app.strain_panel import StrainPanel
 from gui_app.fluct_panel import FluctPanel
 from gui_app.symm_panel import SymmPanel
 from gui_app.interpret_panel import InterpretPanel
@@ -582,14 +580,14 @@ class App(ctk.CTk):
         clust_frames, self._group_tabs["Clustering"] = _grp(g_clust,
             ["NMF + cluster", "DINO + cluster", "SAM"])
         diff_frames,  self._group_tabs["Diffraction"] = _grp(g_diff,
-            ["Blob", "ACOM"])
+            ["ACOM", "Crystallinity"])
         pre_tab      = pre_load_tab
         transfer_tab = model_frames["Transfer"]
         posthoc_tab  = anal_frames["Post-hoc"]
         nmf_tab      = clust_frames["NMF + cluster"]
         dinoc_tab    = clust_frames["DINO + cluster"]
         sam_tab      = clust_frames["SAM"]
-        blob_tab     = diff_frames["Blob"]
+        cryst_tab    = diff_frames["Crystallinity"]
         acom2_tab    = diff_frames["ACOM"]
 
         # Eager — used immediately or cheap to build.
@@ -644,13 +642,13 @@ class App(ctk.CTk):
 
         # Lazy — built on first tab visit. Until then these are None.
         self.sam = None
-        self.blob = None
+        self.crystallinity = None
         self.transfer = None
         self.synth = None
         self.viewing = None
         self._lazy_tab_frames = {
             "SAM": sam_tab,
-            "Blob": blob_tab,
+            "Crystallinity": cryst_tab,
             "Transfer": transfer_tab,
             "Synthetic": synth_tab,
             "Viewing": viewing_tab,
@@ -729,30 +727,11 @@ class App(ctk.CTk):
                 try: self.sam.link_run(*pl)
                 except Exception: pass
                 self._pending_sam_link = None
-        elif name == "Blob":
-            # Blob top-level tab → sub-tabview with Detect / Strain / ACOM.
-            blob_tab = self._lazy_tab_frames["Blob"]
-            self._blob_tabs = ctk.CTkTabview(blob_tab, anchor="nw",
-                                                command=self._on_blob_subtab)
-            self._blob_tabs.pack(fill="both", expand=True)
-            blob_detect_tab = self._blob_tabs.add("Detect")
-            blob_strain_tab = self._blob_tabs.add("Strain")
-            blob_cryst_tab  = self._blob_tabs.add("Crystallinity")
-            # Detect is the existing BlobPanel (eager — first visit).
-            self.blob = BlobPanel(blob_detect_tab, app=self)
-            self.blob.pack(fill="both", expand=True)
-            self.strain = None
-            self.crystallinity = None
-            self._blob_subtab_frames = {
-                "Strain":        blob_strain_tab,
-                "Crystallinity": blob_cryst_tab,
-            }
-            self._blob_subtab_built = set()
-            pl = getattr(self, "_pending_blob_link", None)
-            if pl is not None:
-                try: self.blob.link_run(*pl)
-                except Exception: pass
-                self._pending_blob_link = None
+        elif name == "Crystallinity":
+            from gui_app.crystallinity_panel import CrystallinityPanel
+            self.crystallinity = CrystallinityPanel(
+                self._lazy_tab_frames["Crystallinity"], app=self)
+            self.crystallinity.pack(fill="both", expand=True)
         elif name == "Transfer":
             self.transfer = TransferPanel(self._lazy_tab_frames["Transfer"],
                                             app=self)
@@ -772,32 +751,6 @@ class App(ctk.CTk):
         else:
             return  # nothing lazy to build for this tab
         self._lazy_tab_built.add(name)
-
-    def _on_blob_subtab(self):
-        """Lazy-build Strain / ACOM sub-tabs inside Blob."""
-        try:
-            name = self._blob_tabs.get()
-        except Exception:
-            return
-        if name in self._blob_subtab_built:
-            return
-        if name == "Strain":
-            self.strain = StrainPanel(
-                self._blob_subtab_frames["Strain"], app=self)
-            self.strain.pack(fill="both", expand=True)
-            try:
-                if self.blob is not None and self.blob.outdir is not None:
-                    self.strain.link_run(self.blob.outdir, self.blob.sample)
-            except Exception:
-                pass
-        elif name == "Crystallinity":
-            from gui_app.crystallinity_panel import CrystallinityPanel
-            self.crystallinity = CrystallinityPanel(
-                self._blob_subtab_frames["Crystallinity"], app=self)
-            self.crystallinity.pack(fill="both", expand=True)
-        else:
-            return
-        self._blob_subtab_built.add(name)
 
     def _on_posthoc_subtab(self):
         """Lazy-build the Interpretation sub-tab inside Post-hoc."""
@@ -937,14 +890,6 @@ class App(ctk.CTk):
             else:
                 # Stash the pending link for when SAM gets built.
                 self._pending_sam_link = (outdir, sample)
-        except Exception:
-            pass
-        # Same dance for the Blob tab.
-        try:
-            if self.blob is not None:
-                self.blob.link_run(outdir, sample)
-            else:
-                self._pending_blob_link = (outdir, sample)
         except Exception:
             pass
         # And Fluct-map.
