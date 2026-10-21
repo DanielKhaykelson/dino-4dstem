@@ -115,7 +115,7 @@ class DataRefMixin:
         self._dr_stride = ctk.IntVar(value=2)
         ctk.CTkEntry(sr, textvariable=self._dr_stride, width=40).pack(
             side="left", padx=4)
-        ctk.CTkButton(sr, text="Map whole scan ▶", width=150,
+        ctk.CTkButton(sr, text="Map ▶", width=150,
                       fg_color=("#2D7A2D", "#1F6A1F"),
                       command=self._dr_run_full).pack(side="left",
                                                       padx=(8, 0))
@@ -453,6 +453,11 @@ class DataRefMixin:
     # whole scan
     # ------------------------------------------------------------------
     def _dr_run_full(self):
+        # two or more references: the phase discrimination map (it also
+        # carries the match score and rotation)
+        if len(getattr(self, "_dr_refs", [])) >= 2 and hasattr(
+                self, "_pd_run_full"):
+            return self._pd_run_full()
         if not self._dr_refs:
             messagebox.showinfo("Data reference",
                                 "Add at least one reference first.")

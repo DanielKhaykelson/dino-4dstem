@@ -49,6 +49,7 @@ from matplotlib.colors import ListedColormap
 from data import SAMPLES, LoadPRZ
 from gui_app.acom_dataref import DataRefMixin
 from gui_app.acom_strain import StrainMixin
+from gui_app.acom_phasediscrim import PhaseDiscrimMixin
 
 
 def _section_header(parent, text):
@@ -128,7 +129,8 @@ def _fill_stride(obj, Ny, Nx, stride):
 
 # ---------------------------------------------------------------------------
 
-class ACOMTabPanel(DataRefMixin, StrainMixin, ctk.CTkFrame):
+class ACOMTabPanel(DataRefMixin, StrainMixin, PhaseDiscrimMixin,
+                   ctk.CTkFrame):
 
     # Batch / full-dataset results each open in their OWN window.  They
     # used to clf() the main 2x2 step figure: a batch wiped the step
@@ -693,6 +695,7 @@ class ACOMTabPanel(DataRefMixin, StrainMixin, ctk.CTkFrame):
 
         # data-reference mode (acom_dataref.DataRefMixin)
         self._dr_build(self._ref_frames["Data reference"])
+        self._pd_build(self._ref_frames["Data reference"])
         self._st_build(self._ref_frames["Strain"])
         sidebar = _sidebar_main
         self._show_ref_mode("CIF")
