@@ -1789,17 +1789,21 @@ class LoadPRZ:
         img = np.asarray(img, dtype=np.float32)
         if not np.isfinite(img).all():
             img = np.nan_to_num(img, copy=False)
-        # Cellulose 'median per annulus' flattening, on the RAW frame
-        # (before resize / vmax), when ticked in Pre-processing.  Output
-        # is a signed unit-variance residual, so vmax is then in std units.
+        # Background flattening (cellulose 'median per annulus'), on the
+        # RAW frame (before resize / vmax), when ticked in Pre-processing.
+        # Output is the positive residual in std units (vmax is then in
+        # σ), so it is normalised from 0, not from the pattern's minimum.
         fa = getattr(self, "_flatten_annulus", None)
+        vmin = self.vmin
         if fa:
             from celldenoise_flatten import flatten_one
             img = flatten_one(img, fa["centre"], fa["r_min"], fa["r_max"])
+            if vmin is None:
+                vmin = 0.0
         if img.shape[0] != self.resize or img.shape[1] != self.resize:
             img = cv2.resize(img, (self.resize, self.resize),
                              interpolation=self._interp)
-        img = rescale_like_vmax(img, vmax=self.vmax, vmin=self.vmin,
+        img = rescale_like_vmax(img, vmax=self.vmax, vmin=vmin,
                                  out_range=self.out_range)
         # Ellipticity correction — affine warp baked in so every
         # downstream tab (training / eval / post-hoc / ACOM) gets the

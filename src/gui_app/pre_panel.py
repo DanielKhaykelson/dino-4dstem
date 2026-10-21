@@ -92,6 +92,33 @@ def _com_shift(img: np.ndarray, search_radius: int) -> np.ndarray:
     return out
 
 
+# control-panel styling
+_SEC_FONT = ("Segoe UI", 12, "bold")
+_NOTE_FONT = ("Segoe UI", 11)
+_NOTE_CLR = ("#666666", "#9a9a9a")
+_APPLY_CLR = ("#2D5FA8", "#1F4E8F")
+_HOVER_CLR = ("#e2e2e2", "#3a3a3a")
+
+
+class _StatusLabel(ctk.CTkLabel):
+    """Status line that takes no space while it is empty."""
+
+    def __init__(self, master, **kw):
+        super().__init__(master, **kw)
+        self._shown = False
+
+    def configure(self, require_redraw=False, **kw):
+        super().configure(require_redraw=require_redraw, **kw)
+        if "text" in kw:
+            want = bool(str(kw["text"]).strip())
+            if want and not self._shown:
+                self.pack(anchor="w", padx=10, pady=(0, 2),
+                          after=self._anchor)
+            elif not want and self._shown:
+                self.pack_forget()
+            self._shown = want
+
+
 class PrePanel(ctk.CTkFrame):
 
     def __init__(self, master, on_state_change=None):
@@ -109,7 +136,7 @@ class PrePanel(ctk.CTkFrame):
         self._ellip_busy = False
         self._hotpix_busy = False
         self._denoise_busy = False       # N2N binomial denoise in progress
-        self._flatten_busy = False       # radial-background flatten in progress
+        self._flatten_busy = False       # whole-cube flatten in progress
         self._hotpix_mask = None        # last detected bad-pixel mask (H, W)
         self._folder_busy = False       # image-folder → cube build in progress
         self._nbed_overlay_center: "tuple[float, float] | None" = None
@@ -157,10 +184,6 @@ class PrePanel(ctk.CTkFrame):
         self.ellip_theta = ctk.DoubleVar(value=0.0)      # deg
         self.idx = ctk.IntVar(value=0)
         self.cmap = ctk.StringVar(value="inferno")
-        # radial-background flatten mode: subtract azimuthal median (the
-        # N2N-pipeline flatten, signed) or divide by azimuthal mean
-        # (ratio, background -> ~1, non-negative).
-        self.flatten_mode = ctk.StringVar(value="subtract")
 
         self._build()
 
@@ -321,178 +344,208 @@ class PrePanel(ctk.CTkFrame):
         for ax in (self._ax_proc, self._ax_polar):
             ax.set_xticks([]); ax.set_yticks([])
         self._fig.tight_layout()
-        self._canvas = FigureCanvasTkAgg(self._fig, master=fig_holder)
-        self._canvas.get_tk_widget().pack(fill="both", expand=True)
+        self._fig_canvas = FigureCanvasTkAgg(self._fig, master=fig_holder)
+        self._fig_canvas.get_tk_widget().pack(fill="both", expand=True)
         self._info = ctk.CTkLabel(fig_holder, text="(no cube loaded)",
                                     font=("Consolas", 10), anchor="w",
                                     justify="left")
         self._info.pack(fill="x", padx=4, pady=(2, 4))
 
-        # control panel — scrollable so the whole NBED section (and
-        # any future additions below it) stay reachable on small
-        # windows / shorter screens.
-        ctrl = ctk.CTkScrollableFrame(body, width=340)
-        ctrl.pack(side="left", fill="y", padx=(8, 0))
-        ctk.CTkLabel(ctrl, text="Pattern index",
-                      font=("Segoe UI", 11, "bold")).pack(
-            anchor="w", padx=8, pady=(8, 0))
-        self._idx_lbl = ctk.CTkLabel(ctrl, text="—")
-        self._idx_lbl.pack(anchor="w", padx=8)
-        ctk.CTkLabel(ctrl,
-            text="(click slider or image, then ←/→ = ±1, "
-                  "PgUp/PgDn = ±10)",
-            font=("Segoe UI", 8), text_color=("#777", "#999")
-            ).pack(anchor="w", padx=8)
-        self._idx_slider = ctk.CTkSlider(ctrl, from_=0, to=1,
-                                           command=self._on_idx)
-        self._idx_slider.pack(fill="x", padx=8, pady=(0, 8))
-        self._wire_idx_keys()
+        # ---- control panel ------------------------------------------
+        # Top: pattern navigator (always visible).  Below: three pages -
+        #   Model input  : on-the-fly settings that define what the model
+        #                  sees (nothing on disk changes) + "Load
+        #                  parameters to model".
+        #   Correct data : one-off corrections that WRITE a new cube
+        #                  (collapsible cards, one open at a time).
+        #   Labels       : optional pair labelling.
+        side = ctk.CTkFrame(body, width=400, fg_color="transparent")
+        side.pack(side="left", fill="y", padx=(8, 0))
+        side.pack_propagate(False)
 
-        self._row_slider(ctrl, "vmax", self.vmax, 0.1, 250.0, 0.1,
+        nav_box = ctk.CTkFrame(side)
+        nav_box.pack(fill="x", pady=(0, 6))
+        nh = ctk.CTkFrame(nav_box, fg_color="transparent")
+        nh.pack(fill="x", padx=8, pady=(6, 0))
+        ctk.CTkLabel(nh, text="Pattern", font=_SEC_FONT).pack(side="left")
+        self._idx_lbl = ctk.CTkLabel(nh, text="—")
+        self._idx_lbl.pack(side="left", padx=(10, 0))
+        add_help_button(nh,
+            "Browse the scan.  Click the slider (or the image), then "
+            "←/→ = ±1 pattern, PgUp/PgDn = ±10.").pack(side="right")
+        self._idx_slider = ctk.CTkSlider(nav_box, from_=0, to=1,
+                                           command=self._on_idx)
+        self._idx_slider.pack(fill="x", padx=8, pady=(2, 2))
+        self._wire_idx_keys()
+        nav = ctk.CTkFrame(nav_box, fg_color="transparent")
+        nav.pack(fill="x", padx=8, pady=(0, 6))
+        for label, dx in (("«", -10), ("‹", -1), ("›", +1), ("»", +10)):
+            ctk.CTkButton(nav, text=label, width=40, height=26,
+                           command=lambda d=dx: self._step(d)).pack(
+                side="left", padx=1)
+        ctk.CTkButton(nav, text="Random", width=70, height=26,
+                       command=self._random).pack(side="left", padx=(6, 0))
+        ctk.CTkLabel(nav, text="cmap").pack(side="left", padx=(12, 2))
+        ctk.CTkOptionMenu(nav, variable=self.cmap, width=96, height=26,
+            values=["inferno", "viridis", "magma", "gray", "plasma",
+                    "cividis"],
+            command=lambda _v: self._refresh()).pack(side="left")
+
+        self._page_var = ctk.StringVar(value="Model input")
+        ctk.CTkSegmentedButton(side, variable=self._page_var,
+            values=["Model input", "Correct data", "Labels"],
+            command=self._show_page).pack(fill="x", pady=(0, 4))
+        self._pages = {}
+        for name in ("Model input", "Correct data", "Labels"):
+            self._pages[name] = ctk.CTkScrollableFrame(side)
+
+        # ============ page 1: Model input ==============================
+        pg = self._pages["Model input"]
+        ctk.CTkLabel(pg,
+            text="Applied on the fly to every pattern - the file on disk "
+                 "is not changed.",
+            font=_NOTE_FONT, text_color=_NOTE_CLR, wraplength=350,
+            justify="left").pack(anchor="w", padx=8, pady=(2, 4))
+
+        self._section(pg, "Intensity")
+        self._row_slider(pg, "vmax", self.vmax, 0.1, 250.0, 0.1,
                           "Per-pattern intensity normalisation cap. "
                           "Pixel values above this clip to 1.0 in the "
                           "rescaled image. Lower vmax saturates more of "
                           "the central beam halo.\n\n"
-                          "This is NOT display-only, but moving the slider "
-                          "only changes the PREVIEW. To make it the vmax a "
-                          "run uses, press \"Load parameters to model\" below: "
-                          "that sends it (with the crop / masks / COM) to "
-                          "Training, and to the NMF tab when its \"use sample "
-                          "vmax\" is ticked - untick it there to override.\n\n"
+                          "Moving the slider only changes the PREVIEW. To "
+                          "make it the vmax a run uses, press \"Load "
+                          "parameters to model\" below: that sends it (with "
+                          "the crop / masks / COM) to Training, and to the "
+                          "NMF tab when its \"use sample vmax\" is ticked - "
+                          "untick it there to override.\n\n"
                           "The slider covers 0.1-250. For raw-count data "
-                          "(e.g. un-normalised detector counts) you can "
-                          "TYPE a larger value in the box, up to 10000 - "
-                          "the slider then just rests at its right end.",
+                          "you can TYPE a larger value in the box, up to "
+                          "10000.\n\nWith 'Flatten background' ticked the "
+                          "data are in standard deviations and vmax is set "
+                          "for you (typically 5-15).",
                           entry_hi=1e4)
-        self._row_slider(ctrl, "center crop (px, in 192 frame)",
-                          self.center_crop_size, 32, 192, 1,
-                          "Cartesian center-crop applied AFTER the cube "
-                          "is resized to 192×192 (matches the training "
-                          "pipeline order: LoadPRZ resize → CenterCrop "
-                          "→ COM → Resize → Polar). 140 = central 73% "
-                          "of the 192-frame; cropped result is then "
-                          "blown back up to 192 for the polar transform.")
-        # The OLD `beam-mask radius` slider has been removed: it
-        # represented the same physical thing as polar_mask_cols (mask
-        # the low-radius / direct-beam region) and confused users.
-        # polar_mask_cols is the canonical control; the equivalent
-        # beam-mask radius in 192-frame cart pixels is just
-        # polar_mask_cols / 2.
-        self._row_slider(ctrl, "polar_mask_cols (low-r mask in polar)",
-                          self.polar_mask_cols, 0, 96, 1,
-                          "Number of leftmost columns of the polar "
-                          "image (= low-radius region) zeroed before "
-                          "the model sees them.  This is the SINGLE "
-                          "low-r mask control — it replaces the old "
-                          "'beam-mask radius' slider, which did the "
-                          "same thing in cart space.  In the right-"
-                          "pane polar preview the masked columns "
-                          "appear black.  Equivalent cart-frame beam "
-                          "radius ≈ polar_mask_cols / 2 (so 45 here "
-                          "= ~22 px disk in 192-frame).")
+        r = ctk.CTkFrame(pg, fg_color="transparent")
+        r.pack(fill="x", padx=8, pady=(0, 2))
+        ctk.CTkCheckBox(r, text="log-stretch", variable=self.log_stretch,
+                        command=self._propagate_filters).pack(side="left")
+        add_help_button(r,
+            "log1p(I × 50) / log1p(50) AFTER vmax normalisation, forwarded "
+            "to every downstream tab (Training, NMF, Post-hoc, …).  "
+            "Compresses the dynamic range so weak rings / Bragg peaks count "
+            "more in the model's loss.").pack(side="left", padx=(6, 0))
 
-        # Cellulose 'median per annulus' flattening (verbatim flatten_cart),
-        # applied on the fly like COM / blur / log
-        fa_row = ctk.CTkFrame(ctrl, fg_color="transparent")
-        fa_row.pack(fill="x", padx=8, pady=(4, 0))
+        self._section(pg, "Geometry")
+        self._row_slider(pg, "centre crop (px of the 192 frame)",
+                          self.center_crop_size, 32, 192, 1,
+                          "Cartesian centre-crop applied AFTER the pattern "
+                          "is resized to 192×192 (same order as training: "
+                          "resize → CenterCrop → COM → Resize → Polar). "
+                          "140 = central 73% of the frame; the crop is "
+                          "blown back up to 192 for the polar transform.")
+        self._row_slider(pg, "low-r mask (polar columns)",
+                          self.polar_mask_cols, 0, 96, 1,
+                          "polar_mask_cols: number of leftmost columns of "
+                          "the polar image (= the low-radius / direct-beam "
+                          "region) zeroed before the model sees them - "
+                          "black in the right-hand preview.  Equivalent "
+                          "beam radius in the 192 frame ≈ value / 2.")
+        r = ctk.CTkFrame(pg, fg_color="transparent")
+        r.pack(fill="x", padx=8, pady=(0, 2))
+        ctk.CTkCheckBox(r, text="COM-centre the direct beam",
+                        variable=self.com,
+                        command=self._refresh).pack(side="left")
+        add_help_button(r,
+            "Before resizing, find the centre of mass of the intensity near "
+            "the direct beam and shift so the beam is centred.  Removes "
+            "residual probe drift.").pack(side="left", padx=(6, 0))
+
+        self._section(pg, "Background & smoothing")
+        fa_row = ctk.CTkFrame(pg, fg_color="transparent")
+        fa_row.pack(fill="x", padx=8, pady=(0, 2))
         self.flatten_ann = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(fa_row, text="Flatten (median per annulus)",
+        ctk.CTkCheckBox(fa_row, text="Flatten background",
                         variable=self.flatten_ann,
                         command=self._on_flatten_toggle).pack(side="left")
-        ctk.CTkLabel(fa_row, text="r").pack(side="left", padx=(6, 1))
-        self._flat_rmin = ctk.StringVar(value="auto")
-        _e1 = ctk.CTkEntry(fa_row, textvariable=self._flat_rmin, width=42)
-        _e1.pack(side="left")
-        ctk.CTkLabel(fa_row, text="–").pack(side="left", padx=1)
-        self._flat_rmax = ctk.StringVar(value="auto")
-        _e2 = ctk.CTkEntry(fa_row, textvariable=self._flat_rmax, width=42)
-        _e2.pack(side="left")
-        for _e in (_e1, _e2):
-            _e.bind("<Return>", lambda _ev: self._on_flatten_toggle())
         add_help_button(fa_row,
-            "The cellulose project's flattening, copied verbatim "
-            "(step154_cartesian.py::flatten_cart): for every 1-px annulus "
-            "about the beam centre subtract the MEDIAN of the pattern on "
-            "that annulus, zero everything outside r_min..r_max, divide by "
-            "the pattern's std inside the annulus.  No interpolation.\n\n"
-            "Applied to the RAW frame first, on the fly, everywhere the "
-            "model looks (preview, training, NMF, eval) - like COM.  The "
-            "result is a signed, unit-variance residual, so vmax is then "
-            "in standard deviations (try 3-5) and negatives clip to 0.  "
-            "'auto' r = 1.5 x the direct-beam radius .. half the detector.  "
-            "ACOM keeps reading the raw counts."
-            ).pack(side="left", padx=(4, 0))
+            "Removes the smooth, round background (direct-beam skirt, "
+            "amorphous halo) so the Bragg / orientation signal stands out - "
+            "the cellulose project's flattening (flatten_cart, same "
+            "numbers):\n\n"
+            "  1. each pattern is shifted (whole pixels) so its own direct "
+            "beam is on the scan-mean centre;\n"
+            "  2. on every 1-px ring between r_min and r_max the MEDIAN of "
+            "that ring is subtracted (Bragg spots are sparse in angle, so "
+            "the median is the background);\n"
+            "  3. outside the ring range -> 0; the result is divided by the "
+            "pattern's std, and only the positive part (above background) "
+            "is kept.\n\n"
+            "Data are then in standard deviations, so vmax is set for you "
+            "(99.5th percentile; your old vmax returns when you untick).  "
+            "'auto' radii: r_min = 1.3 × the direct-beam disk edge, r_max = "
+            "half the detector (raw detector pixels).\n\n"
+            "Ticking flattens the whole cube in the background and then "
+            "asks whether to save it as a new <name>_annflat.cube.npy.  "
+            "ACOM keeps reading the raw counts.").pack(side="left",
+                                                       padx=(6, 0))
+        ctk.CTkLabel(fa_row, text="r").pack(side="left", padx=(12, 2))
+        self._flat_rmin = ctk.StringVar(value="auto")
+        _e1 = ctk.CTkEntry(fa_row, textvariable=self._flat_rmin, width=48)
+        _e1.pack(side="left")
+        ctk.CTkLabel(fa_row, text="–").pack(side="left", padx=2)
+        self._flat_rmax = ctk.StringVar(value="auto")
+        _e2 = ctk.CTkEntry(fa_row, textvariable=self._flat_rmax, width=48)
+        _e2.pack(side="left")
+        ctk.CTkLabel(fa_row, text="px").pack(side="left", padx=(2, 0))
+        for _e in (_e1, _e2):
+            _e.bind("<Return>", lambda _ev: self._on_flatten_radii())
+        self._flatten_status = self._status(pg)
 
-        # COM centering
-        com_row = ctk.CTkFrame(ctrl, fg_color="transparent")
-        com_row.pack(fill="x", padx=8, pady=4)
-        ctk.CTkCheckBox(com_row, text="COM-center the direct beam",
-                         variable=self.com,
-                         command=self._refresh).pack(side="left")
-        h = add_help_button(com_row,
-            "Before resizing, find the center of mass of intensity "
-            "within 2 x beam-mask radius and shift so the direct beam "
-            "is centered. Removes residual probe drift.")
-        h.pack(side="left", padx=(6, 0))
-
-        # Log-stretch toggle for the display panes only — does NOT
-        # change what the model sees during training.
-        log_row = ctk.CTkFrame(ctrl, fg_color="transparent")
-        log_row.pack(fill="x", padx=8, pady=2)
-        ctk.CTkCheckBox(log_row, text="log-stretch",
-                          variable=self.log_stretch,
-                          command=self._propagate_filters
-                          ).pack(side="left")
-        h_log = add_help_button(log_row,
-            "Log stretch: applies log1p(I × 50) / log1p(50) AFTER vmax "
-            "normalisation, then forwards the result to every "
-            "downstream tab (Training, NMF, Post-hoc, DINO+cluster, …) "
-            "via the LoadPRZ pipeline.  Useful for compressing dynamic "
-            "range so weak rings / Bragg peaks contribute more to the "
-            "model's loss.  Stored on the active sample's SAMPLES entry "
-            "— toggle live.")
-        h_log.pack(side="left", padx=(6, 0))
-
-        # Gaussian blur — display-only checkbox + permanent-apply button.
-        blur_row = ctk.CTkFrame(ctrl, fg_color="transparent")
-        blur_row.pack(fill="x", padx=8, pady=2)
+        blur_row = ctk.CTkFrame(pg, fg_color="transparent")
+        blur_row.pack(fill="x", padx=8, pady=(2, 2))
         ctk.CTkCheckBox(blur_row, text="Gaussian blur",
                           variable=self.use_blur,
                           command=self._propagate_filters
                           ).pack(side="left")
-        ctk.CTkLabel(blur_row, text="σ (px):").pack(side="left",
-                                                        padx=(8, 2))
+        add_help_button(blur_row,
+            "Gaussian blur σ (pixels of the 192 model frame) applied after "
+            "vmax normalisation, on the fly.  'Bake…' writes a blurred copy "
+            "of the cube instead (faster downstream reads); the original "
+            "is untouched.").pack(side="left", padx=(6, 0))
+        ctk.CTkLabel(blur_row, text="σ").pack(side="left", padx=(12, 2))
         e_blur = ctk.CTkEntry(blur_row, textvariable=self.blur_sigma,
-                                 width=60)
-        e_blur.pack(side="left", padx=2)
+                                 width=48)
+        e_blur.pack(side="left")
         e_blur.bind("<Return>", lambda _e: self._propagate_filters())
-        h_blur = add_help_button(blur_row,
-            "Gaussian blur σ (in 192-px model-input pixels) applied "
-            "in LoadPRZ after vmax normalisation.  Toggle live — "
-            "every downstream tab that re-opens this sample sees "
-            "the blurred frames.  Does NOT modify the cube file on "
-            "disk; if you want a permanent baked-in copy (faster "
-            "downstream reads), click 'Apply blur to dataset…' below.")
-        h_blur.pack(side="left", padx=(6, 0))
-        blur_apply_row = ctk.CTkFrame(ctrl, fg_color="transparent")
-        blur_apply_row.pack(fill="x", padx=8, pady=(0, 4))
-        ctk.CTkButton(blur_apply_row,
-            text="Apply blur to dataset…  (write new .cube.npy)",
-            width=320,
-            command=self._blur_apply_all).pack(side="left")
-        self._blur_status = ctk.CTkLabel(ctrl, text="",
-            font=("Consolas", 9), justify="left",
-            text_color=("#444", "#aaa"))
-        self._blur_status.pack(anchor="w", padx=10, pady=(0, 4))
+        ctk.CTkButton(blur_row, text="Bake…", width=64, height=26,
+                      command=self._blur_apply_all).pack(side="left",
+                                                         padx=(8, 0))
+        self._blur_status = self._status(pg)
 
-        # ---- Hot-/dead-pixel removal --------------------------------
-        hp_box = ctk.CTkFrame(ctrl, border_width=1)
-        hp_box.pack(fill="x", padx=6, pady=(8, 4))
-        hp_t = ctk.CTkFrame(hp_box, fg_color="transparent")
-        hp_t.pack(fill="x", padx=4, pady=(4, 0))
-        ctk.CTkLabel(hp_t, text="Hot-/dead-pixel removal",
-                      font=("Segoe UI", 11, "bold")).pack(side="left")
-        add_help_button(hp_t,
+        ctk.CTkButton(pg, text="Load parameters to model  →", height=34,
+            fg_color=("#2D7A2D", "#1F6A1F"),
+            hover_color=("#256B25", "#195819"),
+            command=self._load_params_to_model).pack(fill="x", padx=8,
+                                                     pady=(12, 2))
+        self._load_params_status = self._status(pg)
+        ctk.CTkLabel(pg,
+            text="Sends vmax, crop, mask, COM, log, blur and flatten to the "
+                 "Training and NMF tabs.",
+            font=_NOTE_FONT, text_color=_NOTE_CLR, wraplength=350,
+            justify="left").pack(anchor="w", padx=8, pady=(0, 6))
+
+        # ============ page 2: Correct data =============================
+        pg = self._pages["Correct data"]
+        ctk.CTkLabel(pg,
+            text="Each tool writes a NEW corrected .cube.npy next to your "
+                 "data and switches to it.  The original file is never "
+                 "modified.",
+            font=_NOTE_FONT, text_color=_NOTE_CLR, wraplength=350,
+            justify="left").pack(anchor="w", padx=8, pady=(2, 6))
+        self._cards = {}
+
+        # ---- Hot-/dead-pixel removal
+        c = self._card(pg, "Hot-/dead-pixel removal",
             "Finds detector-fixed hot pixels (isolated spikes) and dead "
             "pixels (stuck-low) from the scan-mean pattern, then replaces "
             "each with the median of its good neighbours in EVERY frame.\n\n"
@@ -500,388 +553,235 @@ class PrePanel(ctk.CTkFrame):
             "bright direct beam is never flagged — only pixels that are "
             "> k robust-σ AND far above/below their local 3×3 median.\n\n"
             "'Detect + preview' samples the scan and shows the flagged "
-            "pixels; 'Apply to entire cube' writes a new corrected "
-            ".cube.npy (like the blur/binning bakes) and switches to it. "
-            "The original file is untouched.").pack(side="left", padx=(6, 0))
-        hp_row = ctk.CTkFrame(hp_box, fg_color="transparent")
-        hp_row.pack(fill="x", padx=8, pady=(4, 2))
-        ctk.CTkLabel(hp_row, text="sensitivity k (σ):").pack(side="left",
-                                                             padx=(2, 4))
-        ctk.CTkSlider(hp_row, from_=3.0, to=20.0, variable=self.hotpix_k,
-                      width=150).pack(side="left")
-        self._hotpix_k_lbl = ctk.CTkLabel(hp_row, text="8.0", width=34)
-        self._hotpix_k_lbl.pack(side="left", padx=(4, 8))
+            "pixels; 'Apply…' writes the corrected cube and switches to it.")
+        r = ctk.CTkFrame(c, fg_color="transparent")
+        r.pack(fill="x", padx=8, pady=(4, 2))
+        ctk.CTkLabel(r, text="sensitivity k (σ)").pack(side="left")
+        ctk.CTkSlider(r, from_=3.0, to=20.0, variable=self.hotpix_k,
+                      width=140).pack(side="left", padx=6)
+        self._hotpix_k_lbl = ctk.CTkLabel(r, text="8.0", width=34)
+        self._hotpix_k_lbl.pack(side="left")
         self.hotpix_k.trace_add(
             "write",
             lambda *_: self._hotpix_k_lbl.configure(
                 text=f"{float(self.hotpix_k.get()):.1f}"))
-        ctk.CTkCheckBox(hp_row, text="also dead pixels",
-                        variable=self.hotpix_dead).pack(side="left", padx=8)
-        hp_row2 = ctk.CTkFrame(hp_box, fg_color="transparent")
-        hp_row2.pack(fill="x", padx=8, pady=(0, 4))
-        ctk.CTkButton(hp_row2, text="Detect + preview", width=140,
+        ctk.CTkCheckBox(c, text="also dead pixels",
+                        variable=self.hotpix_dead).pack(anchor="w", padx=8,
+                                                        pady=2)
+        r = ctk.CTkFrame(c, fg_color="transparent")
+        r.pack(fill="x", padx=8, pady=(2, 2))
+        ctk.CTkButton(r, text="Detect + preview", width=150,
                       command=self._hotpix_detect_preview).pack(side="left")
-        ctk.CTkButton(hp_row2,
-            text="Apply to entire cube…  (write new .cube.npy)", width=320,
-            command=self._hotpix_apply_all).pack(side="left", padx=8)
-        self._hotpix_status = ctk.CTkLabel(ctrl, text="",
-            font=("Consolas", 9), justify="left",
-            text_color=("#444", "#aaa"))
-        self._hotpix_status.pack(anchor="w", padx=10, pady=(0, 4))
+        ctk.CTkButton(r, text="Apply to whole cube…", width=170,
+                      fg_color=_APPLY_CLR,
+                      command=self._hotpix_apply_all).pack(side="left",
+                                                           padx=(8, 0))
+        self._hotpix_status = self._status(c)
 
-        # ---- Self-supervised denoising (Noise2Noise, binomial) ------
-        # Trains a tiny dose-equivariant U-Net on binomially-split halves
-        # of each pattern (Poisson thinning → two independent half-dose
-        # exposures of the same signal), then applies it to the whole
-        # cube.  Needs no clean reference and no repeated acquisition —
-        # one exposure is enough.  Writes a new .cube.npy and switches to
-        # it (original untouched), like the blur / hot-pixel bakes.
-        dn_box = ctk.CTkFrame(ctrl, border_width=1)
-        dn_box.pack(fill="x", padx=6, pady=(8, 4))
-        dn_t = ctk.CTkFrame(dn_box, fg_color="transparent")
-        dn_t.pack(fill="x", padx=4, pady=(4, 0))
-        ctk.CTkLabel(dn_t, text="Denoising (self-supervised)",
-                      font=("Segoe UI", 11, "bold")).pack(side="left")
-        add_help_button(dn_t,
+        # ---- NBED centering
+        c = self._card(pg, "Beam centring (NBED)",
+            "Robust bright-field-disk centring for low-mag / NBED data, "
+            "where COM fails (saturated beam, beam stop, diffuse halo).  "
+            "Runs once over the whole cube; the result becomes the active "
+            "dataset and can be saved as <name>_nbed.cube.npy.")
+        self._row_slider(c, "search radius (raw px)",
+                          self._nbed_search_radius, 4, 256, 1,
+                          "Coarse-search disk for the brightest pixel "
+                          "near the centre. Larger than the expected "
+                          "misalignment, smaller than the distance to the "
+                          "first Bragg ring.")
+        self._row_slider(c, "BF disk radius (raw px)",
+                          self._nbed_disk_radius, 2, 128, 1,
+                          "Refinement disk: the threshold-centroid is "
+                          "taken over pixels within this radius of the "
+                          "bright spot.  ≈ the BF-disk radius.")
+        self._row_slider(c, "threshold fraction",
+                          self._nbed_threshold, 0.10, 0.90, 0.01,
+                          "Pixels above (threshold × local max) "
+                          "contribute to the centroid. 0.5 = FWHM. Lower "
+                          "includes the disk skirt; higher uses only the "
+                          "saturated core.")
+        r = ctk.CTkFrame(c, fg_color="transparent")
+        r.pack(fill="x", padx=8, pady=(2, 2))
+        ctk.CTkButton(r, text="Preview this pattern", width=150,
+                       command=self._nbed_preview_one).pack(side="left")
+        ctk.CTkButton(r, text="Centre whole cube…", width=170,
+                       fg_color=_APPLY_CLR,
+                       command=self._nbed_center_all).pack(side="left",
+                                                           padx=(8, 0))
+        self._nbed_status = self._status(c)
+
+        # ---- Ellipticity
+        c = self._card(pg, "Ellipticity correction",
+            "Corrects elliptical distortion of diffraction features (BF "
+            "disk / amorphous ring / Bragg lattice) — usually lens "
+            "astigmatism or detector geometry.\n\n"
+            "  • BF disk edge — ellipse fit to the Sobel edge of the "
+            "bright-field disk (works on any dataset).  Default.\n"
+            "  • Amorphous ring — weighted-moment fit around the ring peak.\n"
+            "  • Manual — type a/b and θ.\n\n"
+            "The sliders preview live; 'Apply…' writes the corrected cube.")
+        r = ctk.CTkFrame(c, fg_color="transparent")
+        r.pack(fill="x", padx=8, pady=(4, 2))
+        ctk.CTkLabel(r, text="fit on").pack(side="left")
+        ctk.CTkOptionMenu(r, variable=self.ellip_mode,
+                            values=["BF disk edge", "Amorphous ring",
+                                    "Manual"], width=150,
+                            command=lambda _v: self._refresh()
+                            ).pack(side="left", padx=6)
+        ctk.CTkButton(r, text="Auto-fit", width=90,
+                        command=self._ellip_autofit).pack(side="left")
+        self._row_slider(c, "a/b ratio", self.ellip_ab, 0.85, 1.15, 0.001,
+                          "Major / minor axis ratio.  1.0 = circle (no "
+                          "correction).  Live preview.")
+        self._row_slider(c, "θ (deg)", self.ellip_theta, -90.0, 90.0, 0.5,
+                          "Angle of the major axis (0° = +x, +ve = CCW).")
+        r = ctk.CTkFrame(c, fg_color="transparent")
+        r.pack(fill="x", padx=8, pady=(2, 2))
+        ctk.CTkButton(r, text="Reset (1, 0°)", width=150,
+                        command=self._ellip_reset).pack(side="left")
+        ctk.CTkButton(r, text="Apply to whole cube…", width=170,
+                        fg_color=_APPLY_CLR,
+                        command=self._ellip_apply_all).pack(side="left",
+                                                            padx=(8, 0))
+        self._ellip_status = self._status(c)
+
+        # ---- Denoising
+        c = self._card(pg, "Denoising (Noise2Noise, binomial)",
             "Noise2Noise by BINOMIAL SPLITTING — self-supervised, needs "
             "no clean reference.\n\n"
-            "Each low-dose diffraction pattern is a Poisson draw: every "
-            "pixel holds a count k ~ Poisson(λ), and λ is the noise-free "
-            "pattern.  Flip a fair coin for every electron and deal the "
-            "counts into two piles: h1 ~ Binomial(k, ½), h2 = k − h1.  By "
-            "Poisson thinning h1 and h2 are two INDEPENDENT half-dose "
-            "exposures of the SAME pattern — exactly the pair Noise2Noise "
-            "needs.  A network trained to map one noisy half to the other "
-            "converges to the signal, because the noise has zero "
-            "conditional mean.\n\n"
-            "A deliberately small, dose-equivariant U-Net is trained on a "
-            "fresh random split every step (it can never memorise a noise "
-            "realisation), then applied to the FULL exposure of every "
-            "pattern.  Writes a new <base>_n2n.cube.npy and switches to "
-            "it; the original file is untouched.  You are asked whether to "
-            "save permanently after a before/after preview.\n\n"
-            "Best on RAW integer-count data (Merlin, EMPAD, Dectris).  On "
-            "an already-normalised cube the split is only approximate and "
-            "you'll get a warning.").pack(side="left", padx=(6, 0))
-        ctk.CTkLabel(dn_box,
-            text="Binomial Noise2Noise — one exposure is enough; no clean "
-                 "reference needed.",
-            font=("Segoe UI", 9), wraplength=300, justify="left",
-            text_color=("#666", "#999")).pack(anchor="w", padx=8, pady=(2, 2))
-        dn_row = ctk.CTkFrame(dn_box, fg_color="transparent")
-        dn_row.pack(fill="x", padx=8, pady=(2, 4))
-        self._denoise_btn = ctk.CTkButton(dn_row,
-            text="Denoise (Noise2Noise, binomial)…",
-            width=300, fg_color=("#2D5FA8", "#1F4E8F"),
-            command=self._denoise_apply_all)
-        self._denoise_btn.pack(side="left")
-        fold_row = ctk.CTkFrame(dn_box, fg_color="transparent")
-        fold_row.pack(fill="x", padx=8, pady=(0, 2))
-        ctk.CTkLabel(fold_row, text="output:").pack(side="left")
+            "Each low-dose pattern is a Poisson draw: every pixel holds a "
+            "count k ~ Poisson(λ), and λ is the noise-free pattern.  Deal "
+            "every electron into two piles with a fair coin: h1 ~ "
+            "Binomial(k, ½), h2 = k − h1.  By Poisson thinning h1 and h2 "
+            "are two INDEPENDENT half-dose exposures of the SAME pattern — "
+            "exactly the pair Noise2Noise needs.\n\n"
+            "A small dose-equivariant U-Net is trained on a fresh split "
+            "every step, then applied to the full exposure of every "
+            "pattern.  You see a before/after preview and choose whether to "
+            "save <name>_n2n.cube.npy.\n\n"
+            "Best on RAW integer counts (Merlin, EMPAD, Dectris).  Uses the "
+            "GPU when there is one.")
+        r = ctk.CTkFrame(c, fg_color="transparent")
+        r.pack(fill="x", padx=8, pady=(4, 2))
+        ctk.CTkLabel(r, text="output").pack(side="left")
         self._denoise_fold = ctk.StringVar(value="unfolded")
-        ctk.CTkOptionMenu(fold_row, variable=self._denoise_fold,
+        ctk.CTkOptionMenu(r, variable=self._denoise_fold,
             values=["unfolded", "two-fold (Friedel)", "both"],
-            width=170).pack(side="left", padx=4)
-        add_help_button(fold_row,
+            width=170).pack(side="left", padx=6)
+        add_help_button(r,
             "Two-fold (Friedel) fold: each denoised pattern is averaged "
             "with itself rotated 180° about its own beam centre.  Exact "
             "(no interpolation), counts preserved; halves the remaining "
-            "noise in Friedel pairs and removes one-sided glow.  But it "
-            "also erases any REAL Friedel imbalance (dynamical scattering, "
-            "thickness) - so, as in the cellulose pipeline, 'both' keeps "
-            "the unfolded cube active and writes <base>_n2n_fold2.cube.npy "
-            "next to it.").pack(side="left", padx=(4, 0))
-        self._denoise_status = ctk.CTkLabel(dn_box, text="",
-            font=("Consolas", 9), wraplength=300, justify="left",
-            text_color=("#444", "#aaa"))
-        self._denoise_status.pack(anchor="w", padx=10, pady=(0, 4))
+            "noise in Friedel pairs, but also erases any REAL Friedel "
+            "imbalance - so 'both' keeps the unfolded cube active and also "
+            "writes <name>_n2n_fold2.cube.npy.").pack(side="left")
+        self._denoise_btn = ctk.CTkButton(c, text="Denoise whole cube…",
+            fg_color=_APPLY_CLR, command=self._denoise_apply_all)
+        self._denoise_btn.pack(fill="x", padx=8, pady=(4, 2))
+        self._denoise_status = self._status(c)
 
-        # ---- Radial-background flattening ---------------------------
-        # Removes the smooth, azimuthally-symmetric radial background
-        # (direct-beam skirt + amorphous halo) from every pattern so the
-        # anisotropic Bragg / orientation signal stands out.  This is the
-        # "flatten" step of the low-dose N2N workflow.  Bakes a new
-        # .cube.npy and switches to it (original untouched).
-        fl_box = ctk.CTkFrame(ctrl, border_width=1)
-        fl_box.pack(fill="x", padx=6, pady=(8, 4))
-        fl_t = ctk.CTkFrame(fl_box, fg_color="transparent")
-        fl_t.pack(fill="x", padx=4, pady=(4, 0))
-        ctk.CTkLabel(fl_t, text="Flatten (radial background)",
-                      font=("Segoe UI", 11, "bold")).pack(side="left")
-        add_help_button(fl_t,
-            "Removes the smooth, azimuthally-symmetric radial background of "
-            "each diffraction pattern — the direct-beam skirt and amorphous "
-            "halo — leaving the anisotropic Bragg / orientation signal.\n\n"
-            "The pattern intensity is dominated by a steep isotropic falloff "
-            "with radius that is nearly identical in every frame and carries "
-            "no orientation information; it falls by orders of magnitude over "
-            "the first tens of pixels, so no single stretch shows both it and "
-            "the weak reflections.  We estimate the background at each radius "
-            "and remove it.  In the N2N workflow this is essential: without "
-            "it a network just learns the falloff.\n\n"
-            "Modes:\n"
-            "  • subtract — subtract the azimuthal MEDIAN at each radius "
-            "(robust to Bragg peaks; signed residual).  This is the flatten "
-            "used with N2N-binomial denoising.\n"
-            "  • divide — divide by the azimuthal MEAN at each radius "
-            "(background → ~1, stays non-negative; friendlier for NMF).\n\n"
-            "Flattening is taken about the frame centre — centre the beam "
-            "first (COM / NBED) for best results.  Bakes a new "
-            "<base>_flat.cube.npy and switches to it; original untouched.")\
-            .pack(side="left", padx=(6, 0))
-        fl_row = ctk.CTkFrame(fl_box, fg_color="transparent")
-        fl_row.pack(fill="x", padx=8, pady=(4, 2))
-        ctk.CTkLabel(fl_row, text="mode:").pack(side="left", padx=(2, 4))
-        ctk.CTkOptionMenu(fl_row, variable=self.flatten_mode,
-                           values=["subtract", "divide"], width=110
-                           ).pack(side="left", padx=2)
-        fl_row2 = ctk.CTkFrame(fl_box, fg_color="transparent")
-        fl_row2.pack(fill="x", padx=8, pady=(0, 4))
-        self._flatten_btn = ctk.CTkButton(fl_row2,
-            text="Flatten radial background…", width=300,
-            fg_color=("#2D5FA8", "#1F4E8F"),
-            command=self._flatten_apply_all)
-        self._flatten_btn.pack(side="left")
-        self._flatten_status = ctk.CTkLabel(fl_box, text="",
-            font=("Consolas", 9), wraplength=300, justify="left",
-            text_color=("#444", "#aaa"))
-        self._flatten_status.pack(anchor="w", padx=10, pady=(0, 4))
-
-        # Push current crop / beam-mask / polar-mask / COM into the Training tab.
-        load_row = ctk.CTkFrame(ctrl, fg_color="transparent")
-        load_row.pack(fill="x", padx=8, pady=(2, 4))
-        ctk.CTkButton(load_row,
-            text="Load parameters to model",
-            width=320,
-            command=self._load_params_to_model).pack(side="left")
-        self._load_params_status = ctk.CTkLabel(ctrl, text="",
-            font=("Consolas", 9), text_color=("#444", "#aaa"))
-        self._load_params_status.pack(anchor="w", padx=10, pady=(0, 4))
-
-        # ---- Binning section -----------------------------------------
-        # Down-sample the dataset two ways:
-        #   real-space : average every n×n block of scan positions
-        #                (fewer, higher-SNR diffraction patterns).
-        #   q-space    : average every n×n block of detector pixels
-        #                (coarser reciprocal sampling per pattern).
-        # Writes a brand-new .cube.npy and switches to it — the ORIGINAL
-        # cube file is never modified.
-        bin_box = ctk.CTkFrame(ctrl, border_width=1)
-        bin_box.pack(fill="x", padx=6, pady=(8, 4))
-        bt = ctk.CTkFrame(bin_box, fg_color="transparent")
-        bt.pack(fill="x", padx=4, pady=(4, 0))
-        ctk.CTkLabel(bt, text="Binning (down-sample → new dataset)",
-                      font=("Segoe UI", 11, "bold")).pack(side="left")
-        add_help_button(bt,
-            "Real-space binning: every n×n block of scan positions is "
-            "averaged into one diffraction pattern (scan grid shrinks "
-            "by n, detector unchanged).\n\n"
-            "Q-space binning: every n×n block of detector pixels is "
-            "averaged within each pattern (detector shrinks by n, scan "
-            "grid unchanged).\n\n"
-            "A NEW .cube.npy is written and the GUI switches to it; the "
-            "original cube file is untouched.").pack(side="left",
-                                                     padx=(6, 0))
-        bin_row = ctk.CTkFrame(bin_box, fg_color="transparent")
-        bin_row.pack(fill="x", padx=8, pady=(4, 2))
+        # ---- Binning
+        c = self._card(pg, "Binning (down-sample)",
+            "Real-space: every n×n block of scan positions is averaged into "
+            "one pattern (scan grid shrinks by n).\n\n"
+            "Q-space: every n×n block of detector pixels is averaged within "
+            "each pattern (detector shrinks by n).")
         self._bin_mode = ctk.StringVar(value="real")
-        ctk.CTkRadioButton(bin_row, text="real-space (n×n scan positions)",
+        ctk.CTkRadioButton(c, text="real space (n×n scan positions)",
                             variable=self._bin_mode, value="real"
-                            ).pack(side="left", padx=(2, 10))
-        ctk.CTkRadioButton(bin_row, text="q-space (n×n detector px)",
+                            ).pack(anchor="w", padx=10, pady=(6, 2))
+        ctk.CTkRadioButton(c, text="q space (n×n detector pixels)",
                             variable=self._bin_mode, value="q"
-                            ).pack(side="left", padx=2)
-        bin_row2 = ctk.CTkFrame(bin_box, fg_color="transparent")
-        bin_row2.pack(fill="x", padx=8, pady=(0, 4))
-        ctk.CTkLabel(bin_row2, text="bin factor n:").pack(side="left",
-                                                          padx=(2, 2))
+                            ).pack(anchor="w", padx=10, pady=2)
+        r = ctk.CTkFrame(c, fg_color="transparent")
+        r.pack(fill="x", padx=8, pady=(4, 2))
+        ctk.CTkLabel(r, text="factor n").pack(side="left")
         self._bin_factor = ctk.StringVar(value="2")
-        ctk.CTkEntry(bin_row2, textvariable=self._bin_factor,
-                     width=50).pack(side="left", padx=2)
-        ctk.CTkButton(bin_row2,
-            text="Apply binning →  (write new .cube.npy)",
-            width=300, command=self._bin_apply_all).pack(side="left",
-                                                         padx=8)
-        self._bin_status = ctk.CTkLabel(bin_box, text="",
-            font=("Consolas", 9), justify="left",
-            text_color=("#444", "#aaa"))
-        self._bin_status.pack(anchor="w", padx=10, pady=(0, 4))
+        ctk.CTkEntry(r, textvariable=self._bin_factor,
+                     width=50).pack(side="left", padx=6)
+        ctk.CTkButton(r, text="Bin whole cube…", width=170,
+                      fg_color=_APPLY_CLR,
+                      command=self._bin_apply_all).pack(side="right")
+        self._bin_status = self._status(c)
 
-        # Pair-labels section (semi-supervised, pre-train labels).
-        # Lets the user click through random pairs and answer
-        # "same / different / skip" before training starts. The
-        # collected labels feed `pair_assignment_loss` if the Training
-        # tab's λ_pair knob is non-zero.
-        pair_box = ctk.CTkFrame(ctrl, border_width=1)
-        pair_box.pack(fill="x", padx=6, pady=(8, 4))
-        ph = ctk.CTkFrame(pair_box, fg_color="transparent")
-        ph.pack(fill="x", padx=4, pady=(4, 0))
-        ctk.CTkLabel(ph, text="Pair labelling (pre-train)",
-                      font=("Segoe UI", 11, "bold")).pack(side="left")
-        h = add_help_button(ph,
-            "Optional: before training, label N random pattern pairs as "
-            "same/different physical phase. Labels are saved to "
-            "<basename>.pair_labels.json next to the cube and used by the "
-            "training loop as an extra loss term (pair_assignment_loss).")
-        h.pack(side="left", padx=(6, 0))
-        pair_btns = ctk.CTkFrame(pair_box, fg_color="transparent")
-        pair_btns.pack(fill="x", padx=4, pady=(4, 2))
-        ctk.CTkButton(pair_btns, text="Label pairs…",
-                       width=120,
-                       command=self._open_pair_labeler
-                       ).pack(side="left", padx=2)
-        ctk.CTkButton(pair_btns, text="Review labels…",
-                       width=120,
-                       command=self._open_pair_reviewer
-                       ).pack(side="left", padx=2)
-        ctk.CTkButton(pair_btns, text="Import labels…",
-                       width=120,
-                       command=self._import_pair_labels
-                       ).pack(side="left", padx=2)
-        self._pair_label_status = ctk.CTkLabel(pair_box, text="",
-            font=("Consolas", 9), wraplength=290, justify="left",
-            text_color=("#444", "#aaa"))
-        self._pair_label_status.pack(fill="x", padx=8, pady=(0, 6))
+        # ============ page 3: Labels ===================================
+        pg = self._pages["Labels"]
+        h = ctk.CTkFrame(pg, fg_color="transparent")
+        h.pack(fill="x", padx=8, pady=(4, 2))
+        ctk.CTkLabel(h, text="Pair labelling (optional, before training)",
+                     font=_SEC_FONT).pack(side="left")
+        add_help_button(h,
+            "Label random pattern pairs as same / different phase.  Labels "
+            "are saved to <name>.pair_labels.json next to the cube and used "
+            "by training as an extra loss term when the Training tab's "
+            "λ_pair is non-zero.").pack(side="left", padx=(6, 0))
+        for text, cmd in (("Label pairs…", self._open_pair_labeler),
+                          ("Review labels…", self._open_pair_reviewer),
+                          ("Import labels…", self._import_pair_labels)):
+            ctk.CTkButton(pg, text=text, command=cmd).pack(
+                fill="x", padx=8, pady=3)
+        self._pair_label_status = self._status(pg)
 
-        # NBED-centering section (BF-disk threshold-centroid) — runs as
-        # a one-shot pre-processing step on the FULL cube, not as a
-        # per-batch transform.
-        nbed_box = ctk.CTkFrame(ctrl, border_width=1)
-        nbed_box.pack(fill="x", padx=6, pady=(8, 4))
-        title_row = ctk.CTkFrame(nbed_box, fg_color="transparent")
-        title_row.pack(fill="x", padx=4, pady=(4, 0))
-        ctk.CTkLabel(title_row, text="NBED centering",
-                      font=("Segoe UI", 11, "bold")).pack(side="left")
-        h = add_help_button(title_row,
-            "Robust BF-disk centring for low-mag / NBED data, where "
-            "COM fails due to saturated central beam, beam stops or "
-            "diffuse haloes. Runs once over the whole cube; the "
-            "result becomes the active dataset for this session and "
-            "can optionally be saved as <basename>_nbed.cube.npy.")
-        h.pack(side="left", padx=(6, 0))
+        self._show_page("Model input")
 
-        self._row_slider(nbed_box, "search radius (raw px)",
-                          self._nbed_search_radius, 4, 256, 1,
-                          "Coarse-search disk for the brightest pixel "
-                          "near the centre. Should be larger than your "
-                          "expected misalignment but smaller than the "
-                          "distance to the first Bragg ring.")
-        self._row_slider(nbed_box, "BF disk radius (raw px)",
-                          self._nbed_disk_radius, 2, 128, 1,
-                          "Refinement disk: after the bright spot is "
-                          "found, the threshold-centroid is taken over "
-                          "pixels within this radius. Set to roughly "
-                          "the BF-disk radius in raw-frame pixels.")
-        self._row_slider(nbed_box, "threshold fraction",
-                          self._nbed_threshold, 0.10, 0.90, 0.01,
-                          "Pixels above (threshold × local max) "
-                          "contribute to the centroid. 0.5 is the "
-                          "FWHM. Lower = include the disk skirt; "
-                          "higher = use only the saturated core.")
+    # ---- control-panel building blocks --------------------------------
+    def _show_page(self, name):
+        for n, fr in self._pages.items():
+            if n == name:
+                fr.pack(fill="both", expand=True)
+            else:
+                fr.pack_forget()
+        self._page_var.set(name)
 
-        nbed_btns = ctk.CTkFrame(nbed_box, fg_color="transparent")
-        nbed_btns.pack(fill="x", padx=4, pady=(2, 6))
-        ctk.CTkButton(nbed_btns, text="Preview on this frame",
-                       width=140, command=self._nbed_preview_one
-                       ).pack(side="left", padx=2)
-        ctk.CTkButton(nbed_btns, text="Center entire dataset",
-                       width=160,
-                       fg_color=("#2D7A2D", "#1F7A1F"),
-                       command=self._nbed_center_all
-                       ).pack(side="left", padx=2)
-        self._nbed_status = ctk.CTkLabel(nbed_box, text="",
-            font=("Consolas", 9), wraplength=290, justify="left",
-            text_color=("#444", "#aaa"))
-        self._nbed_status.pack(fill="x", padx=8, pady=(0, 6))
+    def _section(self, parent, title):
+        f = ctk.CTkFrame(parent, fg_color="transparent")
+        f.pack(fill="x", padx=8, pady=(10, 2))
+        ctk.CTkLabel(f, text=title, font=_SEC_FONT).pack(side="left")
+        ctk.CTkFrame(f, height=1, fg_color=("#bbbbbb", "#555555")).pack(
+            side="left", fill="x", expand=True, padx=(8, 0), pady=(2, 0))
 
-        # ---- Ellipticity correction ------------------------------
-        # Auto-fit a 5-tuple (cx, cy, a, b, theta) on either the BF
-        # disk edge, an amorphous ring, or by direct user input.
-        # Apply writes a new <base>_ellipFix.cube.npy via cv2.warpAffine
-        # and re-registers the sample.
-        ellip_box = ctk.CTkFrame(ctrl, border_width=1)
-        ellip_box.pack(fill="x", padx=6, pady=(8, 4))
-        et = ctk.CTkFrame(ellip_box, fg_color="transparent")
-        et.pack(fill="x", padx=4, pady=(4, 0))
-        ctk.CTkLabel(et, text="Ellipticity correction",
-                       font=("Segoe UI", 11, "bold")).pack(side="left")
-        add_help_button(et,
-            "Corrects elliptical distortion of diffraction features "
-            "(BF disk / amorphous ring / Bragg lattice) — usually "
-            "caused by lens astigmatism or detector geometry.\n\n"
-            "Modes:\n"
-            "  • BF disk edge — fits an ellipse to the Sobel-edge "
-            "pixels of the bright-field disk.  Works for any 4D-STEM "
-            "dataset (every cube has a BF disk).  Default.\n"
-            "  • Amorphous ring — weighted-moment fit on an annulus "
-            "around the ring peak.  Use when you have a clean "
-            "amorphous halo.\n"
-            "  • Manual — type a/b and θ directly; auto-fit disabled."
-            ).pack(side="left", padx=4)
+    def _status(self, parent):
+        """Status line under the last widget packed into ``parent``; it
+        appears only while it has text."""
+        lbl = _StatusLabel(parent, text="", font=("Consolas", 10),
+                           wraplength=350, justify="left",
+                           text_color=("#444", "#aaa"))
+        kids = [w for w in parent.pack_slaves() if w is not lbl]
+        lbl._anchor = kids[-1] if kids else None
+        if lbl._anchor is None:
+            lbl._shown = True
+            lbl.pack(anchor="w", padx=10, pady=(0, 2))
+        return lbl
 
-        em_row = ctk.CTkFrame(ellip_box, fg_color="transparent")
-        em_row.pack(fill="x", padx=4, pady=(2, 2))
-        ctk.CTkLabel(em_row, text="Fit on:").pack(side="left")
-        ctk.CTkOptionMenu(em_row, variable=self.ellip_mode,
-                            values=["BF disk edge",
-                                       "Amorphous ring",
-                                       "Manual"],
-                            width=140,
-                            command=lambda _v: self._refresh()
-                            ).pack(side="left", padx=4)
-        ctk.CTkButton(em_row, text="Auto-fit", width=90,
-                        command=self._ellip_autofit
-                        ).pack(side="left", padx=4)
-        # a/b and theta sliders (live preview).
-        self._row_slider(ellip_box, "a/b ratio",
-                          self.ellip_ab, 0.85, 1.15, 0.001,
-                          "Major-axis / minor-axis ratio of the "
-                          "elliptical feature.  1.0 = circle (no "
-                          "correction).  Live preview on the "
-                          "processed pane.")
-        self._row_slider(ellip_box, "θ (deg)",
-                          self.ellip_theta, -90.0, 90.0, 0.5,
-                          "Angle of the major axis in the detector "
-                          "frame (0° = +x axis, +ve = CCW).")
-        e_btns = ctk.CTkFrame(ellip_box, fg_color="transparent")
-        e_btns.pack(fill="x", padx=4, pady=(2, 6))
-        ctk.CTkButton(e_btns, text="Apply to dataset",
-                        width=180,
-                        fg_color=("#2D7A2D", "#1F7A1F"),
-                        command=self._ellip_apply_all
-                        ).pack(side="left", padx=2)
-        ctk.CTkButton(e_btns, text="Reset (1.0, 0°)",
-                        width=120,
-                        command=self._ellip_reset
-                        ).pack(side="left", padx=2)
-        self._ellip_status = ctk.CTkLabel(ellip_box, text="",
-            font=("Consolas", 9), wraplength=290, justify="left",
-            text_color=("#444", "#aaa"))
-        self._ellip_status.pack(fill="x", padx=8, pady=(0, 6))
+    def _card(self, parent, title, help_text):
+        """Collapsible tool card; opening one closes the others."""
+        box = ctk.CTkFrame(parent, border_width=1)
+        box.pack(fill="x", padx=4, pady=3)
+        head = ctk.CTkFrame(box, fg_color="transparent")
+        head.pack(fill="x", padx=2, pady=2)
+        btn = ctk.CTkButton(head, text="▸  " + title, anchor="w",
+                            fg_color="transparent", hover_color=_HOVER_CLR,
+                            text_color=("#1a1a1a", "#e8e8e8"),
+                            font=_SEC_FONT, height=30)
+        btn.pack(side="left", fill="x", expand=True)
+        add_help_button(head, help_text).pack(side="right", padx=6)
+        body = ctk.CTkFrame(box, fg_color="transparent")
+        self._cards[title] = [btn, body, False]
+        btn.configure(command=lambda t=title: self._toggle_card(t))
+        return body
 
-        # cmap
-        cmap_row = ctk.CTkFrame(ctrl, fg_color="transparent")
-        cmap_row.pack(fill="x", padx=8, pady=4)
-        ctk.CTkLabel(cmap_row, text="cmap").pack(side="left")
-        ctk.CTkOptionMenu(cmap_row, variable=self.cmap, values=[
-            "inferno", "viridis", "magma", "gray", "plasma", "cividis"],
-            command=lambda _v: self._refresh()).pack(side="left", padx=4)
-
-        # nav buttons
-        nav = ctk.CTkFrame(ctrl, fg_color="transparent")
-        nav.pack(fill="x", padx=8, pady=(8, 4))
-        for label, dx in (("<<", -10), ("<", -1), (">", +1), (">>", +10)):
-            ctk.CTkButton(nav, text=label, width=44,
-                           command=lambda d=dx: self._step(d)).pack(
-                side="left", padx=1)
-        ctk.CTkButton(nav, text="Random", width=70,
-                       command=self._random).pack(side="left", padx=4)
-
-        ctk.CTkLabel(ctrl,
-            text="\nThese values are passed through to the\n"
-                  "training tab as defaults if you start a run.",
-            font=("Segoe UI", 9), justify="left").pack(
-                anchor="w", padx=8, pady=(8, 4))
+    def _toggle_card(self, title):
+        for t, card in self._cards.items():
+            btn, body, is_open = card
+            if t == title and not is_open:
+                body.pack(fill="x", padx=4, pady=(0, 6))
+                btn.configure(text="▾  " + t)
+                card[2] = True
+            elif is_open:
+                body.pack_forget()
+                btn.configure(text="▸  " + t)
+                card[2] = False
 
     def _row_slider(self, parent, label, var, lo, hi, step, help_text,
                       entry_hi=None):
@@ -948,6 +848,16 @@ class PrePanel(ctk.CTkFrame):
             s.set(v)
             entry_var.set(_fmt(v))
             self._refresh()
+
+        def _from_var(*_):
+            try:
+                v = float(var.get())
+            except Exception:
+                return
+            if entry_var.get() != _fmt(v):
+                entry_var.set(_fmt(v))
+                s.set(min(float(hi), v))
+        var.trace_add("write", _from_var)
 
         s.configure(command=_from_slider)
         entry.bind("<Return>", _from_entry)
@@ -1670,7 +1580,7 @@ class PrePanel(ctk.CTkFrame):
         # The matplotlib figure widget — arrowing while looking at the
         # diffraction image is the most natural interaction.
         try:
-            targets.append(self._canvas.get_tk_widget())
+            targets.append(self._fig_canvas.get_tk_widget())
         except Exception:
             pass
 
@@ -2155,15 +2065,42 @@ class PrePanel(ctk.CTkFrame):
 
     def _on_flatten_toggle(self):
         prm = self._flatten_params() if self.flatten_ann.get() else None
+        if prm:
+            # flattened data are in standard deviations: pick a vmax for
+            # them, remembering the counts vmax for when it is unticked
+            if getattr(self, "_vmax_before_flat", None) is None:
+                self._vmax_before_flat = float(self.vmax.get())
+            try:
+                from celldenoise_flatten import suggest_vmax
+                Ny, Nx = self.cube.shape[:2]
+                idx = np.linspace(0, Ny * Nx - 1,
+                                  min(24, Ny * Nx)).astype(int)
+                frames = [np.asarray(self.cube[i // Nx, i % Nx],
+                                     dtype=np.float32) for i in idx]
+                self.vmax.set(suggest_vmax(frames, prm["centre"],
+                                           prm["r_min"], prm["r_max"]))
+            except Exception as e:
+                print(f"[pre] flatten vmax: {e!r}", flush=True)
+            self._flatten_status.configure(
+                text=f"centre ({prm['centre'][0]:.0f}, "
+                     f"{prm['centre'][1]:.0f}), r {prm['r_min']}–"
+                     f"{prm['r_max']} px; vmax {self.vmax.get():g} σ")
+        else:
+            old = getattr(self, "_vmax_before_flat", None)
+            if old is not None:
+                self.vmax.set(old)
+            self._vmax_before_flat = None
+            self._flatten_status.configure(text="")
         self._propagate_filters_quiet()
         self._refresh()
         if prm:
-            self._flatten_status.configure(
-                text=f"flatten (annulus): centre ({prm['centre'][0]:.1f}, "
-                     f"{prm['centre'][1]:.1f}), r {prm['r_min']}-"
-                     f"{prm['r_max']} px - applied on the fly; vmax is now "
-                     f"in std units.  Flattening the whole cube…")
             self._flatten_bake_start(prm)
+
+    def _on_flatten_radii(self):
+        """r_min / r_max edited: re-measure; re-flatten if ticked."""
+        self._flat_cache = None
+        if self.flatten_ann.get():
+            self._on_flatten_toggle()
 
     # ---- after ticking: flatten the whole cube, then offer to save ----
     def _flatten_bake_start(self, prm):
@@ -2174,7 +2111,7 @@ class PrePanel(ctk.CTkFrame):
         Ny, Nx, H, W = self.cube.shape
         self._flatten_busy = True
         self._progress_popup(
-            "flatten", "Flattening (median per annulus)…",
+            "flatten", "Flattening background…",
             f"Flattening {Ny*Nx} patterns  (r {prm['r_min']}-"
             f"{prm['r_max']} px)")
         threading.Thread(target=self._flatten_bake_worker,
@@ -2213,10 +2150,10 @@ class PrePanel(ctk.CTkFrame):
                     tmp_path, cleanup_dir=os.path.dirname(tmp_path))
             self._post(lambda: self._progress_close("flatten"))
             self._post(lambda: self._flatten_status.configure(
-                text="flatten (annulus): whole-cube save cancelled - still "
-                     "applied on the fly" if "cancel" in err.lower()
-                     else f"flatten (annulus) bake failed: {err} - still "
-                          f"applied on the fly"))
+                text="whole-cube flatten cancelled - still flattened on "
+                     "the fly" if "cancel" in err.lower()
+                     else f"whole-cube flatten failed: {err} - still "
+                          f"flattened on the fly"))
         finally:
             self._flatten_busy = False
 
@@ -2225,7 +2162,7 @@ class PrePanel(ctk.CTkFrame):
                           + "_annflat.cube.npy")
         save = messagebox.askyesno(
             "Save flattened cube?",
-            f"Flattening (median per annulus) is done for every pattern.\n"
+            f"Background flattening is done for every pattern.\n"
             f"  centre ({prm['centre'][0]:.1f}, {prm['centre'][1]:.1f}) px,"
             f"  annulus r {prm['r_min']}-{prm['r_max']} px\n\n"
             f"Save it to:\n  {permanent_path}\n\n"
@@ -2236,7 +2173,7 @@ class PrePanel(ctk.CTkFrame):
             _register_atexit_cleanup(
                 tmp_path, cleanup_dir=os.path.dirname(tmp_path))
             self._flatten_status.configure(
-                text="flatten (annulus): not saved - applied on the fly")
+                text="not saved - still flattened on the fly")
             return
         try:
             shutil.move(tmp_path, permanent_path)
@@ -2254,6 +2191,7 @@ class PrePanel(ctk.CTkFrame):
             self.path = permanent_path
             self._path_var.set(permanent_path)
             self.flatten_ann.set(False)       # data are flattened now
+            self._vmax_before_flat = None     # ...and vmax stays in σ
             self.sample_key = register_runtime_sample(
                 permanent_path, scan_shape=(Ny, Nx),
                 vmax=float(self.vmax.get()),
@@ -2266,8 +2204,8 @@ class PrePanel(ctk.CTkFrame):
             return
         self._refresh()
         self._flatten_status.configure(
-            text=f"flatten (annulus) saved -> {os.path.basename(permanent_path)}"
-                 f"  (active sample: {self.sample_key})")
+            text=f"saved → {os.path.basename(permanent_path)}  (now the "
+                 f"active cube)")
         try:
             if self.on_state_change is not None:
                 self.on_state_change("loaded", sample_key=self.sample_key,
@@ -3104,198 +3042,6 @@ class PrePanel(ctk.CTkFrame):
     # radial background of every pattern (subtract azimuthal median, or
     # divide by azimuthal mean).  Bakes a new .cube.npy and switches.
     # ------------------------------------------------------------------
-    def _flatten_apply_all(self):
-        if self.cube is None:
-            messagebox.showinfo("cube", "Load a cube first."); return
-        if (self._flatten_busy or self._denoise_busy or self._blur_busy
-                or self._nbed_busy or self._ellip_busy or self._bin_busy
-                or self._hotpix_busy):
-            messagebox.showinfo("flatten",
-                "Another full-cube op is in progress — wait first."); return
-        try:
-            import radial_flatten  # noqa: F401  (vendored, self-contained)
-        except Exception as e:
-            messagebox.showerror("flatten",
-                f"flatten module unavailable:\n{e}"); return
-        mode = self.flatten_mode.get()
-        Ny, Nx, H, W = self.cube.shape
-        signed = " (output is a SIGNED residual)" if mode == "subtract" else \
-                 " (background → ~1, stays non-negative)"
-        how = ("subtract the azimuthal MEDIAN at each radius"
-               if mode == "subtract"
-               else "divide by the azimuthal MEAN at each radius")
-        if not messagebox.askyesno(
-                "Flatten radial background",
-                f"Flatten every pattern of this {Ny}×{Nx} scan "
-                f"(H×W = {H}×{W}) — {how}{signed}.\n\n"
-                f"Removes the smooth isotropic background (direct-beam skirt "
-                f"+ amorphous halo) so the Bragg / orientation signal stands "
-                f"out.  Taken about the frame centre — centre the beam first "
-                f"for best results.\n\n"
-                f"Writes a new .cube.npy alongside the original; you'll see a "
-                f"before/after preview and be asked whether to save.\n\n"
-                f"Proceed?"):
-            return
-        self._flatten_busy = True
-        try:
-            self._flatten_btn.configure(state="disabled")
-        except Exception:
-            pass
-        self._flatten_status.configure(text="flatten: starting…")
-        self._progress_popup(
-            "flatten", "Flattening radial background…",
-            f"Flattening {Ny*Nx} patterns  ({mode})")
-        threading.Thread(target=self._flatten_worker,
-                         args=(mode,), daemon=True).start()
-
-    def _flatten_worker(self, mode: str):
-        tmp_path = None
-        try:
-            from radial_flatten import flatten_cube_into
-            Ny, Nx, H, W = self.cube.shape
-            base = os.path.splitext(self.path)[0]
-            base = base[:-5] if base.endswith(".cube") else base
-            new_basename = os.path.basename(base) + "_flat"
-            tmp_dir = self._mktemp_beside("dinosr_flat_")
-            tmp_path = os.path.join(tmp_dir, new_basename + ".cube.npy")
-            out = np.lib.format.open_memmap(
-                tmp_path, mode="w+", dtype=np.float32, shape=(Ny, Nx, H, W))
-            t0 = time.time()
-
-            def _prog(row, ntot):
-                self._post(self._progress_update, "flatten",
-                           row / ntot,
-                           f"{mode}  row {row}/{ntot}  "
-                           f"({100*row/ntot:.0f}%)"
-                           f"{self._eta_text(row, ntot, t0)}")
-
-            flatten_cube_into(
-                self.cube, out, mode=mode, progress=_prog,
-                cancel=lambda: bool(getattr(self, "_flatten_cancel", False)))
-            out.flush(); del out
-            self._post(lambda: (self._progress_close("flatten"),
-                                   self._flatten_finish(
-                                       tmp_path, base, new_basename, mode)))
-        except Exception as e:
-            err = repr(e)
-            was_cancel = "cancelled" in err.lower()
-            if tmp_path:
-                _register_atexit_cleanup(
-                    tmp_path, cleanup_dir=os.path.dirname(tmp_path))
-            self._post(lambda: self._progress_close("flatten"))
-            if not was_cancel:
-                self._post(lambda: messagebox.showerror("flatten failed",
-                                                        err))
-            self._post(lambda: self._flatten_status.configure(
-                text="flatten: cancelled" if was_cancel
-                     else f"flatten failed: {err}"))
-            self._post(self._flatten_reenable)
-        finally:
-            self._flatten_busy = False
-
-    def _flatten_reenable(self):
-        try:
-            self._flatten_btn.configure(state="normal")
-        except Exception:
-            pass
-
-    def _flatten_preview(self, tmp_path: str, mode: str):
-        try:
-            after_cube = np.load(tmp_path, mmap_mode="r", allow_pickle=True)
-            Ny, Nx = self.cube.shape[:2]
-            idx = int(self.idx.get()); y, x = divmod(idx, Nx)
-            y = min(max(y, 0), Ny - 1); x = min(max(x, 0), Nx - 1)
-            before = np.asarray(self.cube[y, x], dtype=np.float32)
-            after = np.asarray(after_cube[y, x], dtype=np.float32)
-        except Exception:
-            return
-        win = ctk.CTkToplevel(self)
-        win.title(f"Flatten preview ({mode}) — position (y={y}, x={x})")
-        try:
-            win.after(200, lambda: (win.winfo_exists()
-                                    and (win.lift(), win.focus_force())))
-        except Exception:
-            pass
-        fig = Figure(figsize=(8.6, 4.4), dpi=100)
-        cmap = self.cmap.get()
-        ax0 = fig.add_subplot(1, 2, 1)
-        ax0.imshow(np.log1p(np.clip(before, 0, None)), cmap=cmap,
-                   interpolation="nearest")
-        ax0.set_title("raw (log)", fontsize=11)
-        ax0.set_xticks([]); ax0.set_yticks([])
-        ax1 = fig.add_subplot(1, 2, 2)
-        if mode == "subtract":
-            # signed residual — symmetric limits about 0
-            lim = float(np.percentile(np.abs(after), 99.0)) or 1.0
-            ax1.imshow(after, cmap="RdBu_r", vmin=-lim, vmax=lim,
-                       interpolation="nearest")
-            ax1.set_title("flattened (median-subtracted)", fontsize=11)
-        else:
-            ax1.imshow(after, cmap=cmap, vmin=0,
-                       vmax=float(np.percentile(after, 99.0)) or 1.0,
-                       interpolation="nearest")
-            ax1.set_title("flattened (mean-divided)", fontsize=11)
-        ax1.set_xticks([]); ax1.set_yticks([])
-        fig.tight_layout()
-        canvas = FigureCanvasTkAgg(fig, master=win)
-        canvas.get_tk_widget().pack(fill="both", expand=True)
-        canvas.draw()
-
-    def _flatten_finish(self, tmp_path, original_base, new_basename, mode):
-        self._flatten_preview(tmp_path, mode)
-        permanent_path = self._undo_tempdir(original_base) + "_flat.cube.npy"
-        save = messagebox.askyesno(
-            "Save flattened cube?",
-            f"Radial-background flattening ({mode}) applied to every "
-            f"pattern.\n\n"
-            f"Save permanently to:\n  {permanent_path}\n\n"
-            f"  Yes → keep file (re-loadable in future sessions).\n"
-            f"  No  → keep this run only; temp file deleted on exit.")
-        if save:
-            try:
-                shutil.move(tmp_path, permanent_path)
-                final_path = permanent_path
-                try: os.rmdir(os.path.dirname(tmp_path))
-                except Exception: pass
-            except Exception as e:
-                messagebox.showerror("save failed",
-                    f"Could not move temp file:\n{e}\n"
-                    f"Cube usable from: {tmp_path}")
-                final_path = tmp_path
-                _register_atexit_cleanup(tmp_path)
-        else:
-            final_path = tmp_path
-            _register_atexit_cleanup(
-                tmp_path, cleanup_dir=os.path.dirname(tmp_path))
-        try:
-            self.cube = np.load(final_path, mmap_mode="r", allow_pickle=True)
-            Ny, Nx, _H, _W = self.cube.shape
-            self.path = final_path
-            self._path_var.set(final_path)
-            self.sample_key = register_runtime_sample(
-                final_path, scan_shape=(Ny, Nx),
-                vmax=float(self.vmax.get()),
-                center_mask_radius=self._effective_center_mask_radius())
-        except Exception as e:
-            messagebox.showerror("reload failed",
-                f"Flattened cube is at:\n{final_path}\n\nbut reload "
-                f"failed: {e}")
-            self._flatten_reenable(); return
-        self._refresh()
-        self._flatten_status.configure(
-            text=f"flatten ({mode}) done.  active sample: {self.sample_key}")
-        self._flatten_reenable()
-        try:
-            if self.on_state_change is not None:
-                self.on_state_change("loaded", sample_key=self.sample_key,
-                                     path=final_path)
-        except Exception:
-            pass
-
-    # ------------------------------------------------------------------
-    # Binning (real-space n×n scan positions, or q-space n×n detector px)
-    # Writes a NEW cube and switches to it; original file untouched.
-    # ------------------------------------------------------------------
     def _bin_apply_all(self):
         if self.cube is None:
             messagebox.showinfo("cube", "Load a cube first."); return
@@ -3929,7 +3675,8 @@ class PrePanel(ctk.CTkFrame):
             from celldenoise_flatten import flatten_one
             raw = flatten_one(raw, fa["centre"], fa["r_min"], fa["r_max"])
         vmax = float(self.vmax.get())
-        norm = rescale_like_vmax(raw, vmax=vmax)
+        norm = rescale_like_vmax(raw, vmax=vmax,
+                                 vmin=0.0 if fa else None)
         # Live ellipticity correction (a/b ≠ 1).  Applied BEFORE
         # the cart pipeline (resize → crop → COM → polar) so every
         # downstream step sees the corrected geometry.  Identity
@@ -4123,7 +3870,7 @@ class PrePanel(ctk.CTkFrame):
                 fontsize=10, color="#888")
 
         self._fig.tight_layout()
-        self._canvas.draw_idle()
+        self._fig_canvas.draw_idle()
 
         # info line
         sat = float((raw >= vmax).mean()) * 100
