@@ -13,6 +13,8 @@
 # ============================================================
 set -u
 DINO_DIR="$(cd "$(dirname "$0")" && pwd)"
+# pip must not treat "pip install --user" packages as already installed.
+export PYTHONNOUSERSITE=1
 
 echo "============================================================"
 echo " DINO-4DSTEM install (Linux/macOS)"
@@ -36,16 +38,11 @@ else
     echo "To start clean:  conda env remove -n $ENV_NAME"; exit 1; }
 fi
 
-# On Linux with an NVIDIA GPU you can swap in the CUDA build of torch for
-# large speed-ups.  requirements.txt installs the CPU build by default; this
-# leaves it untouched unless the user opts in.
-if [ "$(uname -s)" = "Linux" ] && command -v nvidia-smi >/dev/null 2>&1; then
+# NVIDIA GPU: detect the driver and install the matching CUDA build of
+# PyTorch (checks it really works; keeps the CPU build otherwise).
+if [ "$(uname -s)" = "Linux" ]; then
   echo
-  echo "An NVIDIA GPU was detected.  For GPU acceleration you can install the"
-  echo "CUDA build of PyTorch into the env, e.g.:"
-  echo "    conda run -n $ENV_NAME pip install torch==2.7.1 torchvision==0.22.1 \\"
-  echo "        --index-url https://download.pytorch.org/whl/cu118"
-  echo "(Optional -- the app runs on CPU without it.)"
+  conda run --no-capture-output -n "$ENV_NAME" python "$DINO_DIR/tools/setup_gpu_torch.py"
 fi
 if [ "$(uname -s)" = "Darwin" ]; then
   echo

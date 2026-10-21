@@ -8,6 +8,10 @@ REM Optional override: put a different env name in env_name.txt next to this fil
 if exist "%~dp0env_name.txt" set /p ENV_NAME=<"%~dp0env_name.txt"
 REM Quiet conda's "newer version exists" nag on activate (window-local only).
 set "CONDA_NOTIFY_OUTDATED_CONDA=false"
+REM Ignore packages installed with "pip install --user" (they live in
+REM %APPDATA%\Python and would shadow the environment's own, e.g. a
+REM user-level Jupyter whose jupyter.exe is not on PATH).
+set "PYTHONNOUSERSITE=1"
 
 call "%~dp0_find_conda.bat" || exit /b 1
 call "%CONDA_BAT%" activate %ENV_NAME%

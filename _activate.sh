@@ -10,6 +10,10 @@ DINO_DIR="$(cd "$(dirname "$_ACT_SRC")" && pwd)"
 # shellcheck disable=SC1091
 source "$DINO_DIR/_find_conda.sh" || return 1 2>/dev/null || exit 1
 
+# Ignore "pip install --user" packages (~/.local) -- they would shadow the
+# environment's own, e.g. a user-level Jupyter.
+export PYTHONNOUSERSITE=1
+
 conda activate "$ENV_NAME" || {
   echo "[ERROR] Could not activate conda env \"$ENV_NAME\"."
   echo "        Run  ./install.sh  first, or put a different env name in"

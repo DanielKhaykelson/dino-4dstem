@@ -32,6 +32,9 @@ REM Don't nag about conda being outdated -- it's just a warning, and it
 REM confuses users into thinking they must update conda first (they don't).
 REM This only affects THIS window; the user's global conda config is untouched.
 set "CONDA_NOTIFY_OUTDATED_CONDA=false"
+REM pip must not treat "pip install --user" packages as already installed,
+REM or the environment ends up missing them.
+set "PYTHONNOUSERSITE=1"
 set "ENV_NAME=dino4dstem"
 if exist "%~dp0env_name.txt" set /p ENV_NAME=<"%~dp0env_name.txt"
 
@@ -77,6 +80,12 @@ call "%CONDA_BAT%" env update -n %ENV_NAME% -f "%~dp0environment.yml" --prune
 if errorlevel 1 goto :failed
 
 :ok
+echo.
+echo ------------------------------------------------------------
+echo  GPU: installing the CUDA build of PyTorch if an NVIDIA GPU is found
+echo ------------------------------------------------------------
+call "%CONDA_BAT%" activate %ENV_NAME%
+python "%~dp0tools\setup_gpu_torch.py"
 echo.
 echo ============================================================
 echo  STEP 1 complete -- the environment "%ENV_NAME%" is ready.

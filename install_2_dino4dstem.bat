@@ -39,7 +39,7 @@ call "%~dp0_activate.bat" || (
 )
 
 echo Checking DINO-4DSTEM can start in this environment...
-python -c "import sys, numpy, torch, customtkinter, py4DSTEM; print('  python     ', sys.version.split()[0]); print('  numpy      ', numpy.__version__); print('  torch      ', torch.__version__); print('  py4DSTEM   ', py4DSTEM.__version__); print('  customtkinter', customtkinter.__version__)"
+python -c "import sys, numpy, torch, customtkinter, py4DSTEM; print('  python     ', sys.version.split()[0]); print('  numpy      ', numpy.__version__); print('  torch      ', torch.__version__); print('  py4DSTEM   ', py4DSTEM.__version__); print('  customtkinter', customtkinter.__version__); print('  GPU        ', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'none -- running on CPU (re-run install_1_environment.bat after installing/updating the NVIDIA driver)')"
 if errorlevel 1 (
   echo.
   echo [ERROR] The environment is missing packages.

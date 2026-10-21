@@ -171,7 +171,7 @@ installed first.
 
 **[⬇ Download for Windows](https://github.com/DanielKhaykelson/dino-4dstem/releases/latest/download/dino-4dstem-windows.zip)**
 
-Double-click `install_1_…bat` then `install_2_…bat`, launch from the Desktop icon.
+Double-click `install_1_…bat` then `install_2_…bat`, launch from the Desktop icon. NVIDIA GPU set up automatically.
 
 **[Install guide →](INSTALL.md)**
 

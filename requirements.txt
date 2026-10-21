@@ -33,10 +33,10 @@ umap-learn==0.5.7
 hdbscan==0.8.40
 colorcet==3.1.0
 
-# --- deep learning (CPU build by default) ---
-# For NVIDIA GPU acceleration, install torch FIRST from the CUDA index, e.g.:
-#   pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu118
-# then run this file (the CPU pins below will be skipped as already-satisfied).
+# --- deep learning ---
+# PyPI torch is CPU-only on Windows.  The installers then run
+# tools/setup_gpu_torch.py, which detects an NVIDIA GPU + driver and swaps in
+# the matching CUDA build (cu128 / cu126 / cu118) of these same versions.
 torch==2.7.1
 torchvision==0.22.1
 
@@ -66,3 +66,8 @@ python-pptx==1.0.2
 #
 # The local NL assistant uses Ollama, which auto-installs on first use
 # (no Python package required).
+
+# --- tutorial notebooks (installed up front, not on first launch) ---
+notebook>=7,<8
+ipywidgets>=8,<9
+ipympl>=0.9,<0.10

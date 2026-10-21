@@ -187,15 +187,29 @@ No data ships with the app — open your own 4D-STEM files:
 
 <br>
 
-## GPU *(optional, advanced)*
+## GPU *(automatic)*
 
-The default install runs on the **CPU** — fine for most use; training is just slower.
+**Nothing to do.** `install_1_environment.bat` checks for an NVIDIA GPU, reads
+which CUDA version your driver supports, installs the matching CUDA build of
+PyTorch (a ~3 GB download), and verifies that it really sees the GPU.
+`install_2_dino4dstem.bat` then prints the GPU it found (look for the `GPU` line).
 
-For an NVIDIA GPU, open PowerShell in the project folder and run:
+No NVIDIA GPU, or the driver is too old? It keeps the **CPU** build — everything
+works, training is just slower. After installing/updating the NVIDIA driver,
+re-run `install_1_environment.bat` and it switches to the GPU.
 
-```powershell
-conda activate dino4dstem; pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu118
-```
+<br>
+
+---
+
+<br>
+
+## Uninstall
+
+Double-click **`uninstall.bat`** and type `YES`. It removes the `dino4dstem`
+conda environment and the three Desktop icons. Your data, results, and this
+folder are **not** touched — delete the folder yourself afterwards if you want.
+(Linux/macOS: `./uninstall.sh`.)
 
 <br>
 
@@ -211,7 +225,8 @@ conda activate dino4dstem; pip install torch==2.7.1 torchvision==0.22.1 --index-
 | **“Windows protected your PC”** popup | Click **More info → Run anyway**. |
 | Desktop icon does nothing / error flashes | Re-run **`install_2_dino4dstem.bat`**. Make sure you didn’t move the folder. |
 | Assistant mentions downloading **Ollama** | Expected — the assistant’s local AI model installs itself on first use. |
-| Training is very slow | The default install uses the **CPU** — see **GPU** above. |
+| Training / denoising is very slow | Check the `GPU` line printed by `install_2_dino4dstem.bat`. If it says CPU on a computer with an NVIDIA card, update the NVIDIA driver and re-run `install_1_environment.bat`. |
+| Notebooks won't open | Re-run `install_1_environment.bat` (Jupyter is installed there), then the Notebooks icon. |
 
 <br>
 
@@ -262,9 +277,8 @@ Also available: `./launch_assistant.sh`, `./launch_notebooks.sh`, and
 `./make_desktop_shortcuts.sh` (adds menu/Desktop launchers — `.desktop` on
 Linux, double-clickable `.command` files on macOS).
 
-**GPU.** On **Linux** with an NVIDIA card, install the CUDA build of PyTorch
-into the env for a big speed-up (the installer prints the exact command when it
-detects a GPU). On **macOS** there is no CUDA, so it runs on **CPU** — fully
+**GPU.** On **Linux** with an NVIDIA card, `./install.sh` installs the matching
+CUDA build of PyTorch automatically (and checks it works). On **macOS** there is no CUDA, so it runs on **CPU** — fully
 functional, just slower for training the denoiser.
 
 | Problem | Fix |

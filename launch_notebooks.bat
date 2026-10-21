@@ -27,7 +27,7 @@ call "%~dp0_activate.bat" || ( echo. & echo Press any key to close. & pause >nul
 REM First run only: make sure Jupyter + the interactive-plot widgets are present.
 python -c "import notebook" 2>nul || (
   echo.
-  echo Installing Jupyter into the environment ^(one time, ~1 min^)...
+  echo Installing Jupyter into the environment ^(one time, a few minutes^)...
   python -m pip install --quiet notebook ipywidgets ipympl || (
     echo [ERROR] Could not install Jupyter. Check your internet connection.
     echo Press any key to close. & pause >nul & exit /b 1
@@ -39,7 +39,8 @@ echo.
 echo Launching Jupyter Notebook in: %CD%
 echo (A browser tab will open. Close this window to stop Jupyter.)
 echo.
-jupyter notebook
+REM python -m: works even if jupyter.exe is not on PATH
+python -m notebook
 if errorlevel 1 (
   echo.
   echo Jupyter exited with an error. Press any key to close.

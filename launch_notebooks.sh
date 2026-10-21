@@ -10,7 +10,7 @@ source "$DINO_DIR/_activate.sh" || { echo "Press Enter to close."; read -r; exit
 # First run only: make sure Jupyter + the interactive-plot widgets are present.
 if ! python -c "import notebook" >/dev/null 2>&1; then
   echo
-  echo "Installing Jupyter into the environment (one time, ~1 min)..."
+  echo "Installing Jupyter into the environment (one time, a few minutes)..."
   python -m pip install --quiet notebook ipywidgets ipympl || {
     echo "[ERROR] Could not install Jupyter. Check your internet connection."
     echo "Press Enter to close."; read -r; exit 1; }
@@ -21,4 +21,5 @@ echo
 echo "Launching Jupyter Notebook in: $PWD"
 echo "(A browser tab will open. Press Ctrl+C here to stop Jupyter.)"
 echo
-jupyter notebook
+# python -m: works even if the jupyter script is not on PATH
+python -m notebook
