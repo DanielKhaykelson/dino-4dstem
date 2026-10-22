@@ -63,7 +63,7 @@ def lattice_basis(xy, tol: float = 3.0, min_angle_deg: float = 20.0,
     Not simply the two shortest spots: a spurious spot (detector seam,
     streak, noise) is often among the shortest and gives a wrong cell.
     Every non-collinear pair of the n_cand shortest spots is tried as a
-    basis; the one indexing the most spots (within tol) wins - among
+    basis; the one indexing the most spots ABOVE CHANCE wins - among
     near-ties (>= 97 % of the best) the coarsest cell, so a sub-cell that
     also indexes everything is not chosen - then refined by least squares."""
     xy = np.asarray(xy, float)
@@ -80,12 +80,17 @@ def lattice_basis(xy, tol: float = 3.0, min_angle_deg: float = 20.0,
             B = np.stack([cand[i], cand[j]], axis=1)
             hk = np.rint(np.linalg.solve(B, xy.T).T)
             n = int((np.hypot(*(hk @ B.T - xy).T) < tol).sum())
-            trials.append((n, cr, B))
+            # spots indexed ABOVE CHANCE: a cell of area A catches a random
+            # spot with probability ~ pi tol^2 / A, so a tiny cell (e.g. from
+            # spots around the direct beam) "indexes" everything
+            chance = min(1.0, np.pi * tol ** 2 / cr)
+            trials.append((n - chance * len(xy), cr, B))
     if not trials:
         raise ValueError("all spots are collinear - need two independent "
                          "lattice directions")
     n_best = max(t[0] for t in trials)
     good = [t for t in trials if t[0] >= 0.97 * n_best]
+    n_best = int(round(n_best))
     B0 = reduce_basis(max(good, key=lambda t: t[1])[2])  # coarsest cell
     B, n, _, _ = fit_lattice(B0, xy, tol)
     if not np.all(np.isfinite(B)):

@@ -203,9 +203,10 @@ class Model:
     w: float = 2.0
     min_spots: int = 5
     # a lattice "indexes" a pattern only if it explains at least this
-    # fraction of the spots it explains in its own reference (a wrong
-    # lattice of similar spacing still hits 20-50% by coincidence)
-    min_index_frac: float = 0.6
+    # fraction of what it explains in its own reference, both counted
+    # ABOVE CHANCE (a wrong lattice of similar spacing still hits 20-50 %
+    # of the spots by coincidence)
+    min_index_frac: float = 0.5
     pairs: dict = field(default_factory=dict)     # (a, b) -> calibration
     notes: list = field(default_factory=list)
 
@@ -228,11 +229,22 @@ def make_phase_ref(ref, tol=3.0):
 # ---------------------------------------------------------------------------
 # per pattern
 # ---------------------------------------------------------------------------
-def _gate(model, ref):
-    """Indexing fraction a pattern needs for this lattice to count:
-    relative to how well the lattice indexes its OWN reference (spurious
-    spots - detector seams, streaks - lower both alike)."""
-    return max(0.3, model.min_index_frac * min(ref.q_ref, 1.0))
+def _excess(q, B, tol):
+    """Indexed fraction above chance: a cell of area A catches a random
+    spot with probability c ~ pi tol^2 / A  ->  (q - c) / (1 - c)."""
+    c = min(0.95, np.pi * tol ** 2 / max(abs(np.linalg.det(B)), 1e-9))
+    return (q - c) / (1.0 - c)
+
+
+def _passes(model, ref, fit):
+    """Does lattice ``fit`` (B, t, q) index the pattern well enough?
+    Chance-corrected and relative to how well the lattice indexes its OWN
+    reference (spurious spots - detector seams, streaks - lower both)."""
+    if fit is None:
+        return False
+    need = model.min_index_frac * max(_excess(ref.q_ref, ref.B, model.tol),
+                                      0.2)
+    return _excess(fit[2], fit[0], model.tol) >= need
 
 
 def fit_all(model, pat, peaks, centre, gate=True):
@@ -255,9 +267,8 @@ def fit_all(model, pat, peaks, centre, gate=True):
         if not np.all(np.isfinite(s["B"])):
             fits.append(None)
             continue
-        q = s["n"] / len(xy)
-        fits.append((s["B"], s["t"], q) if (q >= _gate(model, ref)
-                                            or not gate) else None)
+        f = (s["B"], s["t"], s["n"] / len(xy))
+        fits.append(f if (not gate or _passes(model, ref, f)) else None)
     return fits, v
 
 
@@ -463,7 +474,7 @@ def classify(model, pat, peaks, centre, meter=None):
     # places the satellite positions); the gated list decides off-axis
     # and the different-lattice pairs
     raw_fits, v = fit_all(model, pat, peaks, centre, gate=False)
-    fits = [f if (f is not None and f[2] >= _gate(model, r)) else None
+    fits = [f if _passes(model, r, f) else None
             for f, r in zip(raw_fits, model.refs)]
     res = dict(post=np.full(K, np.nan), best=-1, second=-1, margin=np.nan,
                status=OK, llr=np.full((K, K), np.nan), fits=fits)

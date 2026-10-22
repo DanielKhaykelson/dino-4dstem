@@ -55,9 +55,20 @@ class PhaseDiscrimMixin:
         ctk.CTkEntry(g, textvariable=self._pd_w, width=40).pack(
             side="left", padx=(4, 10))
         ctk.CTkLabel(g, text="confident ≥").pack(side="left")
+        self._pd_gate = ctk.StringVar(value="50")
         self._pd_conf = ctk.StringVar(value="3")
         ctk.CTkEntry(g, textvariable=self._pd_conf, width=40).pack(
             side="left", padx=4)
+        g2 = ctk.CTkFrame(parent, fg_color="transparent")
+        g2.pack(fill="x", padx=10, pady=(2, 2))
+        ctk.CTkLabel(g2, text="lattice must index ≥").pack(side="left")
+        ctk.CTkEntry(g2, textvariable=self._pd_gate, width=40).pack(
+            side="left", padx=4)
+        ctk.CTkLabel(g2, text="% (else off-axis)").pack(side="left")
+        _hint(parent,
+            "off-axis: no reference lattice indexes at least this share of "
+            "a pattern's spots (above chance, relative to its own "
+            "reference).  Lower it if real patterns come out off-axis.")
         _hint(parent,
             "confident: the best reference must beat every other by this "
             "log-likelihood ratio (3 ≈ 20:1 odds); below it the pixel is "
@@ -103,6 +114,11 @@ class PhaseDiscrimMixin:
                          r_min=min(r.extra.get("r_min", 0.0) for r in refs),
                          r_max=max(r.extra.get("r_max", np.inf)
                                    for r in refs), w=w)
+        try:
+            model.min_index_frac = min(max(float(self._pd_gate.get()) / 100,
+                                           0.0), 1.0)
+        except Exception:
+            pass
         kw = self._detect_kw_now()
         pd.calibrate(model, [(r.pattern, detect_peaks_2d(r.pattern, **kw),
                               r.centre) for r in refs])
