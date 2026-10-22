@@ -191,6 +191,7 @@ class PhaseRef:
     B: np.ndarray               # (2, 2) reference lattice, x / y-up cols
     pattern: np.ndarray = None
     centre: tuple = (0.0, 0.0)
+    q_ref: float = 1.0          # fraction of its own spots it indexes
 
 
 @dataclass
@@ -202,8 +203,8 @@ class Model:
     w: float = 2.0
     min_spots: int = 5
     # a lattice "indexes" a pattern only if it explains at least this
-    # fraction of its detected spots (a wrong lattice of similar spacing
-    # still hits 20-50% by coincidence)
+    # fraction of the spots it explains in its own reference (a wrong
+    # lattice of similar spacing still hits 20-50% by coincidence)
     min_index_frac: float = 0.6
     pairs: dict = field(default_factory=dict)     # (a, b) -> calibration
     notes: list = field(default_factory=list)
@@ -218,14 +219,22 @@ def make_phase_ref(ref, tol=3.0):
         pk = np.column_stack([vecs[:, 0] + cy, vecs[:, 1] + cx,
                               np.ones(len(vecs))])
         vecs = refine_subpixel(ref.pattern, pk)[:, :2] - np.array([cy, cx])
-    B, _ = lattice_basis(to_xy(vecs), tol)
+    B, n = lattice_basis(to_xy(vecs), tol)
     return PhaseRef(ref.name, np.asarray(ref.vecs, float), ref.period_deg,
-                    B, ref.pattern, tuple(ref.centre))
+                    B, ref.pattern, tuple(ref.centre),
+                    q_ref=n / max(len(vecs), 1))
 
 
 # ---------------------------------------------------------------------------
 # per pattern
 # ---------------------------------------------------------------------------
+def _gate(model, ref):
+    """Indexing fraction a pattern needs for this lattice to count:
+    relative to how well the lattice indexes its OWN reference (spurious
+    spots - detector seams, streaks - lower both alike)."""
+    return max(0.3, model.min_index_frac * min(ref.q_ref, 1.0))
+
+
 def fit_all(model, pat, peaks, centre, gate=True):
     """Fit every reference lattice to one pattern -> (list of (B, t, q)
     or None per reference, q = fraction of the detected spots it indexes;
@@ -247,7 +256,7 @@ def fit_all(model, pat, peaks, centre, gate=True):
             fits.append(None)
             continue
         q = s["n"] / len(xy)
-        fits.append((s["B"], s["t"], q) if (q >= model.min_index_frac
+        fits.append((s["B"], s["t"], q) if (q >= _gate(model, ref)
                                             or not gate) else None)
     return fits, v
 
@@ -289,9 +298,16 @@ def fold_stats(raw, F, ctrl=None):
     spots broaden or a reference average is blurred.  No global baseline
     is subtracted: a mean over "control" positions would include the
     tails of the main spots and shift with the spot width."""
-    val = np.array([np.mean(r) / F if len(r) else np.nan for r in raw])
+    def _trim(r):
+        # drop the most extreme 10 % at each end: sites hit by a detector
+        # seam / streak / dead region must not skew the position's mean
+        r = np.sort(np.asarray(r, float))
+        k = int(0.1 * len(r))
+        return r[k:len(r) - k] if len(r) - 2 * k >= 3 else r
+    tr = [_trim(r) for r in raw]
+    val = np.array([np.mean(r) / F if len(r) else np.nan for r in tr])
     noi = np.array([np.std(r) / np.sqrt(len(r)) / F if len(r) > 1
-                    else np.inf for r in raw])
+                    else np.inf for r in tr])
     return val, noi + 1e-12
 
 
@@ -342,7 +358,10 @@ def calibrate(model, patterns_by_ref, z_diff: float = 4.0):
                     # a position right next to a STRONGER differing one is
                     # its tail, not a reflection of its own
                     Bc = fr[a][c][0]
-                    order = np.argsort(-np.where(disc, z, -np.inf))
+                    # strongest difference first (by size, not
+                    # significance: a big satellite outranks the tail
+                    # artifacts next to it)
+                    order = np.argsort(-np.where(disc, np.abs(dv), -np.inf))
                     kept = []
                     for i in order:
                         if not disc[i]:
@@ -380,8 +399,14 @@ def calibrate(model, patterns_by_ref, z_diff: float = 4.0):
                             f"position differs by > {z_diff:g} sigma - "
                             f"they cannot be told apart.")
             if ent["mode"] == "distinct":
-                model.notes.append(f"'{na}' vs '{nb}': different lattices "
-                                   f"- decided by which indexes the spots.")
+                why = ""
+                if fr[a][a] is not None and fr[a][b] is not None:
+                    M = np.linalg.solve(fr[a][a][0], fr[a][b][0])
+                    why = (f" (cell relation {np.round(M, 2).tolist()} is not "
+                           f"integer)")
+                model.notes.append(f"'{na}' vs '{nb}': different lattices"
+                                   f"{why} - decided by which indexes the "
+                                   f"spots.")
             model.pairs[(a, b)] = ent
     return model
 
@@ -438,8 +463,8 @@ def classify(model, pat, peaks, centre, meter=None):
     # places the satellite positions); the gated list decides off-axis
     # and the different-lattice pairs
     raw_fits, v = fit_all(model, pat, peaks, centre, gate=False)
-    fits = [f if (f is not None and f[2] >= model.min_index_frac) else None
-            for f in raw_fits]
+    fits = [f if (f is not None and f[2] >= _gate(model, r)) else None
+            for f, r in zip(raw_fits, model.refs)]
     res = dict(post=np.full(K, np.nan), best=-1, second=-1, margin=np.nan,
                status=OK, llr=np.full((K, K), np.nan), fits=fits)
     if len(v) < model.min_spots:

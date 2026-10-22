@@ -139,7 +139,16 @@ class PhaseDiscrimMixin:
                 ref = model.refs[k]
                 if ref.pattern is not None:
                     self._dr_imshow(ax, ref.pattern)
-                ax.set_title(ref.name, fontsize=10)
+                # the lattice found for this reference (g1 yellow, g2 green)
+                cy, cx = ref.centre
+                for g, col in ((ref.B[:, 0], "#ffd000"),
+                               (ref.B[:, 1], "#40ff40")):
+                    ax.annotate("", xy=(cx + g[0], cy - g[1]),
+                                xytext=(cx, cy), arrowprops=dict(
+                                    arrowstyle="->", color=col, lw=1.8))
+                ax.set_title(f"{ref.name}  (lattice indexes "
+                             f"{100 * ref.q_ref:.0f}% of its spots)",
+                             fontsize=9)
                 ax.set_xticks([]); ax.set_yticks([])
             ax = row[2]
             if ent["mode"] == "shared":

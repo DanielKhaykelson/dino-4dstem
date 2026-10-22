@@ -56,27 +56,59 @@ def to_xy(vecs):
     return np.stack([v[:, 1], -v[:, 0]], axis=1)
 
 
-def lattice_basis(xy, tol: float = 3.0, min_angle_deg: float = 20.0):
-    """Two shortest non-collinear vectors of a spot set, then refined by a
-    least-squares fit to every spot they index.  Returns (B (2x2, columns
-    g1 g2), n_indexed)."""
+def lattice_basis(xy, tol: float = 3.0, min_angle_deg: float = 20.0,
+                  n_cand: int = 12):
+    """2-D lattice of a spot set -> (B (2x2, columns g1 g2), n_indexed).
+
+    Not simply the two shortest spots: a spurious spot (detector seam,
+    streak, noise) is often among the shortest and gives a wrong cell.
+    Every non-collinear pair of the n_cand shortest spots is tried as a
+    basis; the one indexing the most spots (within tol) wins - among
+    near-ties (>= 97 % of the best) the coarsest cell, so a sub-cell that
+    also indexes everything is not chosen - then refined by least squares."""
     xy = np.asarray(xy, float)
     r = np.hypot(xy[:, 0], xy[:, 1])
-    order = np.argsort(r)
-    g1 = xy[order[0]]
+    cand = xy[np.argsort(r)[:n_cand]]
+    rc = np.hypot(cand[:, 0], cand[:, 1])
     s_min = np.sin(np.radians(min_angle_deg))
-    g2 = None
-    for i in order[1:]:
-        v = xy[i]
-        if abs(g1[0] * v[1] - g1[1] * v[0]) > s_min * r[order[0]] * r[i]:
-            g2 = v
-            break
-    if g2 is None:
+    trials = []
+    for i in range(len(cand)):
+        for j in range(i + 1, len(cand)):
+            cr = abs(cand[i, 0] * cand[j, 1] - cand[i, 1] * cand[j, 0])
+            if cr <= s_min * rc[i] * rc[j]:
+                continue
+            B = np.stack([cand[i], cand[j]], axis=1)
+            hk = np.rint(np.linalg.solve(B, xy.T).T)
+            n = int((np.hypot(*(hk @ B.T - xy).T) < tol).sum())
+            trials.append((n, cr, B))
+    if not trials:
         raise ValueError("all spots are collinear - need two independent "
                          "lattice directions")
-    B = np.stack([g1, g2], axis=1)
-    B, n, _, _ = fit_lattice(B, xy, tol)
-    return B, n
+    n_best = max(t[0] for t in trials)
+    good = [t for t in trials if t[0] >= 0.97 * n_best]
+    B0 = reduce_basis(max(good, key=lambda t: t[1])[2])  # coarsest cell
+    B, n, _, _ = fit_lattice(B0, xy, tol)
+    if not np.all(np.isfinite(B)):
+        return B0, n_best
+    return reduce_basis(B), n
+
+
+def reduce_basis(B):
+    """Lagrange-Gauss reduction: the same lattice with its two SHORTEST
+    basis vectors (a compact, near-orthogonal cell)."""
+    u, v = B[:, 0].astype(float).copy(), B[:, 1].astype(float).copy()
+    if u @ u > v @ v:
+        u, v = v, u
+    for _ in range(50):
+        m = np.rint((u @ v) / (u @ u))
+        if m == 0:
+            break
+        v = v - m * u
+        if v @ v < u @ u:
+            u, v = v, u
+        else:
+            break
+    return np.stack([u, v], axis=1)
 
 
 def fit_lattice(B0, xy, tol: float = 3.0, n_iter: int = 3,
