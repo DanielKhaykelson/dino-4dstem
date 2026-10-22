@@ -226,7 +226,7 @@ def make_phase_ref(ref, tol=3.0):
 # ---------------------------------------------------------------------------
 # per pattern
 # ---------------------------------------------------------------------------
-def fit_all(model, pat, peaks, centre):
+def fit_all(model, pat, peaks, centre, gate=True):
     """Fit every reference lattice to one pattern -> (list of (B, t, q)
     or None per reference, q = fraction of the detected spots it indexes;
     the detected vectors)."""
@@ -247,8 +247,8 @@ def fit_all(model, pat, peaks, centre):
             fits.append(None)
             continue
         q = s["n"] / len(xy)
-        fits.append((s["B"], s["t"], q) if q >= model.min_index_frac
-                    else None)
+        fits.append((s["B"], s["t"], q) if (q >= model.min_index_frac
+                                            or not gate) else None)
     return fits, v
 
 
@@ -300,7 +300,11 @@ def calibrate(model, patterns_by_ref, z_diff: float = 4.0):
     (patterns_by_ref: (pattern, peaks, centre) per reference)."""
     meter = SiteMeter(model.w)
     K = len(model.refs)
-    fr = [fit_all(model, *patterns_by_ref[k])[0] for k in range(K)]
+    # no indexing-fraction gate here: with strong satellites the main
+    # lattice explains only part of a superstructure reference's spots,
+    # and the sub-lattice relation must still be found
+    fr = [fit_all(model, *patterns_by_ref[k], gate=False)[0]
+          for k in range(K)]
     allc = np.ones(len(OFFSETS), bool)
     for a in range(K):
         for b in range(a + 1, K):
@@ -335,6 +339,30 @@ def calibrate(model, patterns_by_ref, z_diff: float = 4.0):
                     # is also at -f, with the same sign -> drop the rest
                     disc = disc & disc[_FRIEDEL] & (
                         np.sign(dv) == np.sign(dv[_FRIEDEL]))
+                    # a position right next to a STRONGER differing one is
+                    # its tail, not a reflection of its own
+                    Bc = fr[a][c][0]
+                    order = np.argsort(-np.where(disc, z, -np.inf))
+                    kept = []
+                    for i in order:
+                        if not disc[i]:
+                            break
+                        far = True
+                        for j in kept:
+                            df = (OFFSETS[i] - OFFSETS[j] + 0.5) % 1.0 - 0.5
+                            if np.hypot(*(Bc @ df)) < 2 * meter.w + 3:
+                                far = False
+                                break
+                        if far:
+                            kept.append(i)
+                    disc = np.zeros_like(disc)
+                    disc[kept] = True
+                    # side effects of strong reflections (e.g. their tails
+                    # in a neighbour's background) are small: keep only
+                    # differences >= 10 % of the strongest one
+                    if disc.any():
+                        disc &= np.abs(dv) >= 0.1 * np.abs(dv[disc]).max()
+                    disc = disc & disc[_FRIEDEL]
                     ctrl = ~disc
                     va, _ = fold_stats(*folds[a], ctrl)
                     vb, _ = fold_stats(*folds[b], ctrl)
@@ -358,7 +386,7 @@ def calibrate(model, patterns_by_ref, z_diff: float = 4.0):
     return model
 
 
-def pair_llr(model, meter, pat, centre, fits, a, b, cache):
+def pair_llr(model, meter, pat, centre, fits, a, b, cache, raw_fits=None):
     """log P(pattern | a) - log P(pattern | b); None if undecidable."""
     cap = 20.0
     ent = model.pairs.get((a, b), {})
@@ -366,10 +394,12 @@ def pair_llr(model, meter, pat, centre, fits, a, b, cache):
         if not ent["disc"].any():
             return None
         c = ent["coarse"]
-        fc = fits[c] if fits[c] is not None else fits[b if c == a else a]
+        if fits[a] is None and fits[b] is None:
+            return None
+        fc = (raw_fits or fits)[c]
         if fc is None:
             return None
-        key = ("fold", c if fits[c] is not None else -1 - c)
+        key = ("fold", c)
         if key not in cache:
             cache[key] = fold(model, meter, pat, centre, fc[0], fc[1])
         val, noi = fold_stats(*cache[key], ent["ctrl"])
@@ -403,7 +433,13 @@ def classify(model, pat, peaks, centre, meter=None):
     """-> dict(post (K,), best, second, margin, status, llr (K, K), fits)."""
     meter = meter or SiteMeter(model.w)
     K = len(model.refs)
-    fits, v = fit_all(model, pat, peaks, centre)
+    # every lattice fitted without the indexing gate (a superstructure
+    # pattern's main lattice explains only part of its spots but still
+    # places the satellite positions); the gated list decides off-axis
+    # and the different-lattice pairs
+    raw_fits, v = fit_all(model, pat, peaks, centre, gate=False)
+    fits = [f if (f is not None and f[2] >= model.min_index_frac) else None
+            for f in raw_fits]
     res = dict(post=np.full(K, np.nan), best=-1, second=-1, margin=np.nan,
                status=OK, llr=np.full((K, K), np.nan), fits=fits)
     if len(v) < model.min_spots:
@@ -417,7 +453,8 @@ def classify(model, pat, peaks, centre, meter=None):
     cache = {"n_spots": len(v), "v": v}
     for a in range(K):
         for b in range(a + 1, K):
-            x = pair_llr(model, meter, pat, centre, fits, a, b, cache)
+            x = pair_llr(model, meter, pat, centre, fits, a, b, cache,
+                         raw_fits)
             if x is None:
                 undecided = True
                 x = 0.0
@@ -427,6 +464,7 @@ def classify(model, pat, peaks, centre, meter=None):
     p = np.exp(s - s.max())
     p /= p.sum()
     order = np.argsort(-p)
+    res["raw_fits"] = raw_fits
     res.update(post=p, best=int(order[0]),
                second=int(order[1]) if K > 1 else -1,
                margin=float(min(L[order[0], j] for j in range(K)

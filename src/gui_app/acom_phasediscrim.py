@@ -160,7 +160,8 @@ class PhaseDiscrimMixin:
                         continue
                     from gui_app.strain_core import lattice_basis  # noqa
                     fr = pd.fit_all(model, ref.pattern,
-                                    self._pd_ref_peaks(ref), ref.centre)[0]
+                                    self._pd_ref_peaks(ref), ref.centre,
+                                    gate=False)[0]
                     c = ent["coarse"]
                     if fr[c] is None:
                         continue
@@ -416,7 +417,7 @@ class PhaseDiscrimMixin:
             if ent.get("mode") != "shared" or not ent["disc"].any():
                 continue
             k = ent["coarse"]
-            fk = r["fits"][k] or r["fits"][b if k == a else a]
+            fk = (r.get("raw_fits") or r["fits"])[k]
             if fk is None:
                 continue
             B, t, _q = fk
