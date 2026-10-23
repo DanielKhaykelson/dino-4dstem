@@ -207,11 +207,18 @@ class Model:
     # ABOVE CHANCE (a wrong lattice of similar spacing still hits 20-50 %
     # of the spots by coincidence)
     min_index_frac: float = 0.5
+    # "spots": lattices fitted to the detected peaks (strain_core) - the
+    # default.  "intensity": fitted to the pattern's intensity
+    # (lattice_fit) - experimental: on EuInAs it misjudged two different
+    # lattices as one and was 20x slower, so it is not used by the GUI.
+    fit_mode: str = "spots"
+    min_z: float = 5.0          # lattice evidence vs random rotations
+    n_bright: int = 20          # off-axis rule: the N brightest spots
     pairs: dict = field(default_factory=dict)     # (a, b) -> calibration
     notes: list = field(default_factory=list)
 
 
-def make_phase_ref(ref, tol=3.0):
+def make_phase_ref(ref, tol=3.0, fit_mode="spots"):
     """PhaseRef from a dataref_core.DataReference (lattice from its
     sub-pixel spots)."""
     vecs = np.asarray(ref.vecs, float)
@@ -221,9 +228,21 @@ def make_phase_ref(ref, tol=3.0):
                               np.ones(len(vecs))])
         vecs = refine_subpixel(ref.pattern, pk)[:, :2] - np.array([cy, cx])
     B, n = lattice_basis(to_xy(vecs), tol)
+    q_ref = n / max(len(vecs), 1)
+    if (fit_mode == "intensity" and ref.pattern is not None
+            and not ref.extra.get("simulated")):
+        # refine on the reference's own intensity; q_ref then = the share
+        # of its spot intensity the lattice explains (same measure as for
+        # every pattern in "intensity" mode)
+        from gui_app import lattice_fit as lf
+        r_min = ref.extra.get("r_min", 0.0)
+        r_max = ref.extra.get("r_max", np.inf)
+        Bi, ti, zi, Ei = lf.fit(ref.pattern, ref.centre, B, (0.0, 0.0),
+                                r_min, r_max, ref.period_deg)
+        if np.all(np.isfinite(Bi)) and np.isfinite(Ei):
+            B, q_ref = Bi, Ei
     return PhaseRef(ref.name, np.asarray(ref.vecs, float), ref.period_deg,
-                    B, ref.pattern, tuple(ref.centre),
-                    q_ref=n / max(len(vecs), 1))
+                    B, ref.pattern, tuple(ref.centre), q_ref=q_ref)
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +261,12 @@ def _passes(model, ref, fit):
     reference (spurious spots - detector seams, streaks - lower both)."""
     if fit is None:
         return False
+    if model.fit_mode == "intensity":
+        # fit = (B, t, explained, z): the lattice must stand out from
+        # random rotations AND explain a good share of what it explains
+        # in its own reference
+        return (np.isfinite(fit[3]) and fit[3] >= model.min_z
+                and fit[2] >= model.min_index_frac * max(ref.q_ref, 0.1))
     need = model.min_index_frac * max(_excess(ref.q_ref, ref.B, model.tol),
                                       0.2)
     return _excess(fit[2], fit[0], model.tol) >= need
@@ -257,17 +282,46 @@ def fit_all(model, pat, peaks, centre, gate=True):
     pk = np.column_stack([v[:, 0] + centre[0], v[:, 1] + centre[1],
                           np.ones(len(v))])
     xy = to_xy(refine_subpixel(pat, pk)[:, :2] - np.asarray(centre))
+    # intensity of each ring spot (same selection as spot_vectors)
+    p_ = np.asarray(peaks, float).reshape(-1, 3)
+    r_ = np.hypot(*(p_[:, :2] - np.asarray(centre, float)).T)
+    w = np.clip(p_[(r_ >= model.r_min) & (r_ <= model.r_max), 2], 0, None)
+    if len(w) != len(xy) or w.sum() <= 0:
+        w = np.ones(len(xy))
     fits = []
+    imgs = None
     for ref in model.refs:
         m = match_vectors(ref.vecs, v, model.tol, ref.period_deg)
         if not np.isfinite(m["theta_deg"]):
             fits.append(None)
             continue
+        if model.fit_mode == "intensity":
+            from gui_app import lattice_fit as lf
+            if imgs is None:
+                imgs = (lf.SpotImage(pat, 3.0), lf.SpotImage(pat, 1.5))
+            B0 = lf.rot2(m["theta_deg"]) @ ref.B
+            B, tt, z, E = lf.fit(pat, centre, B0, (0.0, 0.0), model.r_min,
+                                 model.r_max, ref.period_deg, imgs=imgs)
+            f = (B, tt, E, z) if np.all(np.isfinite(B)) else None
+            fits.append(f if (not gate or _passes(model, ref, f)) else None)
+            continue
         s = strain_one(ref.B, xy, m["theta_deg"], model.tol, model.min_spots)
         if not np.all(np.isfinite(s["B"])):
             fits.append(None)
             continue
-        f = (s["B"], s["t"], s["n"] / len(xy))
+        # share of the BRIGHTEST spots the lattice indexes: in a noisy
+        # pattern of the right phase the strong spots are lattice spots
+        # (noise peaks are many but weak); a different phase leaves strong
+        # spots unexplained.  (A share of ALL detected spots or of their
+        # total intensity falls with dose and calls noisy patterns
+        # off-axis.)
+        B, tt = s["B"], s["t"]
+        hk = np.rint(np.linalg.solve(B, (xy - tt).T).T)
+        hit = (np.hypot(*(hk @ B.T + tt - xy).T) < model.tol) & (
+            np.abs(hk).sum(1) > 0)
+        top = np.argsort(-w)[:min(len(w), model.n_bright)]
+        q = float(hit[top].mean())
+        f = (B, tt, q)
         fits.append(f if (not gate or _passes(model, ref, f)) else None)
     return fits, v
 
@@ -332,6 +386,12 @@ def calibrate(model, patterns_by_ref, z_diff: float = 4.0):
     # and the sub-lattice relation must still be found
     fr = [fit_all(model, *patterns_by_ref[k], gate=False)[0]
           for k in range(K)]
+    # how much of its OWN reference's spot intensity each lattice explains
+    # (the off-axis rule is relative to this)
+    if model.fit_mode == "spots":
+        for k in range(K):
+            if fr[k][k] is not None:
+                model.refs[k].q_ref = fr[k][k][2]
     allc = np.ones(len(OFFSETS), bool)
     for a in range(K):
         for b in range(a + 1, K):
@@ -454,6 +514,12 @@ def pair_llr(model, meter, pat, centre, fits, a, b, cache, raw_fits=None):
         return None
     if (fa is None) != (fb is None):
         return cap if fb is None else -cap
+    if model.fit_mode == "intensity":
+        # share of the spot intensity each lattice explains, relative to
+        # its own reference; 0.06 difference ~ log-likelihood ratio 3
+        ra = fa[2] / max(model.refs[a].q_ref, 0.1)
+        rb = fb[2] / max(model.refs[b].q_ref, 0.1)
+        return float(np.clip(50.0 * (ra - rb), -cap, cap))
     v = cache["v"]
     sa = match_vectors(model.refs[a].vecs, v, model.tol,
                        model.refs[a].period_deg)["score"]
@@ -476,8 +542,18 @@ def classify(model, pat, peaks, centre, meter=None):
     raw_fits, v = fit_all(model, pat, peaks, centre, gate=False)
     fits = [f if _passes(model, r, f) else None
             for f, r in zip(raw_fits, model.refs)]
+    # why a lattice was (not) accepted: (indexed share above chance, needed)
+    res_gate = []
+    for f, r in zip(raw_fits, model.refs):
+        if f is None or model.fit_mode != "spots":
+            res_gate.append(None)
+            continue
+        res_gate.append((_excess(f[2], f[0], model.tol),
+                         model.min_index_frac * max(
+                             _excess(r.q_ref, r.B, model.tol), 0.2)))
     res = dict(post=np.full(K, np.nan), best=-1, second=-1, margin=np.nan,
-               status=OK, llr=np.full((K, K), np.nan), fits=fits)
+               status=OK, llr=np.full((K, K), np.nan), fits=fits,
+               gate=res_gate)
     if len(v) < model.min_spots:
         res["status"] = TOO_FEW
         return res

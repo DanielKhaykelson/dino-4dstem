@@ -67,8 +67,8 @@ class PhaseDiscrimMixin:
         ctk.CTkLabel(g2, text="% (else off-axis)").pack(side="left")
         _hint(parent,
             "off-axis: no reference lattice indexes at least this share of "
-            "a pattern's spots (above chance, relative to its own "
-            "reference).  Lower it if real patterns come out off-axis.")
+            "a pattern's 20 brightest spots (above chance, relative to its "
+            "own reference).  Lower it if real patterns come out off-axis.")
         _hint(parent,
             "confident: the best reference must beat every other by this "
             "log-likelihood ratio (3 ≈ 20:1 odds); below it the pixel is "
@@ -190,7 +190,7 @@ class PhaseDiscrimMixin:
                     c = ent["coarse"]
                     if fr[c] is None:
                         continue
-                    B, t, _q = fr[c]
+                    B, t = fr[c][0], fr[c][1]
                     cy, cx = ref.centre
                     for f in pd.OFFSETS[ent["disc"]]:
                         xy, _ = pd.lattice_sites(B, t + B @ f, model.r_min,
@@ -445,7 +445,7 @@ class PhaseDiscrimMixin:
             fk = (r.get("raw_fits") or r["fits"])[k]
             if fk is None:
                 continue
-            B, t, _q = fk
+            B, t = fk[0], fk[1]
             for f in pd.OFFSETS[ent["disc"]]:
                 xy, _ = pd.lattice_sites(B, t + B @ f, model.r_min,
                                          model.r_max)
@@ -465,6 +465,11 @@ class PhaseDiscrimMixin:
                 f"margin {r['margin']:.1f}); second: "
                 f"{names[r['second']] if r['second'] >= 0 else '-'}"
                 if r["status"] == pd.OK else pd.STATUS[r["status"]])
+        if r["status"] == pd.OFF_AXIS and r.get("gate"):
+            head += "  - " + "; ".join(
+                f"{nm}: indexes {100 * g[0]:.0f}% of the brightest spots "
+                f"(needs {100 * g[1]:.0f}%)" if g else f"{nm}: no fit"
+                for nm, g in zip(names, r["gate"]))
         ax.set_title(f"scan ({y}, {x})   {head}\nlog-likelihood ratios: "
                      + ";  ".join(lines), fontsize=9)
         if handles:
