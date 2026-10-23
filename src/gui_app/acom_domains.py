@@ -60,25 +60,56 @@ def _radial(img, centre, rmax):
     return s / np.maximum(n, 1)
 
 
-def _line(img, centre, g, rmax, width=3):
-    """Intensity along direction g (x, y-up) through the centre, averaged
-    over +-width/2 px across, both sides folded (Friedel)."""
+def _line(img, centre, g, other, rmax, width=3):
+    """Intensity along lattice direction g, averaged over EVERY lattice row
+    parallel to it (rows through k * other, k = ..., -1, 0, 1, ...), 3 px
+    wide, both directions folded.  A profile through the beam alone sees
+    only the central row, where superlattice reflections are often
+    systematically absent (glide / screw extinctions) although present on
+    the other rows.  -> (position along g in px, mean intensity)."""
     from scipy.ndimage import map_coordinates
-    u = np.asarray(g, float) / np.linalg.norm(g)
+    g = np.asarray(g, float); other = np.asarray(other, float)
+    u = g / np.linalg.norm(g)
     nrm = np.array([-u[1], u[0]])
     s = np.arange(0, rmax, 0.5)
-    prof = np.zeros_like(s)
+    H, W = img.shape
+    acc = np.zeros_like(s); cnt = np.zeros_like(s)
     offs = np.linspace(-(width - 1) / 2, (width - 1) / 2, width)
-    for sign in (1, -1):
-        for o in offs:
-            x = sign * s * u[0] + o * nrm[0]
-            y = sign * s * u[1] + o * nrm[1]
-            prof += map_coordinates(img, [centre[0] - y, centre[1] + x],
-                                    order=1, mode="nearest")
-    return s, prof / (2 * width)
+    kmax = int(rmax / max(abs(other @ nrm), 1e-6)) + 1
+    for k in range(-kmax, kmax + 1):
+        foot = k * other
+        for sign in (1, -1):
+            for o in offs:
+                x = foot[0] + sign * s * u[0] + o * nrm[0]
+                y = foot[1] + sign * s * u[1] + o * nrm[1]
+                rows, cols = centre[0] - y, centre[1] + x
+                ok = ((rows >= 0) & (rows < H - 1) & (cols >= 0)
+                      & (cols < W - 1) & (np.hypot(x, y) < rmax))
+                v = map_coordinates(img, [rows, cols], order=1,
+                                    mode="nearest")
+                acc += np.where(ok, v, 0); cnt += ok
+    return s, acc / np.maximum(cnt, 1)
+
+
+def _ordered(B):
+    """Lattice basis with the shorter vector first (g1 = short, g2 = long,
+    as in the tables)."""
+    B = np.asarray(B, float)
+    return B if np.linalg.norm(B[:, 0]) <= np.linalg.norm(B[:, 1])         else B[:, ::-1]
 
 
 class DomainMixin:
+
+    def _dm_arrows(self, ax, B, centre):
+        """g1 (yellow, shorter) and g2 (green) from the beam."""
+        B = _ordered(B)
+        cy, cx = centre
+        for j, (nm, col) in enumerate((("g1", "#ffd000"), ("g2", "#40ff40"))):
+            g = B[:, j]
+            ax.annotate("", xy=(cx + g[0], cy - g[1]), xytext=(cx, cy),
+                        arrowprops=dict(arrowstyle="->", color=col, lw=2))
+            ax.text(cx + 1.18 * g[0], cy - 1.18 * g[1], nm, color=col,
+                    fontsize=11, weight="bold", ha="center", va="center")
 
     # ------------------------------------------------------------------
     def _dm_state(self, res):
@@ -288,6 +319,8 @@ class DomainMixin:
             axs = fig.subplots(2, 3)
             for ax, o in zip(axs[0, :2], (A, Bd)):
                 self._dr_imshow(ax, o["avg"])
+                if o["lat"] is not None:
+                    self._dm_arrows(ax, o["lat"]["B"], centre)
                 ax.set_title(f"{o['label']}: mean of {o['n']} patterns",
                              fontsize=10)
                 ax.set_xticks([]); ax.set_yticks([])
@@ -310,21 +343,22 @@ class DomainMixin:
             ax = axs[1, 1]
             latA = A["lat"]
             if latA is not None:
+                Bo = _ordered(latA["B"])
                 for j, (gname, ls) in enumerate((("g1", "-"), ("g2", "--"))):
-                    gv = latA["B"][:, j]
+                    gv, ov = Bo[:, j], Bo[:, 1 - j]
                     for o in (A, Bd):
-                        s, pr = _line(o["avg"], centre, gv, rmax)
+                        s, pr = _line(o["avg"], centre, gv, ov, rmax)
                         ax.semilogy(s, np.clip(pr, 1e-6, None)
                                     / max(pr[4:].max(), 1e-9), ls,
                                     color=cols[o["k"]],
                                     label=f"{o['label']} along {gname}")
                 for j, gname in enumerate(("g1", "g2")):
-                    g = np.linalg.norm(latA["B"][:, j])
+                    g = np.linalg.norm(_ordered(latA["B"])[:, j])
                     for m_ in (0.5, 1, 1.5, 2, 2.5, 3):
                         ax.axvline(m_ * g, color="0.85", lw=0.6, zorder=0)
             ax.set_xlabel("|q| along the lattice direction (px)")
-            ax.set_title("line profiles along g1 (solid) / g2 (dashed), "
-                         "grey = multiples of ½g", fontsize=9)
+            ax.set_title("along g1 (solid) / g2 (dashed), averaged over all "
+                         "lattice rows; grey = multiples of ½g", fontsize=9)
             ax.legend(fontsize=7)
             ax = axs[1, 2]
             txt = self._dm_table(out, inv_a)
