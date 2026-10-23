@@ -64,11 +64,16 @@ class PhaseDiscrimMixin:
         ctk.CTkLabel(g2, text="lattice must index ≥").pack(side="left")
         ctk.CTkEntry(g2, textvariable=self._pd_gate, width=40).pack(
             side="left", padx=4)
-        ctk.CTkLabel(g2, text="% (else off-axis)").pack(side="left")
+        ctk.CTkLabel(g2, text="% of the").pack(side="left")
+        self._pd_nbright = ctk.StringVar(value="20")
+        ctk.CTkEntry(g2, textvariable=self._pd_nbright, width=36).pack(
+            side="left", padx=4)
+        ctk.CTkLabel(g2, text="brightest").pack(side="left")
         _hint(parent,
             "off-axis: no reference lattice indexes at least this share of "
-            "a pattern's 20 brightest spots (above chance, relative to its "
-            "own reference).  Lower it if real patterns come out off-axis.")
+            "a pattern's N brightest spots (up to N; above chance, relative "
+            "to its own reference).  Lower the % if real patterns come out "
+            "off-axis; N should stay below the number of real spots.")
         _hint(parent,
             "confident: the best reference must beat every other by this "
             "log-likelihood ratio (3 ≈ 20:1 odds); below it the pixel is "
@@ -117,6 +122,10 @@ class PhaseDiscrimMixin:
         try:
             model.min_index_frac = min(max(float(self._pd_gate.get()) / 100,
                                            0.0), 1.0)
+        except Exception:
+            pass
+        try:
+            model.n_bright = max(int(float(self._pd_nbright.get())), 3)
         except Exception:
             pass
         kw = self._detect_kw_now()
