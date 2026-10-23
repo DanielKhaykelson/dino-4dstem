@@ -261,6 +261,9 @@ class PhaseDiscrimMixin:
             margin = np.full((Ny, Nx), np.nan, np.float32)
             post = np.full((K, Ny, Nx), np.nan, np.float32)
             status = np.full((Ny, Nx), -1, np.int8)
+            # every reference lattice fitted at every pixel (B flattened),
+            # for the domain / grain lattice comparison
+            lat = np.full((K, Ny, Nx, 4), np.nan, np.float32)
             meter = pd.SiteMeter(model.w)
             pos = [(y, x) for y in range(0, Ny, stride)
                    for x in range(0, Nx, stride)]
@@ -274,12 +277,15 @@ class PhaseDiscrimMixin:
                 best[y, x] = r["best"]; second[y, x] = r["second"]
                 margin[y, x] = r["margin"]
                 post[:, y, x] = r["post"]
+                for k, f in enumerate(r.get("raw_fits") or []):
+                    if f is not None:
+                        lat[k, y, x] = np.asarray(f[0]).ravel()
                 if i % 100 == 0:
                     el = time.time() - t0
                     self._dr_post(self._pd_set_status,
                         f"phases: {i}/{len(pos)}  ({el:.0f} s)")
             res = dict(best=best, second=second, margin=margin, post=post,
-                       dr=dr_res,
+                       dr=dr_res, lat=lat,
                        status=status, stride=stride, scan_shape=(Ny, Nx),
                        model=model, cube=cube, peaks=peaks, centres=cents,
                        elapsed=time.time() - t0)
@@ -338,6 +344,9 @@ class PhaseDiscrimMixin:
         tb.update(); tb.pack(side="left")
         tk.Label(bar, fg="#555", text="left-click: the evidence at that "
                  "pixel").pack(side="left", padx=10)
+        tk.Button(bar, text="Domains / grains…",
+                  command=lambda: self._dm_open(res)).pack(side="right",
+                                                           padx=8)
         wide = Nx > 1.6 * Ny
         axs = np.asarray(fig.subplots(6, 1) if wide
                          else fig.subplots(2, 3)).ravel()

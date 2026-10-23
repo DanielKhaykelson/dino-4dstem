@@ -50,6 +50,7 @@ from data import SAMPLES, LoadPRZ
 from gui_app.acom_dataref import DataRefMixin
 from gui_app.acom_strain import StrainMixin
 from gui_app.acom_phasediscrim import PhaseDiscrimMixin
+from gui_app.acom_domains import DomainMixin
 
 
 def _section_header(parent, text):
@@ -130,7 +131,7 @@ def _fill_stride(obj, Ny, Nx, stride):
 # ---------------------------------------------------------------------------
 
 class ACOMTabPanel(DataRefMixin, StrainMixin, PhaseDiscrimMixin,
-                   ctk.CTkFrame):
+                   DomainMixin, ctk.CTkFrame):
 
     # Batch / full-dataset results each open in their OWN window.  They
     # used to clf() the main 2x2 step figure: a batch wiped the step

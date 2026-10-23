@@ -553,7 +553,7 @@ def classify(model, pat, peaks, centre, meter=None):
                              _excess(r.q_ref, r.B, model.tol), 0.2)))
     res = dict(post=np.full(K, np.nan), best=-1, second=-1, margin=np.nan,
                status=OK, llr=np.full((K, K), np.nan), fits=fits,
-               gate=res_gate)
+               gate=res_gate, raw_fits=raw_fits)
     if len(v) < model.min_spots:
         res["status"] = TOO_FEW
         return res
