@@ -179,7 +179,7 @@ class DomainMixin:
         _cat, names = self._dm_state(res)
         w = tk.Toplevel(self)
         w.title("Compare domains")
-        w.geometry("360x210")
+        w.geometry("380x250")
         self._dm_win = w
         f = ctk.CTkFrame(w); f.pack(fill="both", expand=True, padx=6, pady=6)
         self._dm_a = ctk.StringVar(value=names[0])
@@ -208,6 +208,9 @@ class DomainMixin:
         ctk.CTkButton(r, text="Export masks", width=100,
                       command=lambda: self._dm_export(res)
                       ).pack(side="left", padx=2)
+        ctk.CTkButton(f, text="Statistics (areas, grain sizes, interfaces) ▶",
+                      command=lambda: self._dm_stats(res)
+                      ).pack(fill="x", pady=(6, 0))
 
     # ------------------------------------------------------------------
     def _dm_average(self, res, positions, centre, cap=1024):
@@ -460,3 +463,173 @@ class DomainMixin:
             labels=np.array([o["label"] for o in out]),
             averages=np.stack([o["avg"] for o in out]),
             radial=np.stack([o["radial"] for o in out]))
+
+
+    # ------------------------------------------------------------------
+    # statistics of the masks
+    # ------------------------------------------------------------------
+    def _dm_stats(self, res):
+        """Per phase: total area, share of the mapped area, number of grains,
+        grain size (mean +- std, median, range), interface length; per grain:
+        area, equivalent diameter, elongation, orientation of its long axis,
+        in-plane lattice rotation (mean, spread) and confidence."""
+        from scipy.ndimage import label
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import (
+            FigureCanvasTkAgg, NavigationToolbar2Tk)
+        from data import output_dir
+        import csv
+        cat, names = self._dm_state(res)
+        K = len(names); st = res["stride"]
+        try:
+            step = float(self.app.real_res.get())
+        except Exception:
+            step = 1.0
+        unit = "nm" if step != 1.0 else "px"
+        a_px = (st * step) ** 2                 # area of one sampled pixel
+        try:
+            mn = max(int(self._dm_min.get()), 1)
+        except Exception:
+            mn = 5
+        sub = cat[::st, ::st]
+        mapped = sub != -3
+        theta = res["dr"]["theta_k"][:, ::st, ::st]
+        marg = np.clip(res["margin"][::st, ::st], 0, 20)
+        rows_p, rows_g = [], []
+        for k, nm in enumerate(names):
+            m = sub == k
+            lab, n = label(m, structure=np.ones((3, 3)))
+            areas = np.bincount(lab.ravel())[1:] * a_px
+            big = areas >= mn * a_px
+            ga = areas[big]
+            eqd = 2 * np.sqrt(ga / np.pi)
+            # boundary of this phase with each other phase (4-neighbours)
+            inter = {}
+            for j in range(K):
+                if j == k:
+                    continue
+                c = (((sub[:, :-1] == k) & (sub[:, 1:] == j)).sum()
+                     + ((sub[:, 1:] == k) & (sub[:, :-1] == j)).sum()
+                     + ((sub[:-1, :] == k) & (sub[1:, :] == j)).sum()
+                     + ((sub[1:, :] == k) & (sub[:-1, :] == j)).sum())
+                inter[names[j]] = c * st * step
+            rows_p.append(dict(
+                phase=nm, area=m.sum() * a_px,
+                share=m.sum() / max(mapped.sum(), 1),
+                n_grains=int(big.sum()), n_small=int((~big).sum()),
+                mean=ga.mean() if len(ga) else np.nan,
+                std=ga.std() if len(ga) > 1 else np.nan,
+                median=np.median(ga) if len(ga) else np.nan,
+                min=ga.min() if len(ga) else np.nan,
+                max=ga.max() if len(ga) else np.nan,
+                eqd=eqd.mean() if len(eqd) else np.nan,
+                eqd_std=eqd.std() if len(eqd) > 1 else np.nan,
+                inter=inter))
+            for g in range(1, n + 1):
+                gm = lab == g
+                ar = gm.sum() * a_px
+                if ar < mn * a_px:
+                    continue
+                ys, xs = np.nonzero(gm)
+                if len(ys) > 2:
+                    cvm = np.cov(np.vstack([xs, ys]).astype(float))
+                    ev, evec = np.linalg.eigh(cvm)
+                    elong = float(np.sqrt(max(ev[1], 1e-9)
+                                          / max(ev[0], 1e-9)))
+                    ang = float(np.degrees(np.arctan2(-evec[1, 1],
+                                                      evec[0, 1])) % 180)
+                else:
+                    elong, ang = 1.0, np.nan
+                th = theta[k][gm]
+                th = th[np.isfinite(th)]
+                rows_g.append(dict(phase=nm, area=ar,
+                                   eqd=2 * np.sqrt(ar / np.pi),
+                                   elong=elong, axis_deg=ang,
+                                   rot=th.mean() if len(th) else np.nan,
+                                   rot_std=th.std() if len(th) > 1 else np.nan,
+                                   conf=float(np.nanmean(marg[gm])),
+                                   cy=float(ys.mean() * st),
+                                   cx=float(xs.mean() * st)))
+        n_unc = int((sub == -1).sum()); n_off = int((sub == -2).sum())
+        d = output_dir(self._active_sample(), "acom", "phases", "stats")
+        u2 = f"{unit}^2"
+        with open(os.path.join(d, "phase_stats.csv"), "w", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["phase", f"area_{u2}", "share_of_mapped", "n_grains",
+                        "n_smaller_than_min", f"grain_area_mean_{u2}",
+                        f"grain_area_std_{u2}", f"grain_area_median_{u2}",
+                        f"grain_area_min_{u2}", f"grain_area_max_{u2}",
+                        f"equiv_diameter_mean_{unit}",
+                        f"equiv_diameter_std_{unit}"]
+                       + [f"interface_with_{n}_{unit}" for n in names])
+            for r in rows_p:
+                w.writerow([r["phase"], r["area"], r["share"], r["n_grains"],
+                            r["n_small"], r["mean"], r["std"], r["median"],
+                            r["min"], r["max"], r["eqd"], r["eqd_std"]]
+                           + [r["inter"].get(n, "") for n in names])
+        with open(os.path.join(d, "grain_stats.csv"), "w", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["phase", f"area_{u2}", f"equiv_diameter_{unit}",
+                        "elongation", "long_axis_deg", "rotation_mean_deg",
+                        "rotation_std_deg", "confidence_mean",
+                        "centre_y_px", "centre_x_px"])
+            for g in rows_g:
+                w.writerow([g["phase"], g["area"], g["eqd"], g["elong"],
+                            g["axis_deg"], g["rot"], g["rot_std"], g["conf"],
+                            g["cy"], g["cx"]])
+
+        lines = [f"pixel = {st} x {step:g} {unit} (stride x step);  grains: "
+                 f">= {mn} sampled px, 8-connected;  uncertain "
+                 f"{n_unc * a_px:.4g} {u2}, off-axis {n_off * a_px:.4g} {u2}",
+                 "",
+                 f"{'phase':<14}{'area':>11}{'share':>7}{'grains':>7}"
+                 f"{'mean':>10}{'+- std':>10}{'median':>10}{'eq.diam':>9}"
+                 f"{'+- std':>8}  ({u2}, {unit})"]
+        for r in rows_p:
+            lines.append(f"{r['phase'][:13]:<14}{r['area']:>11.4g}"
+                         f"{100 * r['share']:>6.1f}%{r['n_grains']:>7d}"
+                         f"{r['mean']:>10.4g}{r['std']:>10.4g}"
+                         f"{r['median']:>10.4g}{r['eqd']:>9.4g}"
+                         f"{r['eqd_std']:>8.3g}")
+        lines.append("")
+        for r in rows_p:
+            for j, L in r["inter"].items():
+                if names.index(j) > names.index(r["phase"]):
+                    lines.append(f"interface {r['phase']} / {j}: "
+                                 f"{L:.4g} {unit}")
+        win = tk.Toplevel(self)
+        win.title("Phase statistics")
+        win.geometry("1100x760")
+        bar = tk.Frame(win); bar.pack(side="top", fill="x")
+        fig = Figure(figsize=(11, 7.5), dpi=95, layout="constrained")
+        cvs = FigureCanvasTkAgg(fig, master=win)
+        cvs.get_tk_widget().pack(fill="both", expand=True)
+        tb = NavigationToolbar2Tk(cvs, bar, pack_toolbar=False)
+        tb.update(); tb.pack(side="left")
+        tk.Label(bar, fg="#555", text=f"saved -> {d}").pack(side="left",
+                                                           padx=10)
+        gs = fig.add_gridspec(2, 2, height_ratios=[0.45, 1])
+        axt = fig.add_subplot(gs[0, :]); axt.axis("off")
+        axt.text(0, 1, "\n".join(lines), va="top", family="monospace",
+                 fontsize=8.5)
+        cols = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+        ax = fig.add_subplot(gs[1, 0])
+        for k, nm in enumerate(names):
+            v = [g["eqd"] for g in rows_g if g["phase"] == nm]
+            if v:
+                ax.hist(v, bins=20, alpha=0.6, color=cols[k % 5], label=nm)
+        ax.set_xlabel(f"grain equivalent diameter ({unit})")
+        ax.set_ylabel("grains"); ax.legend(fontsize=8)
+        ax.set_title("grain size distribution", fontsize=10)
+        ax = fig.add_subplot(gs[1, 1])
+        for k, nm in enumerate(names):
+            gg = [g for g in rows_g if g["phase"] == nm]
+            if gg:
+                ax.scatter([g["eqd"] for g in gg], [g["elong"] for g in gg],
+                           s=18, color=cols[k % 5], label=nm)
+        ax.set_xlabel(f"equivalent diameter ({unit})")
+        ax.set_ylabel("elongation (long / short axis)")
+        ax.set_title("grain shape", fontsize=10); ax.legend(fontsize=8)
+        cvs.draw_idle()
+        self._pd_set_status(f"statistics -> {d}")
+        return rows_p, rows_g
