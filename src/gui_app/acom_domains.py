@@ -485,8 +485,7 @@ class DomainMixin:
             step = float(self.app.real_res.get())
         except Exception:
             step = 1.0
-        unit = "nm" if step != 1.0 else "px"
-        a_px = (st * step) ** 2                 # area of one sampled pixel
+        a_px = float(st ** 2)       # scan pixels per sampled pixel
         try:
             mn = max(int(self._dm_min.get()), 1)
         except Exception:
@@ -512,7 +511,7 @@ class DomainMixin:
                      + ((sub[:, 1:] == k) & (sub[:, :-1] == j)).sum()
                      + ((sub[:-1, :] == k) & (sub[1:, :] == j)).sum()
                      + ((sub[1:, :] == k) & (sub[:-1, :] == j)).sum())
-                inter[names[j]] = c * st * step
+                inter[names[j]] = c * st          # scan pixels
             rows_p.append(dict(
                 phase=nm, area=m.sum() * a_px,
                 share=m.sum() / max(mapped.sum(), 1),
@@ -552,51 +551,64 @@ class DomainMixin:
                                    cx=float(xs.mean() * st)))
         n_unc = int((sub == -1).sum()); n_off = int((sub == -2).sum())
         d = output_dir(self._active_sample(), "acom", "phases", "stats")
-        u2 = f"{unit}^2"
+        L2, L1 = step ** 2, step                  # px -> nm^2, px -> nm
         with open(os.path.join(d, "phase_stats.csv"), "w", newline="") as fh:
             w = csv.writer(fh)
-            w.writerow(["phase", f"area_{u2}", "share_of_mapped", "n_grains",
-                        "n_smaller_than_min", f"grain_area_mean_{u2}",
-                        f"grain_area_std_{u2}", f"grain_area_median_{u2}",
-                        f"grain_area_min_{u2}", f"grain_area_max_{u2}",
-                        f"equiv_diameter_mean_{unit}",
-                        f"equiv_diameter_std_{unit}"]
-                       + [f"interface_with_{n}_{unit}" for n in names])
+            head = ["phase", "share_of_mapped", "n_grains",
+                    "n_smaller_than_min"]
+            for q in ("area", "grain_area_mean", "grain_area_std",
+                      "grain_area_median", "grain_area_min",
+                      "grain_area_max"):
+                head += [f"{q}_px2", f"{q}_nm2"]
+            head += ["equiv_diameter_mean_px", "equiv_diameter_mean_nm",
+                     "equiv_diameter_std_px", "equiv_diameter_std_nm"]
+            for n in names:
+                head += [f"interface_with_{n}_px", f"interface_with_{n}_nm"]
+            w.writerow(head)
             for r in rows_p:
-                w.writerow([r["phase"], r["area"], r["share"], r["n_grains"],
-                            r["n_small"], r["mean"], r["std"], r["median"],
-                            r["min"], r["max"], r["eqd"], r["eqd_std"]]
-                           + [r["inter"].get(n, "") for n in names])
+                row = [r["phase"], r["share"], r["n_grains"], r["n_small"]]
+                for q in ("area", "mean", "std", "median", "min", "max"):
+                    row += [r[q], r[q] * L2]
+                row += [r["eqd"], r["eqd"] * L1, r["eqd_std"],
+                        r["eqd_std"] * L1]
+                for n in names:
+                    v = r["inter"].get(n)
+                    row += ["", ""] if v is None else [v, v * L1]
+                w.writerow(row)
         with open(os.path.join(d, "grain_stats.csv"), "w", newline="") as fh:
             w = csv.writer(fh)
-            w.writerow(["phase", f"area_{u2}", f"equiv_diameter_{unit}",
-                        "elongation", "long_axis_deg", "rotation_mean_deg",
-                        "rotation_std_deg", "confidence_mean",
-                        "centre_y_px", "centre_x_px"])
+            w.writerow(["phase", "area_px2", "area_nm2", "equiv_diameter_px",
+                        "equiv_diameter_nm", "elongation", "long_axis_deg",
+                        "rotation_mean_deg", "rotation_std_deg",
+                        "confidence_mean", "centre_y_px", "centre_x_px"])
             for g in rows_g:
-                w.writerow([g["phase"], g["area"], g["eqd"], g["elong"],
-                            g["axis_deg"], g["rot"], g["rot_std"], g["conf"],
-                            g["cy"], g["cx"]])
+                w.writerow([g["phase"], g["area"], g["area"] * L2, g["eqd"],
+                            g["eqd"] * L1, g["elong"], g["axis_deg"],
+                            g["rot"], g["rot_std"], g["conf"], g["cy"],
+                            g["cx"]])
 
-        lines = [f"pixel = {st} x {step:g} {unit} (stride x step);  grains: "
+        lines = [f"scan step {step:g} nm/px (topbar), stride {st};  grains: "
                  f">= {mn} sampled px, 8-connected;  uncertain "
-                 f"{n_unc * a_px:.4g} {u2}, off-axis {n_off * a_px:.4g} {u2}",
+                 f"{n_unc * a_px:.0f} px^2, off-axis {n_off * a_px:.0f} px^2",
                  "",
-                 f"{'phase':<14}{'area':>11}{'share':>7}{'grains':>7}"
-                 f"{'mean':>10}{'+- std':>10}{'median':>10}{'eq.diam':>9}"
-                 f"{'+- std':>8}  ({u2}, {unit})"]
+                 f"{'phase':<13}{'share':>7}{'grains':>7}"
+                 f"{'area px^2':>11}{'nm^2':>11}"
+                 f"{'grain mean':>12}{'+- std':>9}{'median':>9}  (px^2)"
+                 f"{'eq.diam px':>12}{'+- std':>8}{'nm':>9}"]
         for r in rows_p:
-            lines.append(f"{r['phase'][:13]:<14}{r['area']:>11.4g}"
-                         f"{100 * r['share']:>6.1f}%{r['n_grains']:>7d}"
-                         f"{r['mean']:>10.4g}{r['std']:>10.4g}"
-                         f"{r['median']:>10.4g}{r['eqd']:>9.4g}"
-                         f"{r['eqd_std']:>8.3g}")
+            lines.append(f"{r['phase'][:12]:<13}{100 * r['share']:>6.1f}%"
+                         f"{r['n_grains']:>7d}{r['area']:>11.0f}"
+                         f"{r['area'] * L2:>11.4g}{r['mean']:>12.1f}"
+                         f"{r['std']:>9.1f}{r['median']:>9.1f}        "
+                         f"{r['eqd']:>12.1f}{r['eqd_std']:>8.1f}"
+                         f"{r['eqd'] * L1:>9.3g}")
         lines.append("")
         for r in rows_p:
-            for j, L in r["inter"].items():
+            for j, Lp in r["inter"].items():
                 if names.index(j) > names.index(r["phase"]):
-                    lines.append(f"interface {r['phase']} / {j}: "
-                                 f"{L:.4g} {unit}")
+                    lines.append(f"interface {r['phase']} / {j}: {Lp:.0f} px"
+                                 f"  = {Lp * L1:.4g} nm")
+        unit = "px"
         win = tk.Toplevel(self)
         win.title("Phase statistics")
         win.geometry("1100x760")
