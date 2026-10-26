@@ -418,8 +418,51 @@ class DomainMixin:
             ax = axs[1, 1]; ax.axis("off")
             ax.text(0, 1, self._dm_table(out, inv_a), va="top",
                     family="monospace", fontsize=7)
+            self._dm_gallery(out, centre, d)
         cv.draw_idle()
         self._pd_set_status(f"domain comparison saved -> {d}")
+
+    def _dm_gallery(self, out, centre, d, max_n=24):
+        """Average pattern of every grain (largest first) with its fitted
+        g1 / g2, in its own window; also saved as a png."""
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import (
+            FigureCanvasTkAgg, NavigationToolbar2Tk)
+        items = sorted(out, key=lambda o: -o["n"])[:max_n]
+        n = len(items)
+        if not n:
+            return
+        nc = int(np.ceil(np.sqrt(n * 1.4)))
+        nr = int(np.ceil(n / nc))
+        win = tk.Toplevel(self)
+        win.title(f"Grain averages ({n} largest)")
+        win.geometry(f"{min(1500, 260 * nc)}x{min(950, 270 * nr + 60)}")
+        bar = tk.Frame(win); bar.pack(side="top", fill="x")
+        fig = Figure(figsize=(2.7 * nc, 2.8 * nr), dpi=95,
+                     layout="constrained")
+        cv = FigureCanvasTkAgg(fig, master=win)
+        cv.get_tk_widget().pack(fill="both", expand=True)
+        tb = NavigationToolbar2Tk(cv, bar, pack_toolbar=False)
+        tb.update(); tb.pack(side="left")
+        axs = np.atleast_1d(fig.subplots(nr, nc)).ravel()
+        for ax in axs:
+            ax.axis("off")
+        for ax, o in zip(axs, items):
+            self._dr_imshow(ax, o["avg"])
+            if o["lat"] is not None:
+                self._dm_arrows(ax, o["lat"]["B"], centre)
+                g = _ordered(o["lat"]["B"])
+                sub = (f"|g1| {np.linalg.norm(g[:, 0]):.2f}  "
+                       f"|g2| {np.linalg.norm(g[:, 1]):.2f} px")
+            else:
+                sub = "(no lattice fits)"
+            ax.set_title(f"{o['label']} ({o['n']})\n{sub}", fontsize=8)
+        try:
+            fig.savefig(os.path.join(d, "grain_averages.png"), dpi=150,
+                        facecolor="white")
+        except Exception:
+            pass
+        cv.draw_idle()
 
     def _dm_table(self, out, inv_a):
         rows = [f"{'group':<18}{'n':>6}{'|g1| px':>10}{'±':>7}{'|g2| px':>10}"
