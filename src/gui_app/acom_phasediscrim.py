@@ -350,7 +350,9 @@ class PhaseDiscrimMixin:
         wide = Nx > 1.6 * Ny
         axs = np.asarray(fig.subplots(6, 1) if wide
                          else fig.subplots(2, 3)).ravel()
-        extra = [(0.75, 0.75, 0.75), (0.45, 0.45, 0.45), (0.0, 0.0, 0.0),
+        # uncertain = light grey, cannot separate = dark red (clearly
+        # different), off-axis = black, too few spots = white
+        extra = [(0.80, 0.80, 0.80), (0.55, 0.0, 0.0), (0.0, 0.0, 0.0),
                  (1.0, 1.0, 1.0)]
         cm = ListedColormap(cols + extra)
         axs[0].imshow(maps["cat"], cmap=cm, vmin=-0.5, vmax=K + 3.5,
