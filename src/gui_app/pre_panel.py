@@ -454,7 +454,7 @@ class PrePanel(ctk.CTkFrame):
         r.pack(fill="x", padx=8, pady=(0, 2))
         ctk.CTkCheckBox(r, text="COM-centre the direct beam",
                         variable=self.com,
-                        command=self._refresh).pack(side="left")
+                        command=self._on_com_toggle).pack(side="left")
         add_help_button(r,
             "Before resizing, find the centre of mass of the intensity near "
             "the direct beam and shift so the beam is centred.  Removes "
@@ -1626,6 +1626,8 @@ class PrePanel(ctk.CTkFrame):
         the full cube."""
         if self.cube is None:
             messagebox.showinfo("cube", "Load a cube first."); return
+        com_note = ("\nCOM switched off - NBED centring replaces it."
+                    if self._nbed_replaces_com() else "")
         try:
             Ny, Nx, H, W = self.cube.shape
             idx = int(self.idx.get())
@@ -1648,7 +1650,7 @@ class PrePanel(ctk.CTkFrame):
                   f"(cy={cy:.1f}, cx={cx:.1f})\n"
                   f"dashed crosshair = target centre;  arrow = shift "
                   f"Δy={dy:+.1f}px, Δx={dx:+.1f}px  "
-                  f"({np.hypot(dy, dx):.2f}px)")
+                  f"({np.hypot(dy, dx):.2f}px)" + com_note)
         self._refresh()
 
     # ==================================================================
@@ -3240,9 +3242,30 @@ class PrePanel(ctk.CTkFrame):
         except Exception:
             pass
 
+    def _nbed_replaces_com(self):
+        """NBED centring and COM both centre the beam: NBED works on the
+        RAW patterns (and bakes a centred cube), so with COM still ticked
+        the preview would show a COM-shifted image under markers measured
+        on the raw one - and the data would be centred twice."""
+        if bool(self.com.get()):
+            self.com.set(False)
+            try:
+                self._nbed_status.configure(
+                    text="COM switched off - NBED centring replaces it.")
+            except Exception:
+                pass
+            return True
+        return False
+
+    def _on_com_toggle(self):
+        if bool(self.com.get()):
+            self._nbed_overlay_center = None    # measured on the raw frame
+        self._refresh()
+
     def _nbed_center_all(self):
         if self.cube is None:
             messagebox.showinfo("cube", "Load a cube first."); return
+        self._nbed_replaces_com()
         if self._nbed_busy:
             messagebox.showinfo("nbed",
                 "NBED centering is already in progress."); return

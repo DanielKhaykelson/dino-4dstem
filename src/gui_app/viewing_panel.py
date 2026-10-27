@@ -32,11 +32,11 @@ from matplotlib.patches import Rectangle
 from gui_app import display_prefs
 
 
-def _radial_mask(H, W, r_in, r_out):
-    """Boolean annulus mask (r_in <= r < r_out) about the frame centre —
-    same convention as the Analysis tab's BF/HAADF detectors."""
+def _radial_mask(H, W, r_in, r_out, centre=None):
+    """Boolean annulus mask (r_in <= r < r_out) about ``centre`` (row, col;
+    default the frame centre - the Analysis tab's BF/HAADF convention)."""
     yy, xx = np.ogrid[:H, :W]
-    cy, cx = (H - 1) / 2.0, (W - 1) / 2.0
+    cy, cx = ((H - 1) / 2.0, (W - 1) / 2.0) if centre is None else centre
     rr = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
     return (rr >= r_in) & (rr < r_out)
 
@@ -279,11 +279,36 @@ class ViewingPanel(ctk.CTkFrame):
 
         def work():
             try:
+                # The detectors sit on the DIRECT BEAM, found from the mean of
+                # up to 64 patterns spread over the scan - on raw, uncentred
+                # data the beam is often far from the frame centre and a
+                # frame-centred BF disk would miss it.
+                from denoise_n2n import beam_centre
+                idx = np.linspace(0, R * C - 1, min(64, R * C)).astype(int)
+                acc = np.zeros((H, W), np.float64)
+                for i in idx:
+                    acc += np.asarray(cube[i // C, i % C], np.float64)
+                centre = beam_centre(acc / len(idx))
+                # BF radius: at least the beam disk (where its mean radial
+                # profile falls steepest), else 6 % of the frame
+                yy, xx = np.mgrid[0:H, 0:W]
+                rr = np.hypot(yy - centre[0], xx - centre[1]).astype(int)
+                prof = (np.bincount(rr.ravel(), acc.ravel())
+                        / np.maximum(np.bincount(rr.ravel()), 1))
+                lp = np.log(np.maximum(prof[:max(6, min(H, W) // 4)], 1e-12))
+                r_edge = int(np.argmin(np.diff(lp))) + 1
+                r_bf = max(0.06 * H, 1.2 * r_edge)
+                self._det_centre = centre
+                self.after(0, self._set_status,
+                           f"virtual detectors centred on the beam at "
+                           f"({centre[0]:.1f}, {centre[1]:.1f}), BF r = "
+                           f"{r_bf:.1f} px")
                 # Boolean detector masks flattened once; summing ONLY the
                 # masked pixels (a gather) is far cheaper than multiplying the
                 # whole frame by the mask and reducing all of it.
-                bmr = _radial_mask(H, W, 0.0, 0.06 * H).ravel()
-                hamr = _radial_mask(H, W, 0.18 * H, 0.45 * H).ravel()
+                bmr = _radial_mask(H, W, 0.0, r_bf, centre).ravel()
+                hamr = _radial_mask(H, W, max(0.18 * H, 2 * r_bf), 0.45 * H,
+                                    centre).ravel()
                 BF = np.zeros((R, C), dtype=np.float32)
                 HA = np.zeros((R, C), dtype=np.float32)
                 # publish the arrays now so the map can be drawn as it fills.
