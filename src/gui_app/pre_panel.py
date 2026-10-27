@@ -1329,8 +1329,15 @@ class PrePanel(ctk.CTkFrame):
                     return st[1][_dp][int(i)]
                 # external-link masters have no single dataset path, so
                 # detection is offered only when we have one
+                try:
+                    from data import output_dir as _od
+                    _diag = os.path.join(_od(p, "flyback"),
+                                         "raster_signals.npz")
+                except Exception:
+                    _diag = None
                 _ss = ask_scan_shape(self, N, H, W,
-                                     get_frame=(_gf if dpath else None))
+                                     get_frame=(_gf if dpath else None),
+                                     diag_path=_diag)
                 if _ss is None:
                     return
                 scan_shape_override = (int(_ss[0]), int(_ss[1]))
@@ -1642,7 +1649,7 @@ class PrePanel(ctk.CTkFrame):
             y, x = divmod(idx, Nx)
             raw = np.asarray(self.cube[y, x]).astype(np.float32)
             cy, cx = find_bf_center(
-                raw,
+                raw, guess=self._nbed_guess(),
                 search_radius=int(self._nbed_search_radius.get()),
                 disk_radius=int(self._nbed_disk_radius.get()),
                 threshold_frac=float(self._nbed_threshold.get()))
@@ -3250,6 +3257,28 @@ class PrePanel(ctk.CTkFrame):
         except Exception:
             pass
 
+    def _nbed_guess(self):
+        """Beam position of the scan average (up to 64 patterns), cached per
+        cube: where NBED looks for the beam (raw data often has it far from
+        the frame centre)."""
+        key = str(self.path)
+        c = getattr(self, "_nbed_guess_cache", None)
+        if c and c[0] == key:
+            return c[1]
+        try:
+            from denoise_n2n import beam_centre
+            Ny, Nx, H, W = self.cube.shape
+            idx = np.linspace(0, Ny * Nx - 1, min(64, Ny * Nx)).astype(int)
+            acc = np.zeros((H, W), np.float64)
+            for i in idx:
+                acc += np.asarray(self.cube[int(i) // Nx, int(i) % Nx],
+                                  np.float64)
+            g = beam_centre(acc / len(idx))
+        except Exception:
+            g = None
+        self._nbed_guess_cache = (key, g)
+        return g
+
     def _on_com_toggle(self):
         # the NBED marker follows the COM shift (see _refresh)
         self._refresh()
@@ -3303,7 +3332,8 @@ class PrePanel(ctk.CTkFrame):
             centers = nbed_center_cube(
                 self.cube, tmp_path,
                 search_radius=sr, disk_radius=dr,
-                threshold_frac=tf, progress_cb=_progress)
+                threshold_frac=tf, progress_cb=_progress,
+                guess=self._nbed_guess())
 
             # Hand back to the main thread for the modal + state swap
             self.after(0, lambda: self._nbed_finish(

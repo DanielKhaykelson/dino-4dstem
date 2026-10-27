@@ -32,15 +32,41 @@ import numpy as np
 def find_bf_center(pattern: np.ndarray, *,
                      search_radius: float,
                      disk_radius: float,
-                     threshold_frac: float = 0.5) -> "tuple[float, float]":
+                     threshold_frac: float = 0.5,
+                     guess=None) -> "tuple[float, float]":
     """Return (cy, cx) — the BF-disk centre of a single 2D pattern.
 
     Coordinates are in the pattern's pixel space (cy is the row
     coordinate, cx the column coordinate).
+
+    The original search (brightest pixel within search_radius of the frame
+    centre) is always run first and its answer is KEPT whenever it lies
+    within disk_radius of ``guess`` (the beam of the scan average) - so
+    datasets it handled are unchanged.  Only when it lands elsewhere (beam
+    far from the frame centre, or a Bragg spot / hot pixel brighter than
+    the beam) is the search repeated around ``guess`` on the pattern
+    smoothed over the disk size, where a broad BF disk beats a sharp spot.
     """
     H, W = pattern.shape
-    cy0 = (H - 1) / 2.0
-    cx0 = (W - 1) / 2.0
+    old = _bf_center_core(pattern, (H - 1) / 2.0, (W - 1) / 2.0,
+                          search_radius, disk_radius, threshold_frac,
+                          smooth=False)
+    if guess is None:
+        return old
+    if np.hypot(old[0] - float(guess[0]),
+                old[1] - float(guess[1])) <= float(disk_radius):
+        return old
+    return _bf_center_core(pattern, float(guess[0]), float(guess[1]),
+                           search_radius, disk_radius, threshold_frac,
+                           smooth=True)
+
+
+def _bf_center_core(pattern, cy0, cx0, search_radius, disk_radius,
+                    threshold_frac, smooth=False):
+    """The original BF-disk search around (cy0, cx0); with ``smooth`` the
+    coarse brightest point is taken on the pattern smoothed by
+    disk_radius / 2."""
+    H, W = pattern.shape
     p = np.asarray(pattern, dtype=np.float32)
     # NaN / inf would silently poison argmax (NaN compares > -inf in
     # numpy) and the subsequent centroid math; sanitise.
@@ -58,7 +84,12 @@ def find_bf_center(pattern: np.ndarray, *,
     if not bool(in_search.any()):
         # search radius too small for any pixel — fall back to centre
         return cy0, cx0
-    masked = np.where(in_search, p, -np.inf)
+    if smooth:
+        from scipy.ndimage import gaussian_filter
+        masked = np.where(in_search, gaussian_filter(
+            p, max(float(disk_radius) / 2.0, 1.0)), -np.inf)
+    else:
+        masked = np.where(in_search, p, -np.inf)
     iy, ix = np.unravel_index(np.argmax(masked), masked.shape)
     iy = float(iy); ix = float(ix)
 
@@ -102,7 +133,8 @@ def nbed_center_cube(cube_in,
                       disk_radius: float,
                       threshold_frac: float = 0.5,
                       progress_cb=None,
-                      stop_flag=None) -> np.ndarray:
+                      stop_flag=None,
+                      guess=None) -> np.ndarray:
     """Recenter every pattern in `cube_in` (shape Ny, Nx, H, W) using
     `find_bf_center`, write the result to `dest_path` as a memory-
     mapped numpy array (`.cube.npy` format).
@@ -157,7 +189,7 @@ def nbed_center_cube(cube_in,
             p = np.asarray(cube_in[y, x]).astype(np.float32, copy=False)
             cy, cx = find_bf_center(p, search_radius=sr,
                                        disk_radius=dr,
-                                       threshold_frac=tf)
+                                       threshold_frac=tf, guess=guess)
             centers[y, x] = (cy, cx)
             out[y, x] = recenter_to(p, cy, cx)
         if progress_cb is not None:

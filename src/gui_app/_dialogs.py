@@ -260,7 +260,8 @@ def add_cubes_dialog(parent) -> list[str] | None:
     return result["paths"]
 
 
-def ask_scan_shape(parent, N: int, H: int, W: int, get_frame=None):
+def ask_scan_shape(parent, N: int, H: int, W: int, get_frame=None,
+                   diag_path=None):
     """Modal popup: pick (Ny, Nx) for a 3D HDF5 master where the cube
     is stored as (N_frames, H, W). Returns (Ny, Nx) or None on cancel.
 
@@ -341,6 +342,29 @@ def ask_scan_shape(parent, N: int, H: int, W: int, get_frame=None):
 
     detected = {"sig": None, "raster": None, "grid": None}
 
+    def _save_diag(res):
+        """The per-frame beam signals (+ the detection result, if any): a
+        small file, no images, to diagnose a raster that comes out wrong.
+        -> <data>_DINO4DSTEM/flyback/raster_signals.npz"""
+        if not diag_path or detected.get("sig") is None:
+            return
+        try:
+            import json as _json
+            os.makedirs(os.path.dirname(diag_path), exist_ok=True)
+            sg = detected["sig"]
+            try:
+                ny_e = int(ny_var.get())
+            except Exception:
+                ny_e = 0
+            np.savez_compressed(
+                diag_path, cx=sg["cx"], cy=sg["cy"], bf=sg["bf"],
+                tot=sg["tot"], probe_r=sg.get("probe_r", 0), n_frames=N,
+                frame_shape=(H, W), ny_entered=ny_e,
+                result=_json.dumps({k: v for k, v in (res or {}).items()
+                                    if k != "frame_index"}))
+        except Exception as _e:
+            print(f"[flyback] diagnostics not saved: {_e!r}", flush=True)
+
     def _detect():
         """Full cellulose recipe: raster from the descan, scan start from
         row coherence, per-row slope check.  Uses the Ny you entered as the
@@ -365,8 +389,10 @@ def ask_scan_shape(parent, N: int, H: int, W: int, get_frame=None):
                     try: dlg.update()
                     except Exception: pass
                 detected["sig"] = frame_signals(get_frame, N, progress=prog)
+            _save_diag(None)            # kept even if detection fails
             r = detect_raster(detected["sig"],
                               n_rows=ny_in if ny_in > 1 else None)
+            _save_diag(r)
             ny, nx = r["n_rows"], r["n_scan"]
             detected["raster"] = dict(f0=r["f0"], period=r["period"],
                                       n_scan=nx, n_rows=ny)

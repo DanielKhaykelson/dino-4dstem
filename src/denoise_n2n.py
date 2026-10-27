@@ -593,11 +593,14 @@ def _apply_tiled(model, x, tile: int, overlap: int, use_amp: bool):
 
 def beam_centre(frame: np.ndarray, win: int = 12):
     """Direct-beam centre (row, col) of one pattern: centre of mass of the
-    pixels above half the maximum, within ``win`` px of the brightest
-    pixel."""
+    pixels above half the maximum, within ``win`` px of the brightest point
+    of the pattern SMOOTHED by 4 px - so a broad bright-field disk wins over
+    a sharp Bragg spot or a hot pixel that is brighter in a single pixel."""
+    from scipy.ndimage import gaussian_filter
     f = np.asarray(frame, dtype=np.float32)
     H, W = f.shape
-    by, bx = np.unravel_index(int(np.argmax(f)), f.shape)
+    by, bx = np.unravel_index(int(np.argmax(gaussian_filter(f, 4.0))),
+                              f.shape)
     y0, y1 = max(0, by - win), min(H, by + win + 1)
     x0, x1 = max(0, bx - win), min(W, bx + win + 1)
     sub = f[y0:y1, x0:x1]
