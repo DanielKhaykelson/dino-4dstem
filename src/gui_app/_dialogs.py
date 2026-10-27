@@ -412,13 +412,13 @@ def ask_scan_shape(parent, N: int, H: int, W: int, get_frame=None,
                         zorder=2)
         ax.set_xlabel("frame"); ax.set_ylabel("beam x (px)")
         ax.set_title(f"descan: {r['n_rows']} rows x {r['n_scan']} scan "
-                     f"frames, period {r['period']} ({r['n_flyback']} "
+                     f"frames, period {r['period']:.2f} ({r['n_flyback']} "
                      f"flyback), first scan frame {r['f0']}", fontsize=10)
         ax.legend(fontsize=8, markerscale=6, loc="upper right")
         # zoom: the lead-in and the first rows
         ax = fig.add_subplot(gs[1, 0])
-        a0 = max(0, first - r["period"])
-        a1 = min(n, first + 4 * r["period"])
+        a0 = max(0, int(first - r["period"]))
+        a1 = min(n, int(first + 4 * r["period"]))
         tt = t[a0:a1]
         ax.plot(tt, cx[a0:a1], color="0.6", lw=0.8)
         for m, col in ((kept, "#2ca02c"), (fly, "#d62728"),
@@ -433,7 +433,7 @@ def ask_scan_shape(parent, N: int, H: int, W: int, get_frame=None,
                      "frame)", fontsize=9)
         # every row overlaid from its first kept frame
         ax = fig.add_subplot(gs[1, 1])
-        P = int(r["period"])
+        P = int(np.ceil(r["period"]))
         for k, row in enumerate(fi):
             s0 = int(row[0])
             seg = cx[s0:min(n, s0 + P + 3)]
@@ -498,7 +498,7 @@ def ask_scan_shape(parent, N: int, H: int, W: int, get_frame=None,
                 notes.append("Ny was not given, so the row count is a guess "
                              "- enter your real Ny and press again.")
             fly_info.configure(text=(
-                f"Raster: {r['period']} frames per row = {nx} scan + "
+                f"Raster: {r['period']:g} frames per row = {nx} scan + "
                 f"{r['n_flyback']} flyback.  Scan starts at frame "
                 f"{r['f0']}; {ny} rows kept"
                 + (f" ({r['rows_rejected']} row(s) failed the slope check)"

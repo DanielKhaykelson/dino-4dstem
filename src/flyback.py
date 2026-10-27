@@ -251,6 +251,22 @@ def detect_raster(sig: dict, n_rows: Optional[int] = None) -> dict:
     N = len(cx)
     ras = find_raster(cx)
     P, NS = ras["period"], ras["n_scan"]
+    # a scan line need not last a whole number of frames: the jump times
+    # give the period to a fraction of a frame; when the integer period
+    # would drift too far (below) the fractional raster is used, otherwise
+    # the integer recipe below, unchanged
+    try:
+        fr = refine_period(cx, P)
+    except Exception:
+        fr = None
+    rows_hint = int(n_rows) if n_rows else max(1, (N - ras["f0_phase"]) // P)
+    # switch only when the integer period would visibly shear the map: the
+    # accumulated drift over the scan exceeds a quarter of a row (EMM-65:
+    # 0.45 x 138 = 62 frames; the cellulose scans, validated with the
+    # integer recipe: 0.125 x 50 = 6 frames -> unchanged)
+    if (fr is not None and abs(fr["P"] - P) * rows_hint > 0.25 * NS
+            and fr["n_on"] >= 0.3 * rows_hint):
+        return detect_raster_fractional(sig, ras, fr, n_rows)
     frac = bf / np.maximum(tot, 1)
     rows_fit = (N - ras["f0_phase"]) // P
     want = int(n_rows) if n_rows else rows_fit
@@ -285,3 +301,134 @@ def detect_raster(sig: dict, n_rows: Optional[int] = None) -> dict:
                 n_jumps=n_jumps, row_corr=st["row_corr"],
                 start_margin=st["margin"],
                 rows_rejected=int(total - ok[:total].sum()))
+
+
+# ---------------------------------------------------------------------------
+# Non-integer row period
+# ---------------------------------------------------------------------------
+def refine_period(centre_x, P0: int, jump_px: float = 10.0,
+                  max_res: float = 1.5) -> Optional[dict]:
+    """Row period to a fraction of a frame, from the flyback jump times.
+
+    A scan line need not last a whole number of frames (EMM-65: jumps every
+    116 or 117 frames, 116.55 on average).  A fixed integer period then
+    drifts by the difference every row - 0.45 frame x 138 rows = 62 frames,
+    a sheared, wrapped map.  Single-frame spikes of the measured beam
+    position (a frame where the disc fit fails) are removed with a 5-frame
+    median first; then a line  t_jump = t0 + P * row  is fitted to the jump
+    times by iterated least squares (outliers out).  Returns dict(P, t0,
+    n_on) or None."""
+    from scipy.ndimage import median_filter
+    x = np.asarray(centre_x, dtype=np.float64)
+    x = np.where(np.isfinite(x), x, np.nanmedian(x))
+    xm = median_filter(x, 5, mode="nearest")
+    d = np.diff(xm, prepend=xm[0])
+    ramp = float(np.median(d))
+    J = np.flatnonzero(d * np.sign(ramp if ramp else 1.0) < -abs(jump_px))
+    if len(J) < 4:
+        return None
+    ev = np.array([J[0]] + [j for a, j in zip(J[:-1], J[1:]) if j - a > 1],
+                  dtype=float)
+    g = np.diff(ev)
+    near = g[np.abs(g - P0) <= 2]
+    best = None
+    for Pi in {float(P0), float(near.mean()) if len(near) else float(P0)}:
+        cnt = []
+        for k0 in range(len(ev)):
+            n = np.rint((ev - ev[k0]) / Pi)
+            cnt.append(int((np.abs(ev - ev[k0] - n * Pi) <= 2).sum()))
+        k0 = int(np.argmax(cnt))
+        Pk, a = Pi, 0.0
+        for tol in (2.0, max_res, max_res, max_res):
+            n = np.rint((ev - ev[k0] - a) / Pk)
+            ok = np.abs(ev - ev[k0] - a - n * Pk) <= tol
+            if ok.sum() < 4:
+                break
+            A = np.vstack([n[ok], np.ones(int(ok.sum()))]).T
+            (Pk, a), *_ = np.linalg.lstsq(A, ev[ok] - ev[k0], rcond=None)
+        n = np.rint((ev - ev[k0] - a) / Pk)
+        ok = np.abs(ev - ev[k0] - a - n * Pk) <= max_res
+        cand = dict(P=float(Pk), t0=float(ev[k0] + a), n_on=int(ok.sum()))
+        if best is None or cand["n_on"] > best["n_on"]:
+            best = cand
+    return best
+
+
+def detect_raster_fractional(sig: dict, ras: dict, fr: dict,
+                             n_rows: Optional[int] = None,
+                             jump_px: float = 10.0) -> dict:
+    """detect_raster for a NON-INTEGER row period fr["P"]: row r starts at
+    round(F0 + r * P).  The flyback block and scan start are found as in the
+    integer recipe, but with the jump phases taken relative to the fitted
+    fractional grid (on an integer grid they smear over 2-3 phases)."""
+    cx, bf, tot = sig["cx"], sig["bf"], sig["tot"]
+    x = np.asarray(cx, dtype=np.float64)
+    x = np.where(np.isfinite(x), x, np.nanmedian(x))
+    N = len(x)
+    Pf, t0 = fr["P"], fr["t0"]
+    Pc = int(np.ceil(Pf))
+    d = np.diff(x, prepend=x[0])
+    ramp = float(np.median(d))
+    jumps = np.flatnonzero(d * np.sign(ramp if ramp else 1.0)
+                           < -abs(jump_px))
+    ph = np.floor(np.mod(jumps - t0, Pf)).astype(int) % Pc
+    cnt = np.bincount(ph, minlength=Pc)
+    # flyback width: as find_raster (phases carrying a real share of the
+    # peak, + 2 settle frames)
+    peak = int(cnt.max())
+    hot = cnt >= max(0.25 * peak, 2)
+    k0 = int(np.argmax(cnt))
+    lo = hi = k0
+    while hot[(lo - 1) % Pc] and (k0 - lo) < Pc // 2:
+        lo -= 1
+    while hot[(hi + 1) % Pc] and (hi - k0) < Pc // 2:
+        hi += 1
+    n_fly = int(min(max((hi - lo + 1) + 2, 1), Pc - 1))
+    start, best = 0, -1
+    for k in range(Pc):
+        w = sum(cnt[(k + j) % Pc] for j in range(n_fly))
+        if w > best:
+            best, start = w, k
+    delta = start + n_fly                    # scan starts after the block
+    n_scan = int(np.floor(Pf)) - n_fly
+    # all candidate rows: starts round(t0 + delta + r P) inside the series
+    r_lo = int(np.ceil((0 - (t0 + delta)) / Pf))
+    r_hi = int(np.floor((N - n_scan - (t0 + delta)) / Pf))
+    rr = np.arange(r_lo, r_hi + 1)
+    F = t0 + delta + rr * Pf
+    starts = np.rint(F).astype(np.int64)
+    total = len(starts)
+    frac = np.asarray(bf, float) / np.maximum(np.asarray(tot, float), 1)
+    want = int(n_rows) if n_rows else total
+    want = min(want, total)
+    # per-row slope check, scan start by row coherence (as find_scan_start)
+    t = np.arange(n_scan)
+    okrow = np.zeros(total, bool)
+    for i, s0 in enumerate(starts):
+        seg = x[s0:s0 + n_scan]
+        a = np.polyfit(t, seg, 1)
+        okrow[i] = float((seg - np.polyval(a, t)).std()) < 2.0
+    G = np.stack([frac[s0:s0 + n_scan] for s0 in starts])
+    cc = np.array([np.corrcoef(G[i], G[i + 1])[0, 1]
+                   for i in range(total - 1)])
+    cc = np.where(np.isfinite(cc), cc, np.nan)
+    best_k, best_sc, scores = 0, -np.inf, []
+    for k in range(0, total - want + 1):
+        seg = cc[k:k + want - 1]
+        sc = float(np.nanmean(seg)) if np.isfinite(seg).any() else -np.inf
+        scores.append(sc)
+        if sc > best_sc:
+            best_sc, best_k = sc, k
+    sc_ok = np.asarray([v for v in scores if np.isfinite(v)])
+    rows = slice(best_k, best_k + want)
+    st = starts[rows]
+    fi = (st[:, None] + np.arange(n_scan)[None, :]).astype(np.int64)
+    return dict(period=float(Pf), n_scan=int(n_scan), n_flyback=int(n_fly),
+                fly_phase=int(start), f0=float(F[best_k]),
+                n_rows=int(want), frame_index=fi,
+                raster_conf=float(min(1.0, fr["n_on"] / max(want, 1))),
+                n_jumps=int(ras.get("n_jumps", 0)), row_corr=best_sc,
+                start_margin=(float(best_sc - np.median(sc_ok))
+                              if sc_ok.size else 0.0),
+                rows_rejected=int(want - okrow[rows].sum()),
+                fractional=True)

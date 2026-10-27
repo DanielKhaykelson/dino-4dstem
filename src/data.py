@@ -137,14 +137,17 @@ def raster_frame_index(raster, n_frames, dataset=None):
             raise ValueError("a file-provided scan map needs the HDF5 file")
         fi = np.asarray(dataset.file[raster["map"]], dtype=np.int64)
     else:
-        f0 = int(raster.get("f0", 0))
-        per = int(raster["period"])
+        # f0 / period may be fractional (a scan line that does not last a
+        # whole number of frames): row r starts at round(f0 + r * period);
+        # for integers this is f0 + r * period exactly
+        f0 = float(raster.get("f0", 0))
+        per = float(raster["period"])
         ns = int(raster["n_scan"])
         nr = int(raster["n_rows"])
         if ns > per:
-            raise ValueError(f"n_scan {ns} exceeds the row period {per}")
-        fi = (f0 + np.arange(nr)[:, None] * per
-              + np.arange(ns)[None, :]).astype(np.int64)
+            raise ValueError(f"n_scan {ns} exceeds the row period {per:g}")
+        starts = np.rint(f0 + np.arange(nr) * per).astype(np.int64)
+        fi = (starts[:, None] + np.arange(ns)[None, :]).astype(np.int64)
     if fi.ndim != 2 or fi.size == 0:
         raise ValueError(f"scan map must be 2-D, got shape {fi.shape}")
     if fi.min() < 0 or fi.max() >= int(n_frames):
@@ -1119,6 +1122,10 @@ def _open_mib(path, scan_shape=None, raster=None):
         # rows of `period` frames, keep the first n_scan of each.
         if "map" in raster:
             raise ValueError("a .mib carries no scan map; use a raster")
+        if (float(raster["period"]) != int(float(raster["period"])) or
+                float(raster.get("f0", 0)) != int(float(raster.get("f0", 0)))):
+            raise ValueError("a fractional row period is not supported for "
+                             ".mib files yet")
         f0, per = int(raster.get("f0", 0)), int(raster["period"])
         Ny, Nx = int(raster["n_rows"]), int(raster["n_scan"])
         if Nx > per or f0 + Ny * per > n:
