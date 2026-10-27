@@ -326,6 +326,10 @@ def ask_scan_shape(parent, N: int, H: int, W: int, get_frame=None,
         fly_box, text="Yes - find it for me", width=170,
         command=lambda: _detect())
     detect_btn.pack(side="left", padx=8)
+    plot_btn = ctk.CTkButton(
+        fly_box, text="Show flyback plot", width=140, state="disabled",
+        command=lambda: _plot_flyback())
+    plot_btn.pack(side="left", padx=4)
     if get_frame is None:
         detect_btn.configure(state="disabled")
     fly_info = ctk.CTkLabel(dlg, text=(
@@ -365,6 +369,91 @@ def ask_scan_shape(parent, N: int, H: int, W: int, get_frame=None,
         except Exception as _e:
             print(f"[flyback] diagnostics not saved: {_e!r}", flush=True)
 
+    def _plot_flyback():
+        """The descan (beam x per frame: ramp within a row, jump back at the
+        flyback) with the frames chosen as scan pixels in green, the skipped
+        flyback frames in red and the lead-in / tail in grey; a zoom on a
+        few rows; and every row overlaid from its first kept frame."""
+        r = detected.get("result")
+        sg = detected.get("sig")
+        if r is None or sg is None:
+            return
+        import tkinter as tk
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import (
+            FigureCanvasTkAgg, NavigationToolbar2Tk)
+        cx = np.asarray(sg["cx"], float)
+        n = len(cx)
+        fi = np.asarray(r["frame_index"])
+        kept = np.zeros(n, bool)
+        kept[fi.ravel()[fi.ravel() < n]] = True
+        first, last = int(fi.min()), int(fi.max())
+        t = np.arange(n)
+        inside = (t >= first) & (t <= last)
+        fly = inside & ~kept
+        outside = ~inside
+        win = tk.Toplevel(dlg)
+        win.title("Flyback - descan and chosen frames")
+        win.geometry("1150x820")
+        bar = tk.Frame(win); bar.pack(side="top", fill="x")
+        fig = Figure(figsize=(11.5, 8), dpi=95, layout="constrained")
+        cv = FigureCanvasTkAgg(fig, master=win)
+        cv.get_tk_widget().pack(fill="both", expand=True)
+        tb = NavigationToolbar2Tk(cv, bar, pack_toolbar=False)
+        tb.update(); tb.pack(side="left")
+        gs = fig.add_gridspec(2, 2, height_ratios=[1, 1.2])
+        ax = fig.add_subplot(gs[0, :])
+        ax.plot(t, cx, color="0.7", lw=0.6, zorder=1)
+        for m, col, lab in ((kept, "#2ca02c", "scan frames (kept)"),
+                            (fly, "#d62728", "flyback (skipped)"),
+                            (outside, "0.55", "lead-in / tail (skipped)")):
+            if m.any():
+                ax.plot(t[m], cx[m], ".", ms=1.5, color=col, label=lab,
+                        zorder=2)
+        ax.set_xlabel("frame"); ax.set_ylabel("beam x (px)")
+        ax.set_title(f"descan: {r['n_rows']} rows x {r['n_scan']} scan "
+                     f"frames, period {r['period']} ({r['n_flyback']} "
+                     f"flyback), first scan frame {r['f0']}", fontsize=10)
+        ax.legend(fontsize=8, markerscale=6, loc="upper right")
+        # zoom: the lead-in and the first rows
+        ax = fig.add_subplot(gs[1, 0])
+        a0 = max(0, first - r["period"])
+        a1 = min(n, first + 4 * r["period"])
+        tt = t[a0:a1]
+        ax.plot(tt, cx[a0:a1], color="0.6", lw=0.8)
+        for m, col in ((kept, "#2ca02c"), (fly, "#d62728"),
+                       (outside, "0.55")):
+            mm = m[a0:a1]
+            ax.plot(tt[mm], cx[a0:a1][mm], "o", ms=3, color=col)
+        for row in fi[:4]:
+            ax.axvline(row[0], color="#2ca02c", lw=0.8, ls="--")
+            ax.axvline(row[-1], color="#2ca02c", lw=0.8, ls=":")
+        ax.set_xlabel("frame"); ax.set_ylabel("beam x (px)")
+        ax.set_title("first rows (dashed = first, dotted = last kept "
+                     "frame)", fontsize=9)
+        # every row overlaid from its first kept frame
+        ax = fig.add_subplot(gs[1, 1])
+        P = int(r["period"])
+        for k, row in enumerate(fi):
+            s0 = int(row[0])
+            seg = cx[s0:min(n, s0 + P + 3)]
+            ax.plot(np.arange(len(seg)), seg, lw=0.5,
+                    color=(0.2, 0.5 + 0.4 * k / max(len(fi), 1), 0.2),
+                    alpha=0.5)
+        ax.axvspan(-0.5, r["n_scan"] - 0.5, color="#2ca02c", alpha=0.08)
+        ax.axvline(r["n_scan"] - 0.5, color="#d62728", lw=1)
+        ax.set_xlabel("frames from the first kept frame of each row")
+        ax.set_ylabel("beam x (px)")
+        ax.set_title("all rows overlaid (green = kept; jumps must fall "
+                     "right of the red line)", fontsize=9)
+        cv.draw_idle()
+        if diag_path:
+            try:
+                fig.savefig(os.path.splitext(diag_path)[0] + "_plot.png",
+                            dpi=130, facecolor="white")
+            except Exception:
+                pass
+
     def _detect():
         """Full cellulose recipe: raster from the descan, scan start from
         row coherence, per-row slope check.  Uses the Ny you entered as the
@@ -393,6 +482,8 @@ def ask_scan_shape(parent, N: int, H: int, W: int, get_frame=None,
             r = detect_raster(detected["sig"],
                               n_rows=ny_in if ny_in > 1 else None)
             _save_diag(r)
+            detected["result"] = r
+            plot_btn.configure(state="normal")
             ny, nx = r["n_rows"], r["n_scan"]
             detected["raster"] = dict(f0=r["f0"], period=r["period"],
                                       n_scan=nx, n_rows=ny)
