@@ -258,6 +258,14 @@ class _H5Cube4D:
             if len(idx) == 2:
                 return frame
             return frame[idx[2:]]
+        if isinstance(idx, (int, np.integer)):
+            # one whole scan row (Nx, H, W) - e.g. virtual images
+            r = int(idx)
+            if r < 0:
+                r += self.shape[0]
+            return self.read_block(r, 1, 0, self.shape[1])[0]
+        if isinstance(idx, tuple) and len(idx) == 1:
+            return self[idx[0]]
         raise TypeError(
             f"unsupported index for 3D-backed cube: {type(idx)}")
 

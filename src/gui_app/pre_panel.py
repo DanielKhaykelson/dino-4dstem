@@ -74,9 +74,9 @@ def _center_crop(img: np.ndarray, size: int) -> np.ndarray:
     return img[y0:y0 + size, x0:x0 + size]
 
 
-def _com_shift(img: np.ndarray, search_radius: int) -> np.ndarray:
-    """Mirrors CenterOnCOM: shift so the COM within search_radius is at
-    center."""
+def _com_offset(img: np.ndarray, search_radius: int):
+    """Integer (dy, dx) that CenterOnCOM applies: moves the COM within
+    search_radius of the centre onto the centre."""
     H, W = img.shape
     cy, cx = H / 2.0, W / 2.0
     yy, xx = np.ogrid[:H, :W]
@@ -84,12 +84,19 @@ def _com_shift(img: np.ndarray, search_radius: int) -> np.ndarray:
     msk = img * bm
     s = msk.sum()
     if s <= 0:
-        return img
+        return 0, 0
     com_y = (yy * msk).sum() / s
     com_x = (xx * msk).sum() / s
-    sy = int(round(cy - com_y)); sx = int(round(cx - com_x))
-    out = np.roll(np.roll(img, sy, axis=0), sx, axis=1)
-    return out
+    return int(round(cy - com_y)), int(round(cx - com_x))
+
+
+def _com_shift(img: np.ndarray, search_radius: int) -> np.ndarray:
+    """Mirrors CenterOnCOM: shift so the COM within search_radius is at
+    center."""
+    sy, sx = _com_offset(img, search_radius)
+    if sy == 0 and sx == 0:
+        return img
+    return np.roll(np.roll(img, sy, axis=0), sx, axis=1)
 
 
 # control-panel styling
@@ -1626,8 +1633,9 @@ class PrePanel(ctk.CTkFrame):
         the full cube."""
         if self.cube is None:
             messagebox.showinfo("cube", "Load a cube first."); return
-        com_note = ("\nCOM switched off - NBED centring replaces it."
-                    if self._nbed_replaces_com() else "")
+        com_note = ("\nCOM is on: the marker is where the beam is after "
+                    "COM; the arrow is what NBED adds." if self.com.get()
+                    else "")
         try:
             Ny, Nx, H, W = self.cube.shape
             idx = int(self.idx.get())
@@ -3242,30 +3250,13 @@ class PrePanel(ctk.CTkFrame):
         except Exception:
             pass
 
-    def _nbed_replaces_com(self):
-        """NBED centring and COM both centre the beam: NBED works on the
-        RAW patterns (and bakes a centred cube), so with COM still ticked
-        the preview would show a COM-shifted image under markers measured
-        on the raw one - and the data would be centred twice."""
-        if bool(self.com.get()):
-            self.com.set(False)
-            try:
-                self._nbed_status.configure(
-                    text="COM switched off - NBED centring replaces it.")
-            except Exception:
-                pass
-            return True
-        return False
-
     def _on_com_toggle(self):
-        if bool(self.com.get()):
-            self._nbed_overlay_center = None    # measured on the raw frame
+        # the NBED marker follows the COM shift (see _refresh)
         self._refresh()
 
     def _nbed_center_all(self):
         if self.cube is None:
             messagebox.showinfo("cube", "Load a cube first."); return
-        self._nbed_replaces_com()
         if self._nbed_busy:
             messagebox.showinfo("nbed",
                 "NBED centering is already in progress."); return
@@ -3720,11 +3711,13 @@ class PrePanel(ctk.CTkFrame):
         crop_size = int(self.center_crop_size.get())
         crop_size = max(8, min(crop_size, 192))
         cropped = _center_crop(resized192, crop_size)
+        self._com_disp_shift = (0, 0)
         if self.com.get():
             # COM search radius is 2 × effective beam-mask radius.
             # Derive that radius from polar_mask_cols (≈ pmc/2) since
             # the standalone center_mask_radius slider is gone.
             search_r = 2 * self._effective_center_mask_radius()
+            self._com_disp_shift = _com_offset(cropped, search_r)
             cropped = _com_shift(cropped, search_radius=search_r)
         proc = cv2.resize(cropped, (192, 192),
                            interpolation=cv2.INTER_LINEAR)
@@ -3778,6 +3771,12 @@ class PrePanel(ctk.CTkFrame):
             scale = 192.0 / max(crop_size, 1)
             cy_disp = 96.0 + (cy_192 - 96.0) * scale
             cx_disp = 96.0 + (cx_192 - 96.0) * scale
+            # with COM on, the image is already COM-shifted: draw the BF
+            # centre where it lands after COM, so the arrow shows what
+            # NBED adds on top of COM
+            sy_c, sx_c = getattr(self, "_com_disp_shift", (0, 0))
+            cy_disp += sy_c * scale
+            cx_disp += sx_c * scale
             # GOAL = where the beam is moved to: a thin dashed crosshair
             # spanning the whole image (a fixed reticle, clearly not a
             # detection).  FOUND = a dot at the detected BF centre.  An
