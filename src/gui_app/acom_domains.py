@@ -363,18 +363,39 @@ class DomainMixin:
             ax.set_title("along g1 (solid) / g2 (dashed), averaged over all "
                          "lattice rows; grey = multiples of ½g", fontsize=9)
             ax.legend(fontsize=7)
-            ax = axs[1, 2]
+            # |g1| and |g2| in two panels, each zoomed on its own range (on
+            # one axis they are two thin spikes ~25 px apart)
             txt = self._dm_table(out, inv_a)
-            for o in (A, Bd):
-                if o["lat"] is not None:
-                    ax.hist(o["lat"]["g1"], bins=40, alpha=0.5,
-                            color=cols[o["k"]], label=f"{o['label']} |g1|")
-                    ax.hist(o["lat"]["g2"], bins=40, alpha=0.5,
-                            color=cols[o["k"]], hatch="//",
-                            label=f"{o['label']} |g2|")
-            ax.set_xlabel("fitted |g| of the main lattice (px)")
-            ax.set_title("per-pixel lattice", fontsize=10)
-            ax.legend(fontsize=7)
+            base = axs[1, 2]
+            base.axis("off")
+            for j, key in enumerate(("g1", "g2")):
+                ax = base.inset_axes([0.0, 0.56 if j == 0 else 0.06,
+                                      1.0, 0.34])
+                vals = [o["lat"][key] for o in (A, Bd)
+                        if o["lat"] is not None]
+                if not vals:
+                    ax.axis("off"); continue
+                allv = np.concatenate(vals)
+                lo, hi = np.percentile(allv, [0.5, 99.5])
+                bins = np.linspace(lo, hi, 50)
+                means = []
+                for o in (A, Bd):
+                    if o["lat"] is None:
+                        continue
+                    v = o["lat"][key]
+                    ax.hist(v, bins=bins, alpha=0.55, color=cols[o["k"]],
+                            label=o["label"], density=True)
+                    m = v.mean(); means.append(m)
+                    ax.axvline(m, color=cols[o["k"]], lw=1.5)
+                dpc = (100 * (means[0] / means[1] - 1)
+                       if len(means) == 2 else np.nan)
+                ax.set_title(f"|{key}| per pixel (px): "
+                             f"{A['label']} − {Bd['label']} = "
+                             f"{dpc:+.3f} %", fontsize=8)
+                ax.tick_params(labelsize=7)
+                ax.set_yticks([])
+                if j == 0:
+                    ax.legend(fontsize=6, loc="upper right")
             fig.suptitle(txt, fontsize=8, family="monospace", ha="left",
                          x=0.01)
         else:
