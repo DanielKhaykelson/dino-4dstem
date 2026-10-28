@@ -489,7 +489,7 @@ def ask_scan_shape(parent, N: int, H: int, W: int, get_frame=None,
                                       n_scan=nx, n_rows=ny)
             detected["grid"] = (ny, nx)
             ny_var.set(ny); nx_var.set(nx)
-            notes = []
+            notes = [r["ny_note"]] if r.get("ny_note") else []
             if r["raster_conf"] < 0.5:
                 notes.append("LOW CONFIDENCE in the raster - check it.")
             if r["start_margin"] < 0.02:

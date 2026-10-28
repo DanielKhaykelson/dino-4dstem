@@ -65,6 +65,18 @@ def find_raster(centre_x, period: Optional[int] = None,
             if sc > best_s:
                 best_p, best_s = pp, sc
         period = int(best_p)
+        # The jump score cannot tell a period from its half when something
+        # jumps mid-row too (EMM: a 104-frame row with a small kink and
+        # sample-induced jumps at ~52 picked 52).  The descan itself can:
+        # folded at the true period every row repeats the same sawtooth,
+        # folded at half of it the two halves sit at different levels.
+        # Take a multiple only when it fits clearly better (< half the
+        # misfit); at a correct period the multiples fit the same.
+        r1 = _fold_misfit(x, period)
+        for m in (2, 3):
+            if _fold_misfit(x, m * period) < 0.5 * r1:
+                period *= m
+                break
 
     cnt = np.bincount(jumps % period, minlength=period)
 
@@ -104,7 +116,24 @@ def find_raster(centre_x, period: Optional[int] = None,
                 n_flyback=int(n_flyback), fly_phase=fly_phase,
                 f0_phase=f0_phase, keep=keep,
                 confidence=float(best / len(jumps)), ramp_px=ramp,
-                n_jumps=int(len(jumps)))
+                n_jumps=int(len(jumps)), jumps=jumps)
+
+
+def _fold_misfit(x: np.ndarray, P: int) -> float:
+    """Median |beam x - its per-phase median| with the descan folded into
+    rows of P frames, over the part of the series where the beam moves
+    (lead-in / tail parked frames excluded).  inf if < 4 rows fit."""
+    from scipy.ndimage import median_filter
+    xm = median_filter(np.asarray(x, dtype=np.float64), 5, mode="nearest")
+    act = np.flatnonzero(np.abs(np.diff(xm)) > 0.02)
+    if len(act) < 2:
+        return np.inf
+    a, b = int(act[0]), int(act[-1])
+    n = (b - a) // P
+    if n < 4:
+        return np.inf
+    g = xm[a:a + n * P].reshape(n, P)
+    return float(np.median(np.abs(g - np.median(g, axis=0))))
 
 
 def _bin2(a: np.ndarray, b: int) -> np.ndarray:
@@ -244,8 +273,8 @@ def detect_raster(sig: dict, n_rows: Optional[int] = None) -> dict:
 
     raster (period / flyback / phase) -> scan start (coherence) -> per-row
     slope check -> explicit frame_index (rows x n_scan).  If n_rows is not
-    known, every row that fits is examined and the longest run of rows that
-    pass the slope check is kept.
+    known (or cannot fit), the rows between the first and last flyback jump
+    are kept.
     """
     cx, bf, tot = sig["cx"], sig["bf"], sig["tot"]
     N = len(cx)
@@ -269,7 +298,20 @@ def detect_raster(sig: dict, n_rows: Optional[int] = None) -> dict:
         return detect_raster_fractional(sig, ras, fr, n_rows)
     frac = bf / np.maximum(tot, 1)
     rows_fit = (N - ras["f0_phase"]) // P
-    want = int(n_rows) if n_rows else rows_fit
+    # rows actually scanned: one per flyback jump, first to last (the
+    # parked lead-in / tail have none) -- a better guess than every row
+    # that fits, and the fallback when the entered Ny cannot fit
+    jj = np.asarray(ras.get("jumps", []))
+    jj = jj[((jj - ras["fly_phase"]) % P) < ras["n_flyback"]]
+    rows_scan = (int(np.clip(round((jj[-1] - jj[0]) / P) + 1, 1, rows_fit))
+                 if len(jj) >= 2 else rows_fit)
+    ny_note = ""
+    if n_rows and int(n_rows) > rows_fit:
+        ny_note = (f"Ny = {int(n_rows)} does not fit: {N} frames hold at "
+                   f"most {rows_fit} rows of {P}; the descan shows "
+                   f"{rows_scan} scanned rows, used instead.")
+        n_rows = rows_scan
+    want = int(n_rows) if n_rows else rows_scan
     st = find_scan_start(frac, P, NS, want, phase=ras["f0_phase"])
     f0 = st["f0"]
     total = (N - f0) // P
@@ -283,12 +325,10 @@ def detect_raster(sig: dict, n_rows: Optional[int] = None) -> dict:
             start = max(0, total - int(n_rows))
         rows = np.arange(start, start + int(n_rows))
     else:
-        best, cur, best_end = 0, 0, -1
-        for r in range(total):
-            cur = cur + 1 if ok[r] else 0
-            if cur > best:
-                best, best_end = cur, r
-        rows = np.arange(best_end - best + 1, best_end + 1)
+        # every scanned row from the coherent start (the slope check is
+        # only reported: a sample that throws the beam-centre fit onto a
+        # reflection fails it on rows that are fine)
+        rows = np.arange(0, min(want, total))
     fi = (f0 + rows[:, None] * P + np.arange(NS)[None, :]).astype(np.int64)
     # a confidence a handful of coincident jumps cannot fake: require about
     # one flyback jump per row before trusting the phase clustering
@@ -300,7 +340,8 @@ def detect_raster(sig: dict, n_rows: Optional[int] = None) -> dict:
                 raster_conf=float(ras["confidence"]) if enough else 0.0,
                 n_jumps=n_jumps, row_corr=st["row_corr"],
                 start_margin=st["margin"],
-                rows_rejected=int(total - ok[:total].sum()))
+                rows_rejected=int(len(rows) - ok[rows[rows < total]].sum()),
+                ny_note=ny_note)
 
 
 # ---------------------------------------------------------------------------
