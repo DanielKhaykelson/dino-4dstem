@@ -123,6 +123,15 @@ class DataRefMixin:
                       hover_color=("#c33", "#822"),
                       command=self._stop_batch_run).pack(side="left",
                                                          padx=(4, 0))
+        ctk.CTkButton(sr, text="Auto phases ▶", width=110,
+                      fg_color=("#7A2D7A", "#6A1F6A"),
+                      hover_color=("#8A3D8A", "#7A2F7A"),
+                      command=self._ap_run).pack(side="left", padx=(8, 0))
+        _hint(parent,
+            "Auto phases: from two references (with / without the extra "
+            "reflections, not necessarily pure) - maps, finds the "
+            "satellite-free domain, refines both references from the data "
+            "and maps again; one summary window, everything saved.")
         _hint(parent,
             "Peaks of every pattern are detected once (step-2 settings) "
             "and cached; re-mapping with other references only re-matches."

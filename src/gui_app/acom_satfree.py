@@ -44,104 +44,113 @@ class SatFreeMixin:
         threading.Thread(target=self._sf_worker, args=(res,),
                          daemon=True).start()
 
-    def _sf_worker(self, res):
+    def _sf_compute(self, res):
+        """The satellite-free domain -> out dict (no GUI; raises).  Cached
+        in res["satfree"]."""
+        if res.get("satfree") is not None:
+            return res["satfree"]
         from gui_app import phase_discrim as pd
         from celldenoise_flatten import recentre
         t0 = time.time()
-        try:
-            model = res["model"]
-            ent, d, rich, poor = pd._sat_pair(model)
-            if ent is None:
-                raise RuntimeError("no satellite positions in the model")
-            c = ent["coarse"]
-            Ny, Nx = res["scan_shape"]; st = res["stride"]
-            cube = res["cube"]
-            H, W = np.asarray(cube[0, 0]).shape
-            centre = getattr(self, "_dr_beam_guess", None)
-            centre = centre if centre is not None else (H / 2, W / 2)
-            rmax = int(min(H, W) / 2)
-            ok = ((res["status"] == pd.OK) & np.isfinite(res["sat"][0])
-                  & np.isfinite(res["sat"][1]))
-            S = np.where(ok, res["sat"][0], np.nan)[::st, ::st]
-            SE = np.where(ok, res["sat"][1], np.nan)[::st, ::st]
-            # rank by the mean S of the 8 neighbours (own S only when
-            # there is no neighbour)
-            Rk = np.full_like(S, np.nan)
-            for y in range(S.shape[0]):
-                for x in range(S.shape[1]):
-                    if not np.isfinite(S[y, x]):
-                        continue
-                    w = S[max(y - 1, 0):y + 2, max(x - 1, 0):x + 2].copy()
-                    w[min(y, 1), min(x, 1)] = np.nan
-                    Rk[y, x] = np.nanmean(w) if np.isfinite(w).any() \
-                        else S[y, x]
-            ys, xs = np.nonzero(np.isfinite(Rk))
-            order = np.argsort(Rk[ys, xs], kind="stable")
-            ys, xs = ys[order], xs[order]
-            Sv, SEv = S[ys, xs], SE[ys, xs]
-            ys, xs = ys * st, xs * st
-            N = len(ys)
-            if N < 20:
-                raise RuntimeError("too few positions with a satellite "
-                                   "measurement")
-            n = np.arange(1, N + 1)
-            cum = np.cumsum(Sv)
-            cse = np.sqrt(np.cumsum(SEv ** 2))
-            Z = cum / np.maximum(cse, 1e-12)
-            mean = cum / n
-            Z[:9] = np.nan                       # fewer than 10 frames
-            n_star = pd.satfree_stop(n, np.nan_to_num(Z, nan=-np.inf),
-                                     run=max(3, N // 50))
-            # the doubling direction (for the profiles): strongest
-            # satellite position of the rich reference, median main lattice
-            f = pd.OFFSETS[d][np.argmax(ent["mu"][rich][d])]
-            lat = res["lat"][c][ys, xs].reshape(-1, 2, 2)
-            lat = lat[np.all(np.isfinite(lat.reshape(len(lat), -1)), 1)]
-            Bc = np.median(lat, 0)
-            g_sat = 2.0 * (Bc @ f)
-            G = float(np.linalg.norm(g_sat))
-            u = g_sat / G
-            cos = [abs(Bc[:, j] @ u) / max(np.linalg.norm(Bc[:, j]), 1e-9)
-                   for j in (0, 1)]
-            other = Bc[:, int(np.argmin(cos))]
-            hw = float(getattr(model, "w", 2.0))
-            # the two averages (beam-recentred), capped at 1500 frames each
-            n_free = n_star if n_star is not None else N
-            # a frame ranked in by its neighbours (domain edge) but with
-            # satellites of its own (S > 3 SE) is not satellite-free
-            keep = np.ones(N, bool)
-            keep[:n_free] = Sv[:n_free] <= 3 * SEv[:n_free]
-            keep[n_free:] = False
-            n_drop = int(n_free - keep.sum())
-            mask = np.zeros((Ny, Nx), bool)
-            mask[ys[keep], xs[keep]] = True
-            rng = np.random.default_rng(0)
+        model = res["model"]
+        ent, d, rich, poor = pd._sat_pair(model)
+        if ent is None:
+            raise RuntimeError("no satellite positions in the model")
+        c = ent["coarse"]
+        Ny, Nx = res["scan_shape"]; st = res["stride"]
+        cube = res["cube"]
+        H, W = np.asarray(cube[0, 0]).shape
+        centre = getattr(self, "_dr_beam_guess", None)
+        centre = centre if centre is not None else (H / 2, W / 2)
+        rmax = int(min(H, W) / 2)
+        ok = ((res["status"] == pd.OK) & np.isfinite(res["sat"][0])
+              & np.isfinite(res["sat"][1]))
+        S = np.where(ok, res["sat"][0], np.nan)[::st, ::st]
+        SE = np.where(ok, res["sat"][1], np.nan)[::st, ::st]
+        # rank by the mean S of the 8 neighbours (own S only when
+        # there is no neighbour)
+        Rk = np.full_like(S, np.nan)
+        for y in range(S.shape[0]):
+            for x in range(S.shape[1]):
+                if not np.isfinite(S[y, x]):
+                    continue
+                w = S[max(y - 1, 0):y + 2, max(x - 1, 0):x + 2].copy()
+                w[min(y, 1), min(x, 1)] = np.nan
+                Rk[y, x] = np.nanmean(w) if np.isfinite(w).any() \
+                    else S[y, x]
+        ys, xs = np.nonzero(np.isfinite(Rk))
+        order = np.argsort(Rk[ys, xs], kind="stable")
+        ys, xs = ys[order], xs[order]
+        Sv, SEv = S[ys, xs], SE[ys, xs]
+        ys, xs = ys * st, xs * st
+        N = len(ys)
+        if N < 20:
+            raise RuntimeError("too few positions with a satellite "
+                               "measurement")
+        n = np.arange(1, N + 1)
+        cum = np.cumsum(Sv)
+        cse = np.sqrt(np.cumsum(SEv ** 2))
+        Z = cum / np.maximum(cse, 1e-12)
+        mean = cum / n
+        Z[:9] = np.nan                       # fewer than 10 frames
+        n_star = pd.satfree_stop(n, np.nan_to_num(Z, nan=-np.inf),
+                                 run=max(3, N // 50))
+        # the doubling direction (for the profiles): strongest
+        # satellite position of the rich reference, median main lattice
+        f = pd.OFFSETS[d][np.argmax(ent["mu"][rich][d])]
+        lat = res["lat"][c][ys, xs].reshape(-1, 2, 2)
+        lat = lat[np.all(np.isfinite(lat.reshape(len(lat), -1)), 1)]
+        Bc = np.median(lat, 0)
+        g_sat = 2.0 * (Bc @ f)
+        G = float(np.linalg.norm(g_sat))
+        u = g_sat / G
+        cos = [abs(Bc[:, j] @ u) / max(np.linalg.norm(Bc[:, j]), 1e-9)
+               for j in (0, 1)]
+        other = Bc[:, int(np.argmin(cos))]
+        hw = float(getattr(model, "w", 2.0))
+        # the two averages (beam-recentred), capped at 1500 frames each
+        n_free = n_star if n_star is not None else N
+        # a frame ranked in by its neighbours (domain edge) but with
+        # satellites of its own (S > 3 SE) is not satellite-free
+        keep = np.ones(N, bool)
+        keep[:n_free] = Sv[:n_free] <= 3 * SEv[:n_free]
+        keep[n_free:] = False
+        n_drop = int(n_free - keep.sum())
+        mask = np.zeros((Ny, Nx), bool)
+        mask[ys[keep], xs[keep]] = True
+        rng = np.random.default_rng(0)
 
-            def _avg(idx, what):
-                if len(idx) == 0:
-                    return None
-                if len(idx) > 1500:
-                    idx = np.sort(rng.choice(idx, 1500, replace=False))
-                acc = np.zeros((H, W), np.float64)
-                for j, i in enumerate(idx):
-                    if self._stop_event.is_set():
-                        raise RuntimeError("stopped by user")
-                    acc += recentre(np.asarray(cube[ys[i], xs[i]],
-                                               np.float32), centre)
-                    if j % 100 == 0:
-                        self._dr_post(self._pd_set_status,
-                                      f"satellite-free: averaging {what} "
-                                      f"{j}/{len(idx)}  "
-                                      f"({time.time() - t0:.0f} s)")
-                return (acc / len(idx)).astype(np.float32)
-            avg_free = _avg(np.flatnonzero(keep), "satellite-free")
-            avg_rest = _avg(np.flatnonzero(~keep), "the rest")
-            out = dict(N=n, Z=Z, mean=mean, se=cse / n, S_sorted=Sv,
-                       n_star=n_star, n_total=N, mask=mask, keep=keep,
-                       n_drop=n_drop, n_free=int(keep.sum()),
-                       order=(ys, xs), avg_free=avg_free, avg_rest=avg_rest,
-                       G=G, g_sat=g_sat, other=other, centre=centre,
-                       rmax=rmax, hw=hw, f=f, elapsed=time.time() - t0)
+        def _avg(idx, what):
+            if len(idx) == 0:
+                return None
+            if len(idx) > 1500:
+                idx = np.sort(rng.choice(idx, 1500, replace=False))
+            acc = np.zeros((H, W), np.float64)
+            for j, i in enumerate(idx):
+                if self._stop_event.is_set():
+                    raise RuntimeError("stopped by user")
+                acc += recentre(np.asarray(cube[ys[i], xs[i]],
+                                           np.float32), centre)
+                if j % 100 == 0:
+                    self._dr_post(self._pd_set_status,
+                                  f"satellite-free: averaging {what} "
+                                  f"{j}/{len(idx)}  "
+                                  f"({time.time() - t0:.0f} s)")
+            return (acc / len(idx)).astype(np.float32)
+        avg_free = _avg(np.flatnonzero(keep), "satellite-free")
+        avg_rest = _avg(np.flatnonzero(~keep), "the rest")
+        out = dict(N=n, Z=Z, mean=mean, se=cse / n, S_sorted=Sv,
+                   n_star=n_star, n_total=N, mask=mask, keep=keep,
+                   n_drop=n_drop, n_free=int(keep.sum()),
+                   order=(ys, xs), avg_free=avg_free, avg_rest=avg_rest,
+                   G=G, g_sat=g_sat, other=other, centre=centre,
+                   rmax=rmax, hw=hw, f=f, elapsed=time.time() - t0)
+        res["satfree"] = out
+        return out
+
+    def _sf_worker(self, res):
+        try:
+            out = self._sf_compute(res)
             self._dr_post(self._sf_show, res, out)
         except Exception as e:
             import traceback
@@ -247,8 +256,7 @@ class SatFreeMixin:
         nf, nd = out["n_free"], out["n_drop"]
         ax.set_title((f"satellite-free: {nf} of {n_tot} frames "
                       f"({100 * nf / n_tot:.0f} %)"
-                      + (f"
-{nd} edge frames with own S > 3 SE dropped"
+                      + (f"\n{nd} edge frames with own S > 3 SE dropped"
                          if nd else "")) if n_star is not None else
                      f"NO satellites appear even with all {n_tot} frames",
                      fontsize=9)

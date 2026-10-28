@@ -52,6 +52,7 @@ from gui_app.acom_strain import StrainMixin
 from gui_app.acom_phasediscrim import PhaseDiscrimMixin
 from gui_app.acom_domains import DomainMixin
 from gui_app.acom_satfree import SatFreeMixin
+from gui_app.acom_auto import AutoPhasesMixin
 
 
 def _section_header(parent, text):
@@ -132,6 +133,7 @@ def _fill_stride(obj, Ny, Nx, stride):
 # ---------------------------------------------------------------------------
 
 class ACOMTabPanel(DataRefMixin, StrainMixin, PhaseDiscrimMixin, SatFreeMixin,
+                   AutoPhasesMixin,
                    DomainMixin, ctk.CTkFrame):
 
     # Batch / full-dataset results each open in their OWN window.  They

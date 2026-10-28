@@ -238,108 +238,110 @@ class PhaseDiscrimMixin:
             stride=max(int(self._dr_stride.get() or 1), 1),
             detect_kw=self._detect_kw_now())).start()
 
-    def _pd_worker(self, model, sample, stride, detect_kw):
+    def _pd_compute(self, model, sample, stride, detect_kw):
+        """The phase map (classification of every sampled pattern) ->
+        res dict; no GUI.  Raises on error."""
         from gui_app import phase_discrim as pd
         from gui_app.posthoc_panel import _open_lazy
-        try:
-            cfg = SAMPLES[sample]
-            Ny, Nx = cfg["scan_shape"]
-            cube = _open_lazy(cfg["path"], scan_shape=(Ny, Nx))
-            t0 = time.time()
-            peaks, cents = self._dr_detect_all(cube, stride, detect_kw)
-            from gui_app.dataref_core import match_dataset
-            samp = np.zeros((Ny, Nx), bool); samp[::stride, ::stride] = True
-            drefs = list(self._dr_refs)
-            dr_res = match_dataset(
-                peaks, cents, drefs, (Ny, Nx), tol=model.tol,
-                r_min=model.r_min, r_max=model.r_max, sampled=samp.ravel(),
-                stop=self._stop_event.is_set)
-            K = len(model.refs)
-            # levels from each reference's own patterns, not its average
-            from gui_app.acom_core import detect_peaks_2d
-            from gui_app.dataref_core import beam_centre
-            items = {}
-            rng = np.random.default_rng(0)
-            for k, r in enumerate(drefs[:K]):
-                mem = r.extra.get("members")
-                if mem is None or len(mem) < 5:
-                    continue
-                mem = np.asarray(mem)
-                if len(mem) > 150:
-                    mem = rng.choice(mem, 150, replace=False)
-                lst = []
-                for n in mem:
-                    y, x = divmod(int(n), Nx)
-                    pat = np.asarray(cube[y, x], np.float32)
-                    if samp[y, x]:
-                        pk, c = peaks[n], cents[n]
-                    else:
-                        pk = detect_peaks_2d(pat, **detect_kw)
-                        c = beam_centre(pat, self._dr_beam_guess)
-                    lst.append((pat, pk, c))
-                items[k] = lst
-            if items:
-                self._dr_post(self._pd_set_status,
-                              "reference levels from their own patterns...")
-                used = pd.member_levels(model, items)
-                if used:
-                    model.notes.append(
-                        "levels from the references' own patterns ("
-                        + ", ".join(f"'{model.refs[k].name}' {n}"
-                                    for k, n in used.items()) + ").")
-            best = np.full((Ny, Nx), -9, np.int16)      # -9 = not sampled
-            second = np.full((Ny, Nx), -1, np.int16)
-            margin = np.full((Ny, Nx), np.nan, np.float32)
-            post = np.full((K, Ny, Nx), np.nan, np.float32)
-            status = np.full((Ny, Nx), -1, np.int8)
-            # every reference lattice fitted at every pixel (B flattened),
-            # for the domain / grain lattice comparison
-            lat = np.full((K, Ny, Nx, 4), np.nan, np.float32)
-            sat = np.full((2, Ny, Nx), np.nan, np.float32)   # S, its SE
-            meter = pd.SiteMeter(model.w)
-            pos = [(y, x) for y in range(0, Ny, stride)
-                   for x in range(0, Nx, stride)]
-            for i, (y, x) in enumerate(pos):
-                if self._stop_event.is_set():
-                    raise RuntimeError("stopped by user")
-                n = y * Nx + x
+        cfg = SAMPLES[sample]
+        Ny, Nx = cfg["scan_shape"]
+        cube = _open_lazy(cfg["path"], scan_shape=(Ny, Nx))
+        t0 = time.time()
+        peaks, cents = self._dr_detect_all(cube, stride, detect_kw)
+        from gui_app.dataref_core import match_dataset
+        samp = np.zeros((Ny, Nx), bool); samp[::stride, ::stride] = True
+        drefs = list(self._dr_refs)
+        dr_res = match_dataset(
+            peaks, cents, drefs, (Ny, Nx), tol=model.tol,
+            r_min=model.r_min, r_max=model.r_max, sampled=samp.ravel(),
+            stop=self._stop_event.is_set)
+        K = len(model.refs)
+        # levels from each reference's own patterns, not its average
+        from gui_app.acom_core import detect_peaks_2d
+        from gui_app.dataref_core import beam_centre
+        items = {}
+        rng = np.random.default_rng(0)
+        for k, r in enumerate(drefs[:K]):
+            mem = r.extra.get("members")
+            if mem is None or len(mem) < 5:
+                continue
+            mem = np.asarray(mem)
+            if len(mem) > 150:
+                mem = rng.choice(mem, 150, replace=False)
+            lst = []
+            for n in mem:
+                y, x = divmod(int(n), Nx)
                 pat = np.asarray(cube[y, x], np.float32)
-                r = pd.classify(model, pat, peaks[n], cents[n], meter)
-                status[y, x] = r["status"]
-                best[y, x] = r["best"]; second[y, x] = r["second"]
-                margin[y, x] = r["margin"]
-                post[:, y, x] = r["post"]
-                sat[:, y, x] = r.get("sat", (np.nan, np.nan))
-                for k, f in enumerate(r.get("raw_fits") or []):
-                    if f is not None:
-                        lat[k, y, x] = np.asarray(f[0]).ravel()
-                if i % 100 == 0:
-                    el = time.time() - t0
-                    self._dr_post(self._pd_set_status,
-                        f"phases: {i}/{len(pos)}  ({el:.0f} s)")
-            res = dict(best=best, second=second, margin=margin, post=post,
-                       dr=dr_res, lat=lat, sat=sat,
-                       status=status, stride=stride, scan_shape=(Ny, Nx),
-                       model=model, cube=cube, peaks=peaks, centres=cents,
-                       elapsed=time.time() - t0)
+                if samp[y, x]:
+                    pk, c = peaks[n], cents[n]
+                else:
+                    pk = detect_peaks_2d(pat, **detect_kw)
+                    c = beam_centre(pat, self._dr_beam_guess)
+                lst.append((pat, pk, c))
+            items[k] = lst
+        if items:
+            self._dr_post(self._pd_set_status,
+                          "reference levels from their own patterns...")
+            used = pd.member_levels(model, items)
+            if used:
+                model.notes.append(
+                    "levels from the references' own patterns ("
+                    + ", ".join(f"'{model.refs[k].name}' {n}"
+                                for k, n in used.items()) + ").")
+        best = np.full((Ny, Nx), -9, np.int16)      # -9 = not sampled
+        second = np.full((Ny, Nx), -1, np.int16)
+        margin = np.full((Ny, Nx), np.nan, np.float32)
+        post = np.full((K, Ny, Nx), np.nan, np.float32)
+        status = np.full((Ny, Nx), -1, np.int8)
+        # every reference lattice fitted at every pixel (B flattened),
+        # for the domain / grain lattice comparison
+        lat = np.full((K, Ny, Nx, 4), np.nan, np.float32)
+        sat = np.full((2, Ny, Nx), np.nan, np.float32)   # S, its SE
+        meter = pd.SiteMeter(model.w)
+        pos = [(y, x) for y in range(0, Ny, stride)
+               for x in range(0, Nx, stride)]
+        for i, (y, x) in enumerate(pos):
+            if self._stop_event.is_set():
+                raise RuntimeError("stopped by user")
+            n = y * Nx + x
+            pat = np.asarray(cube[y, x], np.float32)
+            r = pd.classify(model, pat, peaks[n], cents[n], meter)
+            status[y, x] = r["status"]
+            best[y, x] = r["best"]; second[y, x] = r["second"]
+            margin[y, x] = r["margin"]
+            post[:, y, x] = r["post"]
+            sat[:, y, x] = r.get("sat", (np.nan, np.nan))
+            for k, f in enumerate(r.get("raw_fits") or []):
+                if f is not None:
+                    lat[k, y, x] = np.asarray(f[0]).ravel()
+            if i % 100 == 0:
+                el = time.time() - t0
+                self._dr_post(self._pd_set_status,
+                    f"phases: {i}/{len(pos)}  ({el:.0f} s)")
+        res = dict(best=best, second=second, margin=margin, post=post,
+                   dr=dr_res, lat=lat, sat=sat,
+                   status=status, stride=stride, scan_shape=(Ny, Nx),
+                   model=model, cube=cube, peaks=peaks, centres=cents,
+                   elapsed=time.time() - t0)
+        return res
+
+    def _pd_worker(self, model, sample, stride, detect_kw):
+        try:
+            res = self._pd_compute(model, sample, stride, detect_kw)
             self._dr_post(self._pd_show_full, res)
         except Exception as e:
             import traceback
             traceback.print_exc()
-            msg = repr(e)
-            self._dr_post(self._pd_set_status, f"phase map failed: {msg}")
+            self._dr_post(self._pd_set_status, f"phase map failed: {e!r}")
         finally:
             self._dr_busy = False
 
-    def _pd_show_full(self, res):
-        from matplotlib.figure import Figure
-        from matplotlib.backends.backend_tkagg import (
-            FigureCanvasTkAgg, NavigationToolbar2Tk)
-        from matplotlib.colors import ListedColormap
-        from matplotlib.patches import Patch
+    def _pd_maps(self, res):
+        """Per-pixel maps of a phase result (filled to every pixel):
+        cat (phase category image), sec, pbest, mg, th, sc -> (maps,
+        colours, confidence threshold)."""
         from gui_app.acom_tab import _fill_stride
         from gui_app import phase_discrim as pd
-        self._pdfull = res
         model = res["model"]; K = len(model.refs)
         Ny, Nx = res["scan_shape"]; st = res["stride"]
         conf = self._pd_conf_val()
@@ -363,6 +365,20 @@ class PhaseDiscrimMixin:
         sc = np.where(st_ >= 0, res["dr"]["score_k"][bi, yy, xx], np.nan)
         maps = dict(cat=cat, sec=sec, pbest=pbest, mg=mg, th=th, sc=sc)
         _fill_stride(maps, Ny, Nx, st)
+        return maps, cols, conf
+
+    def _pd_show_full(self, res):
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import (
+            FigureCanvasTkAgg, NavigationToolbar2Tk)
+        from matplotlib.colors import ListedColormap
+        from matplotlib.patches import Patch
+        from gui_app.acom_tab import _fill_stride
+        from gui_app import phase_discrim as pd
+        self._pdfull = res
+        model = res["model"]; K = len(model.refs)
+        Ny, Nx = res["scan_shape"]; st = res["stride"]
+        maps, cols, conf = self._pd_maps(res)
         self._pd_save(res, maps)
 
         win = tk.Toplevel(self)
@@ -453,10 +469,12 @@ class PhaseDiscrimMixin:
             f"{int((s == pd.METRIC_ONLY).sum())} cannot separate, "
             f"{int((s == pd.OFF_AXIS).sum())} off-axis")
 
-    def _pd_satellites(self, res):
-        """Satellite strength per pixel (relative to its own main
-        reflections) and an automatic weak / strong split -- uses only
-        WHERE the references differ, not how pure they are."""
+    def _pd_sat_compute(self, res):
+        """Satellite strength S per pixel, the automatic weak / strong
+        split and the 'absent' mask -> dict (also saved to
+        satellite_strength.npz).  Cached in res["satmaps"]."""
+        if res.get("satmaps") is not None:
+            return res["satmaps"]
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_tkagg import (
             FigureCanvasTkAgg, NavigationToolbar2Tk)
@@ -473,7 +491,7 @@ class PhaseDiscrimMixin:
         try:
             tp = pd.two_populations(S)
         except Exception as e:
-            messagebox.showerror("Satellite strength", str(e)); return
+            raise RuntimeError(f"satellite strength: {e}")
         ph = tp["p_hi"](S)
         lab = np.where(ph >= tp["p_min"], 1.0,
                        np.where(ph <= 1 - tp["p_min"], 0.0, 2.0))
@@ -499,6 +517,31 @@ class PhaseDiscrimMixin:
             od = None
             print(f"[phases] satellite save: {e!r}", flush=True)
 
+        res["satmaps"] = dict(S=S, SE=SE, tp=tp, ph=ph, lab=lab,
+                              absent=absent, maps=maps, ent=ent, d=d,
+                              rich=rich, poor=poor, names=names, nr=nr,
+                              npo=npo, pos=pos, od=od)
+        return res["satmaps"]
+
+    def _pd_satellites(self, res):
+        """Satellite strength per pixel (relative to its own main
+        reflections) and an automatic weak / strong split -- uses only
+        WHERE the references differ, not how pure they are."""
+        sm = self._pd_sat_compute(res)
+        S, SE, tp, ph, lab, absent, maps = (sm["S"], sm["SE"], sm["tp"],
+                                            sm["ph"], sm["lab"],
+                                            sm["absent"], sm["maps"])
+        ent, d, rich, poor = sm["ent"], sm["d"], sm["rich"], sm["poor"]
+        names, nr, npo, pos, od = (sm["names"], sm["nr"], sm["npo"],
+                                   sm["pos"], sm["od"])
+        model = res["model"]
+        Ny, Nx = res["scan_shape"]; st = res["stride"]
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import (
+            FigureCanvasTkAgg, NavigationToolbar2Tk)
+        from matplotlib.colors import ListedColormap
+        from matplotlib.patches import Patch
+        from gui_app import phase_discrim as pd
         win = tk.Toplevel(self)
         win.title("ACOM - satellite strength")
         win.geometry("1250x820")
