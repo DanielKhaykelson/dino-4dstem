@@ -377,7 +377,8 @@ class PhaseDiscrimMixin:
         tb = NavigationToolbar2Tk(cv, bar, pack_toolbar=False)
         tb.update(); tb.pack(side="left")
         tk.Label(bar, fg="#555", text="left-click: the evidence at that "
-                 "pixel").pack(side="left", padx=10)
+                 "pixel    right-drag a box: new reference").pack(
+                     side="left", padx=10)
         tk.Button(bar, text="Domains / grains…",
                   command=lambda: self._dm_open(res)).pack(side="right",
                                                            padx=8)
@@ -443,6 +444,7 @@ class PhaseDiscrimMixin:
             y = int(np.clip(round(ev.ydata), 0, Ny - 1))
             self._pd_inspect(y - y % st, x - x % st)
         cv.mpl_connect("button_press_event", _click)
+        win._selectors = self._pd_box_selectors(axs, res)
         cv.draw_idle()
         s = res["status"][::st, ::st]
         ok = (s == pd.OK) & (res["margin"][::st, ::st] >= conf)
@@ -508,6 +510,9 @@ class PhaseDiscrimMixin:
         cv.get_tk_widget().pack(fill="both", expand=True)
         tb = NavigationToolbar2Tk(cv, bar, pack_toolbar=False)
         tb.update(); tb.pack(side="left")
+        tk.Label(bar, fg="#555", text="right-drag a box on a map: new "
+                 "reference from those patterns (e.g. the brightest core "
+                 "and a satellite-free area)").pack(side="left", padx=10)
         axs = fig.subplots(2, 2)
         fin = S[np.isfinite(S)]
         lo, hi = np.percentile(fin, [1, 99])
@@ -562,6 +567,8 @@ class PhaseDiscrimMixin:
             f"{100 * np.mean(lv == 1):.0f} %, uncertain "
             f"{100 * np.mean(lv == 2):.0f} %"
             + (f"    saved to {od}" if od else ""), fontsize=9)
+        win._selectors = self._pd_box_selectors(
+            [axs[0, 0], axs[0, 1], axs[1, 1]], res)
         cv.draw_idle()
         if od:
             try:
@@ -569,6 +576,37 @@ class PhaseDiscrimMixin:
                             dpi=130, facecolor="white")
             except Exception:
                 pass
+
+    def _pd_box_selectors(self, axs, res):
+        """Right-drag on any of these scan maps -> a box reference from the
+        patterns inside (the box stays drawn)."""
+        from matplotlib.widgets import RectangleSelector
+        from matplotlib.patches import Rectangle
+        Ny, Nx = res["scan_shape"]
+
+        def _box(e0, e1):
+            if e0.xdata is None or e1.xdata is None:
+                return
+            y0, y1 = sorted((int(round(e0.ydata)), int(round(e1.ydata))))
+            x0, x1 = sorted((int(round(e0.xdata)), int(round(e1.xdata))))
+            y0, y1 = max(y0, 0), min(y1, Ny - 1)
+            x0, x1 = max(x0, 0), min(x1, Nx - 1)
+            n0 = len(self._dr_refs)
+            self._dr_box_reference(y0, y1, x0, x1, res=res)
+            if len(self._dr_refs) > n0:
+                r = self._dr_refs[-1]
+                for a in axs:
+                    a.add_patch(Rectangle((x0 - 0.5, y0 - 0.5), x1 - x0 + 1,
+                                          y1 - y0 + 1, fill=False,
+                                          ec="cyan", lw=1.5))
+                    a.text(x0, y0 - 1, r.name, color="cyan", fontsize=8,
+                           va="bottom")
+                axs[0].figure.canvas.draw_idle()
+                self._pd_set_status(
+                    f"added reference '{r.name}' ({len(self._dr_refs)} "
+                    f"now) - remove the old ones in the list, then Map ▶")
+        return [RectangleSelector(a, _box, button=[3], useblit=False,
+                                  interactive=False) for a in axs]
 
     def _pd_save(self, res, maps):
         try:

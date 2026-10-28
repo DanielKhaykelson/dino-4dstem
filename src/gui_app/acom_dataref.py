@@ -746,16 +746,25 @@ class DataRefMixin:
                   command=_use).pack(side="right", padx=8)
         fig.tight_layout(); cv.draw_idle()
 
-    def _dr_box_reference(self, y0, y1, x0, x1):
+    def _dr_box_reference(self, y0, y1, x0, x1, res=None):
         """Average of a scan box (all its patterns, beam-recentred) as a
-        new reference, using the step-2 detection."""
-        res = getattr(self, "_drfull", None)
+        new reference, using the step-2 detection.  res: the map result
+        the box was drawn on (data-reference, phase or satellite map)."""
+        res = res if res is not None else getattr(self, "_drfull", None)
         if res is None:
             return
         n = (y1 - y0 + 1) * (x1 - x0 + 1)
-        if not messagebox.askyesno("New reference",
-                f"Average the {n} patterns in rows {y0}-{y1}, columns "
-                f"{x0}-{x1} and add them as a new reference?"):
+        from tkinter import simpledialog
+        name = simpledialog.askstring(
+            "New reference",
+            f"Average the {n} patterns in rows {y0}-{y1}, columns "
+            f"{x0}-{x1} as a new reference.\n\nName:",
+            initialvalue=f"ref {len(self._dr_refs) + 1}", parent=self)
+        if name is None or not name.strip():
+            return
+        if any(r.name == name.strip() for r in self._dr_refs):
+            messagebox.showerror("New reference",
+                                 f"'{name.strip()}' already exists.")
             return
         from gui_app.acom_core import detect_peaks_2d
         from celldenoise_flatten import recentre
@@ -779,7 +788,7 @@ class DataRefMixin:
         self._test_pattern = avg
         self._test_peaks = detect_peaks_2d(avg, **self._detect_kw_now())
         self._test_origin = f"box y{y0}-{y1} x{x0}-{x1}"
-        self._dr_name.set(f"ref {len(self._dr_refs) + 1}")
+        self._dr_name.set(name.strip())
         self._dr_add_reference()
         try:
             self._draw_pattern_panel()
