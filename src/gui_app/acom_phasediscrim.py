@@ -30,7 +30,6 @@ from tkinter import messagebox
 from data import SAMPLES
 from gui_app.acom_dataref import _hint, _HINT_CLR
 
-
 class PhaseDiscrimMixin:
 
     def _pd_build(self, parent):
@@ -513,6 +512,9 @@ class PhaseDiscrimMixin:
         tk.Label(bar, fg="#555", text="right-drag a box on a map: new "
                  "reference from those patterns (e.g. the brightest core "
                  "and a satellite-free area)").pack(side="left", padx=10)
+        tk.Button(bar, text="Satellite-free domain (½g test)…",
+                  command=lambda: self._sf_run(res)).pack(side="right",
+                                                          padx=8)
         axs = fig.subplots(2, 2)
         fin = S[np.isfinite(S)]
         lo, hi = np.percentile(fin, [1, 99])

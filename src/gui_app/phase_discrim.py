@@ -726,3 +726,91 @@ def member_levels(model, items, min_n=5):
             ent["spread"][k] = np.where(np.isfinite(mad), mad, 0.0)
             used[k] = len(vals)
     return used
+
+
+# ---------------------------------------------------------------------------
+# satellite-free domain: a reference-free test on the 1-D profile along the
+# doubling direction
+# ---------------------------------------------------------------------------
+def _tails(x, A1, A2, w, p, C):
+    """Two main-peak tails (generalised Lorentzians at x = 0 and x = 1,
+    in units of the main spacing) plus a constant."""
+    return (A1 / (1 + np.abs(x / w) ** p) + A2 / (1 + np.abs((x - 1) / w) ** p)
+            + C)
+
+
+def half_order_test(s, v, G, hw=None, k_min=1):
+    """Is there a peak at the half-order positions (k + 1/2) G of a 1-D
+    profile v(s) along a lattice direction (s in px, G = main spacing)?
+
+    Between two main peaks the profile is the sum of their tails, so a
+    straight or polynomial baseline is biased (it hides or invents a weak
+    satellite).  The stretch between the peaks (0.15 G in from each) is
+    fitted with the physical shape - two generalised-Lorentzian tails and
+    a constant - leaving out +-1.5 hw around the half-order position; the
+    satellite excess is measured against that fit and the noise from the
+    residuals of the same fit.  -> dict(z = combined z-score (Stouffer
+    over the orders), ratio = mean excess / mean main-peak excess,
+    orders = [(k, excess, z)], sigma)."""
+    from scipy.optimize import curve_fit
+    s = np.asarray(s, float); v = np.asarray(v, float)
+    hw = max(1.0, min(0.12 * G, hw if hw else 0.12 * G))
+    orders, resid, main = [], [], []
+    k = k_min
+    while (k + 1) * G - 0.15 * G < s.max():
+        c = (k + 0.5) * G
+        reg = (s >= k * G + 0.15 * G) & (s <= (k + 1) * G - 0.15 * G)
+        pk = np.abs(s - c) <= hw
+        fitm = reg & (np.abs(s - c) > 1.5 * hw)
+        if fitm.sum() < 8 or pk.sum() < 1:
+            k += 1
+            continue
+        x = (s - k * G) / G
+        vmax = max(v[fitm].max(), 1e-12)
+        try:
+            coef, _ = curve_fit(
+                _tails, x[fitm], v[fitm] / vmax,
+                p0=[1.0, 1.0, 0.1, 2.0, 0.0],
+                bounds=([0, 0, 0.02, 1.0, 0], [50, 50, 1.0, 4.0, 1.0]),
+                maxfev=4000)
+            base = vmax * _tails(x, *coef)
+        except Exception:
+            # fall back: quadratic in log v
+            A = np.vstack([x ** 2, x, np.ones_like(x)]).T
+            lv = np.log(np.clip(v, 1e-12, None))
+            cq = np.linalg.lstsq(A[fitm], lv[fitm], rcond=None)[0]
+            base = np.exp(A @ cq)
+        ex = float(np.mean(v[pk] - base[pk]))
+        resid.extend((v - base)[fitm].tolist())
+        orders.append([k, ex, int(pk.sum()), int(fitm.sum())])
+        # main peak k (for the ratio): height over its flanks
+        cm = k * G
+        fl = ((np.abs(s - cm) >= 0.15 * G) & (np.abs(s - cm) <= 0.3 * G))
+        pm = np.abs(s - cm) <= hw
+        if fl.sum() >= 4 and pm.sum() >= 1:
+            main.append(float(np.mean(v[pm]) - np.mean(v[fl])))
+        k += 1
+    if not orders or len(resid) < 8:
+        return dict(z=np.nan, ratio=np.nan, orders=[], sigma=np.nan)
+    sigma = float(np.std(resid))
+    out = []
+    for (k, ex, npk, nfl) in orders:
+        se = sigma * np.sqrt(1.0 / npk + 1.0 / nfl)
+        out.append((k, ex, ex / max(se, 1e-12)))
+    z = float(sum(o[2] for o in out) / np.sqrt(len(out)))
+    m = float(np.mean(main)) if main else np.nan
+    ratio = float(np.mean([o[1] for o in out]) / m) if m and m > 0         else np.nan
+    return dict(z=z, ratio=ratio, orders=out, sigma=sigma)
+
+
+def satfree_stop(N, Z, z_thr=3.0, run=3):
+    """First N at which the half-order z-score reaches z_thr and stays
+    there for `run` consecutive checkpoints -> the number of weakest
+    frames that are satellite-free (None when it never does)."""
+    Z = np.asarray(Z, float)
+    for i in range(len(Z)):
+        if i + run > len(Z):
+            return None
+        if np.all(Z[i:i + run] >= z_thr):
+            return int(N[i])
+    return None
