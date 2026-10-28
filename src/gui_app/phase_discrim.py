@@ -504,8 +504,13 @@ def pair_llr(model, meter, pat, centre, fits, a, b, cache, raw_fits=None):
             return None
         s, sd = val[d], noi[d]
         mu_a, mu_b = ent["mu"][a][d], ent["mu"][b][d]
-        llr = float(np.sum(((s - mu_b) ** 2 - (s - mu_a) ** 2)
-                           / (2 * sd ** 2)))
+        # natural spread of each phase (from its reference's individual
+        # patterns, member_levels); 0 when only the average is known
+        sp = ent.get("spread", {})
+        va = sd ** 2 + sp.get(a, np.zeros_like(ent["mu"][a]))[d] ** 2
+        vb = sd ** 2 + sp.get(b, np.zeros_like(ent["mu"][b]))[d] ** 2
+        llr = float(np.sum((s - mu_b) ** 2 / (2 * vb) + 0.5 * np.log(vb)
+                           - (s - mu_a) ** 2 / (2 * va) - 0.5 * np.log(va)))
         return float(np.clip(llr, -cap, cap))
     # different lattices: the spot-match score (F1 of spot positions),
     # as a two-proportion test scaled by the number of spots
@@ -572,6 +577,7 @@ def classify(model, pat, peaks, centre, meter=None):
                 x = 0.0
             L[a, b], L[b, a] = x, -x
     res["llr"] = L
+    res["sat"] = satellite_strength(model, cache)
     s = L.sum(1) / max(K - 1, 1)
     p = np.exp(s - s.max())
     p /= p.sum()
@@ -584,3 +590,139 @@ def classify(model, pat, peaks, centre, meter=None):
     if undecided and res["margin"] == 0.0:
         res["status"] = METRIC_ONLY
     return res
+
+
+# ---------------------------------------------------------------------------
+# satellite strength: an absolute measure, independent of reference purity
+# ---------------------------------------------------------------------------
+def _sat_pair(model):
+    """The first shared-lattice pair with discriminating positions ->
+    (pair entry, mask of the positions where the satellite-RICH reference
+    is the stronger one), or (None, None)."""
+    for (a, b), ent in model.pairs.items():
+        if ent.get("mode") != "shared" or not ent["disc"].any():
+            continue
+        d = ent["disc"]
+        rich = a if np.nanmean(ent["mu"][a][d]) >= np.nanmean(
+            ent["mu"][b][d]) else b
+        poor = b if rich == a else a
+        return ent, d & (ent["mu"][rich] > ent["mu"][poor]), rich, poor
+    return None, None, None, None
+
+
+def satellite_strength(model, cache):
+    """Mean intensity at the satellite positions (those where the
+    satellite-rich reference is stronger) relative to the pattern's own
+    main reflections, and its standard error -> (S, SE) or (nan, nan).
+    Uses the fold already measured for the classification (cache)."""
+    ent, d, _r, _p = _sat_pair(model)
+    if ent is None or not d.any():
+        return (np.nan, np.nan)
+    key = ("fold", ent["coarse"])
+    if key not in cache:
+        return (np.nan, np.nan)
+    val, noi = fold_stats(*cache[key], ent["ctrl"])
+    d = d & np.isfinite(val) & np.isfinite(noi)
+    if not d.any():
+        return (np.nan, np.nan)
+    return (float(np.mean(val[d])),
+            float(np.sqrt(np.sum(noi[d] ** 2)) / d.sum()))
+
+
+def two_populations(S, p_min=0.95, n_iter=300):
+    """Split per-pixel satellite strengths S into a weak and a strong
+    population: 1-D two-Gaussian mixture (EM), compared with one Gaussian
+    by BIC.  -> dict(lo / hi = (weight, mean, sd), thr = where the two
+    posteriors are equal, bimodal = BIC prefers two, p_hi = function
+    S -> P(strong)).  A pixel is strong / weak when that posterior is >=
+    p_min, otherwise uncertain."""
+    x = np.asarray(S, float)
+    x = x[np.isfinite(x)]
+    if x.size < 20:
+        raise ValueError("too few pixels with a satellite measurement")
+    lo_, hi_ = np.percentile(x, [1, 99])
+    x = x[(x >= lo_ - 0.5 * (hi_ - lo_)) & (x <= hi_ + 0.5 * (hi_ - lo_))]
+    def npdf(v, m, s):
+        return np.exp(-0.5 * ((v - m) / s) ** 2) / (s * np.sqrt(2 * np.pi))
+    w = np.array([0.5, 0.5])
+    m = np.percentile(x, [25, 75]).astype(float)
+    s0 = max(float(np.std(x)), 1e-9)
+    sd = np.array([s0, s0]) / 2
+    for _ in range(n_iter):
+        p = np.stack([w[k] * npdf(x, m[k], sd[k]) for k in (0, 1)]) + 1e-300
+        r = p / p.sum(0)
+        nk = r.sum(1)
+        w_n = nk / nk.sum()
+        m_n = (r * x).sum(1) / nk
+        sd_n = np.sqrt((r * (x - m_n[:, None]) ** 2).sum(1) / nk)
+        sd_n = np.maximum(sd_n, 1e-3 * s0)
+        done = np.allclose(m_n, m, atol=1e-7 * s0)
+        w, m, sd = w_n, m_n, sd_n
+        if done:
+            break
+    o = np.argsort(m)
+    w, m, sd = w[o], m[o], sd[o]
+    ll2 = np.log(sum(w[k] * npdf(x, m[k], sd[k]) for k in (0, 1))
+                 + 1e-300).sum()
+    ll1 = np.log(npdf(x, x.mean(), s0) + 1e-300).sum()
+    bic2 = -2 * ll2 + 5 * np.log(x.size)
+    bic1 = -2 * ll1 + 2 * np.log(x.size)
+
+    def p_hi(v):
+        v = np.asarray(v, float)
+        a = w[0] * npdf(v, m[0], sd[0])
+        b = w[1] * npdf(v, m[1], sd[1])
+        out = b / np.maximum(a + b, 1e-300)
+        # beyond the strong mean it stays strong, below the weak mean weak
+        out = np.where(v > m[1], 1.0, np.where(v < m[0], 0.0, out))
+        return np.where(np.isfinite(v), out, np.nan)
+    g = np.linspace(m[0], m[1], 2001)
+    ph = p_hi(g)
+    thr = float(g[np.argmin(np.abs(ph - 0.5))])
+    return dict(lo=(w[0], m[0], sd[0]), hi=(w[1], m[1], sd[1]), thr=thr,
+                bimodal=bool(bic2 < bic1 - 10), p_hi=p_hi, p_min=p_min,
+                n=int(x.size))
+
+
+def member_levels(model, items, min_n=5):
+    """Expected strengths from a reference's INDIVIDUAL patterns.
+
+    An averaged reference under-measures its satellites: spots that move
+    a little between patterns (rotation, strain, beam drift) smear in the
+    average, and the smeared main spots spill into a weak satellite's
+    local background (synthetic test: 0.07 in the average vs 0.125 in the
+    patterns).  So the level of every cell position is the MEDIAN over the
+    reference's own patterns, each measured on its own fitted lattice -
+    exactly how every scan pattern is measured - and the natural spread
+    between them (MAD) enters the likelihood.  The discriminating
+    positions themselves still come from comparing the averages.
+
+    items: {ref index: [(pattern, peaks, centre), ...]}.  Updates
+    model.pairs in place; returns {ref: number of patterns used}."""
+    meter = SiteMeter(model.w)
+    used = {}
+    for (a, b), ent in model.pairs.items():
+        if ent.get("mode") != "shared":
+            continue
+        c = ent["coarse"]
+        ent.setdefault("spread", {})
+        ent.setdefault("mu_avg", {k: ent["mu"][k].copy() for k in (a, b)})
+        for k in (a, b):
+            vals = []
+            for pat, pk, cen in items.get(k, []):
+                raw, _v = fit_all(model, pat, pk, cen, gate=False)
+                f = raw[c]
+                if f is None:
+                    continue
+                val, _n = fold_stats(*fold(model, meter, pat, cen, f[0],
+                                           f[1]), ent["ctrl"])
+                vals.append(val)
+            if len(vals) < min_n:
+                continue
+            V = np.array(vals)
+            med = np.nanmedian(V, 0)
+            mad = 1.4826 * np.nanmedian(np.abs(V - med), 0)
+            ent["mu"][k] = med
+            ent["spread"][k] = np.where(np.isfinite(mad), mad, 0.0)
+            used[k] = len(vals)
+    return used

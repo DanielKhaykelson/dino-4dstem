@@ -256,6 +256,38 @@ class PhaseDiscrimMixin:
                 r_min=model.r_min, r_max=model.r_max, sampled=samp.ravel(),
                 stop=self._stop_event.is_set)
             K = len(model.refs)
+            # levels from each reference's own patterns, not its average
+            from gui_app.acom_core import detect_peaks_2d
+            from gui_app.dataref_core import beam_centre
+            items = {}
+            rng = np.random.default_rng(0)
+            for k, r in enumerate(drefs[:K]):
+                mem = r.extra.get("members")
+                if mem is None or len(mem) < 5:
+                    continue
+                mem = np.asarray(mem)
+                if len(mem) > 150:
+                    mem = rng.choice(mem, 150, replace=False)
+                lst = []
+                for n in mem:
+                    y, x = divmod(int(n), Nx)
+                    pat = np.asarray(cube[y, x], np.float32)
+                    if samp[y, x]:
+                        pk, c = peaks[n], cents[n]
+                    else:
+                        pk = detect_peaks_2d(pat, **detect_kw)
+                        c = beam_centre(pat, self._dr_beam_guess)
+                    lst.append((pat, pk, c))
+                items[k] = lst
+            if items:
+                self._dr_post(self._pd_set_status,
+                              "reference levels from their own patterns...")
+                used = pd.member_levels(model, items)
+                if used:
+                    model.notes.append(
+                        "levels from the references' own patterns ("
+                        + ", ".join(f"'{model.refs[k].name}' {n}"
+                                    for k, n in used.items()) + ").")
             best = np.full((Ny, Nx), -9, np.int16)      # -9 = not sampled
             second = np.full((Ny, Nx), -1, np.int16)
             margin = np.full((Ny, Nx), np.nan, np.float32)
@@ -264,6 +296,7 @@ class PhaseDiscrimMixin:
             # every reference lattice fitted at every pixel (B flattened),
             # for the domain / grain lattice comparison
             lat = np.full((K, Ny, Nx, 4), np.nan, np.float32)
+            sat = np.full((2, Ny, Nx), np.nan, np.float32)   # S, its SE
             meter = pd.SiteMeter(model.w)
             pos = [(y, x) for y in range(0, Ny, stride)
                    for x in range(0, Nx, stride)]
@@ -277,6 +310,7 @@ class PhaseDiscrimMixin:
                 best[y, x] = r["best"]; second[y, x] = r["second"]
                 margin[y, x] = r["margin"]
                 post[:, y, x] = r["post"]
+                sat[:, y, x] = r.get("sat", (np.nan, np.nan))
                 for k, f in enumerate(r.get("raw_fits") or []):
                     if f is not None:
                         lat[k, y, x] = np.asarray(f[0]).ravel()
@@ -285,7 +319,7 @@ class PhaseDiscrimMixin:
                     self._dr_post(self._pd_set_status,
                         f"phases: {i}/{len(pos)}  ({el:.0f} s)")
             res = dict(best=best, second=second, margin=margin, post=post,
-                       dr=dr_res, lat=lat,
+                       dr=dr_res, lat=lat, sat=sat,
                        status=status, stride=stride, scan_shape=(Ny, Nx),
                        model=model, cube=cube, peaks=peaks, centres=cents,
                        elapsed=time.time() - t0)
@@ -347,6 +381,10 @@ class PhaseDiscrimMixin:
         tk.Button(bar, text="Domains / grains…",
                   command=lambda: self._dm_open(res)).pack(side="right",
                                                            padx=8)
+        if np.isfinite(res.get("sat", np.full(1, np.nan))[0]).any():
+            tk.Button(bar, text="Satellite strength…",
+                      command=lambda: self._pd_satellites(res)).pack(
+                          side="right", padx=8)
         wide = Nx > 1.6 * Ny
         axs = np.asarray(fig.subplots(6, 1) if wide
                          else fig.subplots(2, 3)).ravel()
@@ -413,6 +451,124 @@ class PhaseDiscrimMixin:
             f"{int(((s == pd.OK) & ~ok).sum())} uncertain, "
             f"{int((s == pd.METRIC_ONLY).sum())} cannot separate, "
             f"{int((s == pd.OFF_AXIS).sum())} off-axis")
+
+    def _pd_satellites(self, res):
+        """Satellite strength per pixel (relative to its own main
+        reflections) and an automatic weak / strong split -- uses only
+        WHERE the references differ, not how pure they are."""
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import (
+            FigureCanvasTkAgg, NavigationToolbar2Tk)
+        from matplotlib.colors import ListedColormap
+        from matplotlib.patches import Patch
+        from gui_app.acom_tab import _fill_stride
+        from gui_app import phase_discrim as pd
+        model = res["model"]
+        Ny, Nx = res["scan_shape"]; st = res["stride"]
+        ent, d, rich, poor = pd._sat_pair(model)
+        ok = (res["status"] >= 0) & (res["status"] != pd.OFF_AXIS)
+        S = np.where(ok, res["sat"][0], np.nan)
+        SE = np.where(ok, res["sat"][1], np.nan)
+        try:
+            tp = pd.two_populations(S)
+        except Exception as e:
+            messagebox.showerror("Satellite strength", str(e)); return
+        ph = tp["p_hi"](S)
+        lab = np.where(ph >= tp["p_min"], 1.0,
+                       np.where(ph <= 1 - tp["p_min"], 0.0, 2.0))
+        lab[~np.isfinite(S)] = np.nan
+        absent = np.where(np.isfinite(S), (S < 2 * SE).astype(float), np.nan)
+        maps = dict(S=S.copy(), lab=lab.copy(), absent=absent)
+        _fill_stride(maps, Ny, Nx, st)
+        names = [r.name for r in model.refs]
+        nr, npo = names[rich], names[poor]
+        pos = ", ".join(f"({f[0]:g}, {f[1]:g})" for f in pd.OFFSETS[d])
+        od = None
+        try:
+            from data import output_dir
+            od = output_dir(self._active_sample(), "acom", "phases")
+            np.savez_compressed(
+                os.path.join(od, "satellite_strength.npz"),
+                S=S, SE=SE, label=lab, p_strong=ph, stride=st,
+                threshold=tp["thr"], weak=np.array(tp["lo"]),
+                strong=np.array(tp["hi"]), bimodal=tp["bimodal"],
+                positions=pd.OFFSETS[d],
+                label_codes="0 weak, 1 strong, 2 uncertain, nan none")
+        except Exception as e:
+            od = None
+            print(f"[phases] satellite save: {e!r}", flush=True)
+
+        win = tk.Toplevel(self)
+        win.title("ACOM - satellite strength")
+        win.geometry("1250x820")
+        bar = tk.Frame(win); bar.pack(side="top", fill="x")
+        fig = Figure(figsize=(12.5, 8), dpi=95, facecolor="#f4f4f4",
+                     layout="constrained")
+        cv = FigureCanvasTkAgg(fig, master=win)
+        cv.get_tk_widget().pack(fill="both", expand=True)
+        tb = NavigationToolbar2Tk(cv, bar, pack_toolbar=False)
+        tb.update(); tb.pack(side="left")
+        axs = fig.subplots(2, 2)
+        fin = S[np.isfinite(S)]
+        lo, hi = np.percentile(fin, [1, 99])
+        im = axs[0, 0].imshow(maps["S"], cmap="magma", vmin=min(lo, 0),
+                              vmax=hi, interpolation="nearest")
+        fig.colorbar(im, ax=axs[0, 0], fraction=0.035)
+        axs[0, 0].set_title(f"satellite strength S = satellite / main "
+                            f"reflection\n(cell positions {pos})",
+                            fontsize=10)
+        cl = [(0.35, 0.55, 0.85), (0.85, 0.35, 0.2), (0.8, 0.8, 0.8)]
+        axs[0, 1].imshow(maps["lab"], cmap=ListedColormap(cl), vmin=-0.5,
+                         vmax=2.5, interpolation="nearest")
+        axs[0, 1].legend(handles=[
+            Patch(color=cl[0], label=f"weak satellites (like '{npo}')"),
+            Patch(color=cl[1], label=f"strong satellites (like '{nr}')"),
+            Patch(color=cl[2], label="uncertain")], fontsize=7,
+            loc="upper right", framealpha=0.8)
+        axs[0, 1].set_title(f"automatic split at S = {tp['thr']:.3g} "
+                            f"(posterior ≥ {tp['p_min']:g})", fontsize=10)
+        ax = axs[1, 0]
+        span = hi - min(lo, 0)
+        bins = np.linspace(min(lo, 0) - 0.1 * span, hi + 0.1 * span, 80)
+        ax.hist(fin, bins=bins, density=True, color="0.65")
+        g = np.linspace(bins[0], bins[-1], 400)
+        for (w_, m_, s_), c in ((tp["lo"], cl[0]), (tp["hi"], cl[1])):
+            ax.plot(g, w_ * np.exp(-0.5 * ((g - m_) / s_) ** 2)
+                    / (s_ * np.sqrt(2 * np.pi)), color=c, lw=2)
+        ax.axvline(tp["thr"], color="k", ls="--", lw=1)
+        ax.axvline(0, color="0.3", lw=0.6)
+        for k, c in ((rich, cl[1]), (poor, cl[0])):
+            ax.axvline(float(np.nanmean(ent["mu"][k][d])), color=c, ls=":",
+                       lw=1.5)
+        ax.set_xlabel("S (satellite / main)")
+        ax.set_title(("two populations" if tp["bimodal"] else
+                      "ONE population - no natural split, the satellites "
+                      "vary continuously")
+                     + f"\ndashed = split; dotted = references '{nr}' / "
+                       f"'{npo}'", fontsize=9)
+        ax.set_yticks([])
+        axs[1, 1].imshow(maps["absent"], cmap=ListedColormap(
+            [(0.95, 0.95, 0.95), (0.1, 0.45, 0.1)]), vmin=-0.5, vmax=1.5,
+            interpolation="nearest")
+        axs[1, 1].set_title(f"green = no satellites detectable (S < 2 SE): "
+                            f"{100 * np.nanmean(absent):.0f} % of pixels",
+                            fontsize=10)
+        for a in (axs[0, 0], axs[0, 1], axs[1, 1]):
+            a.set_xticks([]); a.set_yticks([])
+            a.set_facecolor((0.9, 0.9, 0.9))
+        lv = lab[np.isfinite(lab)]
+        fig.suptitle(
+            f"weak {100 * np.mean(lv == 0):.0f} %, strong "
+            f"{100 * np.mean(lv == 1):.0f} %, uncertain "
+            f"{100 * np.mean(lv == 2):.0f} %"
+            + (f"    saved to {od}" if od else ""), fontsize=9)
+        cv.draw_idle()
+        if od:
+            try:
+                fig.savefig(os.path.join(od, "satellite_strength.png"),
+                            dpi=130, facecolor="white")
+            except Exception:
+                pass
 
     def _pd_save(self, res, maps):
         try:

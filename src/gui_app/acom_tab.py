@@ -1212,7 +1212,15 @@ class ACOMTabPanel(DataRefMixin, StrainMixin, PhaseDiscrimMixin,
         for i in idx:
             f = ds.get_raw(int(i)).astype(np.float64)
             acc = f if acc is None else acc + f
-        return (acc / max(len(idx), 1)).astype(np.float32)
+        out = (acc / max(len(idx), 1)).astype(np.float32)
+        self._note_members(out, idx)
+        return out
+
+    def _note_members(self, avg, idx):
+        """Remember which scan positions an averaged pattern came from
+        (a data reference made from it measures its levels on them)."""
+        self.__dict__.setdefault("_members_of", {})[id(avg)] = (
+            avg, np.asarray(idx, np.int64).ravel())
 
     def _class_avg_raw(self, grid, cid, which, cap=256):
         """Average RAW pattern of class cid: the cap most confident

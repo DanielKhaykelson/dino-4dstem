@@ -195,6 +195,9 @@ class DataRefMixin:
                 f"{hi:.0f} px - adjust detection (step 2) or the ring.")
             return
         ref.extra["r_min"], ref.extra["r_max"] = lo, hi
+        mem = getattr(self, "_members_of", {}).get(id(pat))
+        if mem is not None and mem[0] is pat:
+            ref.extra["members"] = mem[1]       # scan positions averaged
         self._dr_refs.append(ref)
         self._dr_name.set(f"ref {len(self._dr_refs) + 1}")
         self._dr_refresh_list()
@@ -772,6 +775,7 @@ class DataRefMixin:
             f = recentre(f, guess) if cents is not None else f
             acc = f.astype(np.float64) if acc is None else acc + f
         avg = (acc / len(pos)).astype(np.float32)
+        self._note_members(avg, [y * Nx + x for (y, x) in pos])
         self._test_pattern = avg
         self._test_peaks = detect_peaks_2d(avg, **self._detect_kw_now())
         self._test_origin = f"box y{y0}-{y1} x{x0}-{x1}"
