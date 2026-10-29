@@ -137,7 +137,9 @@ class AutoPhasesMixin:
                 o = old[k]
                 pk = detect_peaks_2d(pat, **kw)
                 lo, hi = self._dr_ring(pat)
-                ref = make_reference(o.name, pat, pk, r_min=lo, r_max=hi,
+                base = o.name[:-7] if o.name.endswith(" (auto)") else o.name
+                ref = make_reference(base + " (auto)", pat, pk, r_min=lo,
+                                     r_max=hi,
                                      tol=self._dr_tol_val(),
                                      guess=self._dr_guess(pat), origin=what,
                                      colour=o.colour)
@@ -268,7 +270,8 @@ class AutoPhasesMixin:
             print(f"[auto phases] save: {e!r}", flush=True)
 
         win = tk.Toplevel(self)
-        win.title(f"ACOM - phases (automatic)  ({self._active_sample()})")
+        win.title(f"ACOM - phases (automatic, REFINED + re-mapped)  "
+                  f"({self._active_sample()})")
         win.geometry("1350x900")
         bar = tk.Frame(win); bar.pack(side="top", fill="x")
         fig = Figure(figsize=(13.5, 9), dpi=95, facecolor="#f4f4f4",
@@ -397,9 +400,10 @@ class AutoPhasesMixin:
         s = res2["status"][::st, ::st]
         ok = (s == pd.OK) & (res2["margin"][::st, ::st] >= conf)
         self._pd_set_status(
-            f"auto phases done: {int(ok.sum())}/{s.size} assigned "
-            f"confidently; satellite-free {sf['n_free']} frames; the "
-            f"reference list now holds the refined references.")
+            f"auto phases DONE (refined + re-mapped): references rebuilt "
+            f"from {sf['n_free']} satellite-free / {len(self._dr_refs[sm['rich']].extra.get('members', []))} "
+            f"strong-satellite frames (marked '(auto)' in the list); "
+            f"{int(ok.sum())}/{s.size} assigned confidently.")
 
 
 def _wrap(t, n):

@@ -123,10 +123,11 @@ class DataRefMixin:
                       hover_color=("#c33", "#822"),
                       command=self._stop_batch_run).pack(side="left",
                                                          padx=(4, 0))
-        ctk.CTkButton(sr, text="Auto phases ▶", width=110,
+        ctk.CTkButton(parent, text="Auto phases ▶  (refine + re-map)",
                       fg_color=("#7A2D7A", "#6A1F6A"),
                       hover_color=("#8A3D8A", "#7A2F7A"),
-                      command=self._ap_run).pack(side="left", padx=(8, 0))
+                      command=self._ap_run).pack(fill="x", padx=6,
+                                                 pady=(6, 0))
         _hint(parent,
             "Auto phases: from two references (with / without the extra "
             "reflections, not necessarily pure) - maps, finds the "
