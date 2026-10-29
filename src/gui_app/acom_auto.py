@@ -202,6 +202,10 @@ class AutoPhasesMixin:
                                 radial=_radial(avg, centre, rmax)))
             res2["domains"] = dict(out=dom, centre=centre, rmax=rmax,
                                    cat=cat, conf=conf)
+            # domains / statistics / masks use the automatic map; the
+            # statistics window also shows the initial-reference map
+            res2["auto_cat"] = cat
+            res2["auto_res1"] = res1
             self._dr_post(self._ap_finish, res1, res2)
         except Exception as e:
             self._ap_fail(e)

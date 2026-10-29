@@ -113,8 +113,13 @@ class DomainMixin:
 
     # ------------------------------------------------------------------
     def _dm_state(self, res):
-        conf = self._pd_conf_val()
-        cat = _cat_map(res, conf)
+        """Phase category map: the automatic (satellite-free based) map
+        when the result came from Auto phases, else the nearest-reference
+        map."""
+        if res.get("auto_cat") is not None:
+            cat = res["auto_cat"]
+        else:
+            cat = _cat_map(res, self._pd_conf_val())
         names = [r.name for r in res["model"].refs]
         return cat, names
 
@@ -533,17 +538,88 @@ class DomainMixin:
     # statistics of the masks
     # ------------------------------------------------------------------
     def _dm_stats(self, res):
-        """Per phase: total area, share of the mapped area, number of grains,
-        grain size (mean +- std, median, range), interface length; per grain:
-        area, equivalent diameter, elongation, orientation of its long axis,
-        in-plane lattice rotation (mean, spread) and confidence."""
-        from scipy.ndimage import label
+        """Statistics window.  For an Auto-phases result: the automatic map
+        AND the map with the initial references, side by side."""
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_tkagg import (
             FigureCanvasTkAgg, NavigationToolbar2Tk)
         from data import output_dir
-        import csv
+        d = output_dir(self._active_sample(), "acom", "phases", "stats")
         cat, names = self._dm_state(res)
+        sets = []
+        if res.get("auto_res1") is not None:
+            r1 = res["auto_res1"]
+            sets.append(("AUTOMATIC (satellite-free based, refined "
+                         "references)", res, cat, names, ""))
+            sets.append(("INITIAL references (nearest-reference map)", r1,
+                         _cat_map(r1, self._pd_conf_val()),
+                         [r.name for r in r1["model"].refs], "_initial"))
+        else:
+            sets.append(("", res, cat, names, ""))
+        done = [(t,) + self._dm_stats_compute(r, c, n, d, suf)
+                for t, r, c, n, suf in sets]
+        text = []
+        for t, _rp, _rg, lines, _st in done:
+            if t:
+                text += [f"── {t} ──"]
+            text += lines + [""]
+        unit = "px"
+        win = tk.Toplevel(self)
+        win.title("Phase statistics" + ("  (automatic + initial)"
+                                        if len(done) > 1 else ""))
+        win.geometry("1100x760" if len(done) == 1 else "1150x980")
+        bar = tk.Frame(win); bar.pack(side="top", fill="x")
+        fig = Figure(figsize=(11, 7.5 if len(done) == 1 else 10), dpi=95,
+                     layout="constrained")
+        cvs = FigureCanvasTkAgg(fig, master=win)
+        cvs.get_tk_widget().pack(fill="both", expand=True)
+        tb = NavigationToolbar2Tk(cvs, bar, pack_toolbar=False)
+        tb.update(); tb.pack(side="left")
+        tk.Label(bar, fg="#555", text=f"saved -> {d}").pack(side="left",
+                                                           padx=10)
+        gs = fig.add_gridspec(1 + len(done), 2,
+                              height_ratios=[0.45 * len(done)]
+                              + [1] * len(done))
+        axt = fig.add_subplot(gs[0, :]); axt.axis("off")
+        axt.text(0, 1, "\n".join(text), va="top", family="monospace",
+                 fontsize=8.5)
+        cols = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+        for i, (t, _rp, rows_g, _l, nms) in enumerate(done):
+            tag = ("" if not t else
+                   ("automatic: " if i == 0 else "initial refs: "))
+            ax = fig.add_subplot(gs[1 + i, 0])
+            for k, nm in enumerate(nms):
+                v = [g["eqd"] for g in rows_g if g["phase"] == nm]
+                if v:
+                    ax.hist(v, bins=20, alpha=0.6, color=cols[k % 5],
+                            label=nm)
+            ax.set_xlabel(f"grain equivalent diameter ({unit})")
+            ax.set_ylabel("grains"); ax.legend(fontsize=8)
+            ax.set_title(tag + "grain size distribution", fontsize=10)
+            ax = fig.add_subplot(gs[1 + i, 1])
+            for k, nm in enumerate(nms):
+                gg = [g for g in rows_g if g["phase"] == nm]
+                if gg:
+                    ax.scatter([g["eqd"] for g in gg],
+                               [g["elong"] for g in gg],
+                               s=18, color=cols[k % 5], label=nm)
+            ax.set_xlabel(f"equivalent diameter ({unit})")
+            ax.set_ylabel("elongation (long / short axis)")
+            ax.set_title(tag + "grain shape", fontsize=10)
+            ax.legend(fontsize=8)
+        cvs.draw_idle()
+        self._pd_set_status(f"statistics -> {d}")
+        return done[0][1], done[0][2]
+
+    def _dm_stats_compute(self, res, cat, names, d, suffix=""):
+        """Per phase: total area, share of the mapped area, number of grains,
+        grain size (mean +- std, median, range), interface length; per grain:
+        area, equivalent diameter, elongation, orientation of its long axis,
+        in-plane lattice rotation (mean, spread) and confidence.  Writes
+        phase_stats{suffix}.csv / grain_stats{suffix}.csv ->
+        (rows_p, rows_g, text lines, names)."""
+        from scipy.ndimage import label
+        import csv
         K = len(names); st = res["stride"]
         try:
             step = float(self.app.real_res.get())
@@ -614,9 +690,8 @@ class DomainMixin:
                                    cy=float(ys.mean() * st),
                                    cx=float(xs.mean() * st)))
         n_unc = int((sub == -1).sum()); n_off = int((sub == -2).sum())
-        d = output_dir(self._active_sample(), "acom", "phases", "stats")
         L2, L1 = step ** 2, step                  # px -> nm^2, px -> nm
-        with open(os.path.join(d, "phase_stats.csv"), "w", newline="") as fh:
+        with open(os.path.join(d, f"phase_stats{suffix}.csv"), "w", newline="") as fh:
             w = csv.writer(fh)
             head = ["phase", "share_of_mapped", "n_grains",
                     "n_smaller_than_min"]
@@ -639,7 +714,7 @@ class DomainMixin:
                     v = r["inter"].get(n)
                     row += ["", ""] if v is None else [v, v * L1]
                 w.writerow(row)
-        with open(os.path.join(d, "grain_stats.csv"), "w", newline="") as fh:
+        with open(os.path.join(d, f"grain_stats{suffix}.csv"), "w", newline="") as fh:
             w = csv.writer(fh)
             w.writerow(["phase", "area_px2", "area_nm2", "equiv_diameter_px",
                         "equiv_diameter_nm", "elongation", "long_axis_deg",
@@ -655,12 +730,12 @@ class DomainMixin:
                  f">= {mn} sampled px, 8-connected;  uncertain "
                  f"{n_unc * a_px:.0f} px^2, off-axis {n_off * a_px:.0f} px^2",
                  "",
-                 f"{'phase':<13}{'share':>7}{'grains':>7}"
+                 f"{'phase':<19}{'share':>7}{'grains':>7}"
                  f"{'area px^2':>11}{'nm^2':>11}"
                  f"{'grain mean':>12}{'+- std':>9}{'median':>9}  (px^2)"
                  f"{'eq.diam px':>12}{'+- std':>8}{'nm':>9}"]
         for r in rows_p:
-            lines.append(f"{r['phase'][:12]:<13}{100 * r['share']:>6.1f}%"
+            lines.append(f"{r['phase'][:18]:<19}{100 * r['share']:>6.1f}%"
                          f"{r['n_grains']:>7d}{r['area']:>11.0f}"
                          f"{r['area'] * L2:>11.4g}{r['mean']:>12.1f}"
                          f"{r['std']:>9.1f}{r['median']:>9.1f}        "
@@ -672,40 +747,4 @@ class DomainMixin:
                 if names.index(j) > names.index(r["phase"]):
                     lines.append(f"interface {r['phase']} / {j}: {Lp:.0f} px"
                                  f"  = {Lp * L1:.4g} nm")
-        unit = "px"
-        win = tk.Toplevel(self)
-        win.title("Phase statistics")
-        win.geometry("1100x760")
-        bar = tk.Frame(win); bar.pack(side="top", fill="x")
-        fig = Figure(figsize=(11, 7.5), dpi=95, layout="constrained")
-        cvs = FigureCanvasTkAgg(fig, master=win)
-        cvs.get_tk_widget().pack(fill="both", expand=True)
-        tb = NavigationToolbar2Tk(cvs, bar, pack_toolbar=False)
-        tb.update(); tb.pack(side="left")
-        tk.Label(bar, fg="#555", text=f"saved -> {d}").pack(side="left",
-                                                           padx=10)
-        gs = fig.add_gridspec(2, 2, height_ratios=[0.45, 1])
-        axt = fig.add_subplot(gs[0, :]); axt.axis("off")
-        axt.text(0, 1, "\n".join(lines), va="top", family="monospace",
-                 fontsize=8.5)
-        cols = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
-        ax = fig.add_subplot(gs[1, 0])
-        for k, nm in enumerate(names):
-            v = [g["eqd"] for g in rows_g if g["phase"] == nm]
-            if v:
-                ax.hist(v, bins=20, alpha=0.6, color=cols[k % 5], label=nm)
-        ax.set_xlabel(f"grain equivalent diameter ({unit})")
-        ax.set_ylabel("grains"); ax.legend(fontsize=8)
-        ax.set_title("grain size distribution", fontsize=10)
-        ax = fig.add_subplot(gs[1, 1])
-        for k, nm in enumerate(names):
-            gg = [g for g in rows_g if g["phase"] == nm]
-            if gg:
-                ax.scatter([g["eqd"] for g in gg], [g["elong"] for g in gg],
-                           s=18, color=cols[k % 5], label=nm)
-        ax.set_xlabel(f"equivalent diameter ({unit})")
-        ax.set_ylabel("elongation (long / short axis)")
-        ax.set_title("grain shape", fontsize=10); ax.legend(fontsize=8)
-        cvs.draw_idle()
-        self._pd_set_status(f"statistics -> {d}")
-        return rows_p, rows_g
+        return rows_p, rows_g, lines, names
