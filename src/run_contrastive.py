@@ -7,7 +7,7 @@
 #   2. As a Jupytext notebook (open in VS Code with the Jupyter extension,
 #      or jupytext --to notebook). The `# %%` markers are cell boundaries.
 #
-# Ablation table (spec, SPEC.md section "Ablation protocol"):
+# Ablation table (spec, dev_notes/SPEC.md section "Ablation protocol"):
 #
 # | Config | contrastive_lambda | theta_roll_aug | Purpose |
 # |--------|-------------------:|:--------------:|---------|
@@ -58,7 +58,7 @@ def run_theta_roll_unit_test(device) -> dict:
     random input and its theta-rolled copy through, and check the feature
     maps agree on interior r-columns.
 
-    Tolerance per NEW_SESSION_PROMPT.md Q6: < 1e-4 on the central r-region,
+    Tolerance per dev_notes/NEW_SESSION_PROMPT.md Q6: < 1e-4 on the central r-region,
     essentially bit-exact (<= 1e-6) on the interior.
     """
     from dino_sr_contrastive_model import (

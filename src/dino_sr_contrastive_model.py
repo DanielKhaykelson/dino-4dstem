@@ -2,7 +2,7 @@
 DINO-SR + Contrastive Head — model, augmentations, training loop
 ================================================================
 
-Fork of dino_sr_ablation.py. Adds, per SPEC.md:
+Fork of dino_sr_ablation.py. Adds, per dev_notes/SPEC.md:
 
   * ProjectionMLP (64 -> 256 -> 128, BN+GELU, L2-norm) in parallel with the
     existing prototype head. Shared backbone.

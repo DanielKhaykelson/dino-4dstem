@@ -13,6 +13,7 @@ diffraction patterns into distinct structural regions and shows you **why** —
 **no labels, no coding**.
 
 [![paper](https://img.shields.io/badge/paper-arXiv%3A2608.15098-b31b1b?style=flat-square)](https://arxiv.org/abs/2608.15098)
+[![tests](https://github.com/DanielKhaykelson/dino-4dstem/actions/workflows/tests.yml/badge.svg)](https://github.com/DanielKhaykelson/dino-4dstem/actions/workflows/tests.yml)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0a7bbd?style=flat-square)
 ![coding](https://img.shields.io/badge/coding-not%20required-0ca678?style=flat-square)
 ![setup](https://img.shields.io/badge/setup-~15%20min%2C%20once-e8590c?style=flat-square)
@@ -204,6 +205,21 @@ Double-click `install_1_…bat` then `install_2_…bat`, launch from the Desktop
 > Prefer git? `git clone https://github.com/DanielKhaykelson/dino-4dstem`, then
 > run the installer for your OS. The Windows bundle also includes
 > **`GETTING_STARTED.docx`**, a picture-by-picture walkthrough.
+
+### Or install with pip
+
+Comfortable with Python? Install into a fresh Python 3.10 environment:
+
+```bash
+pip install git+https://github.com/DanielKhaykelson/dino-4dstem
+dino4dstem shortcuts     # optional: GUI / Assistant / Notebooks icons on your Desktop
+dino4dstem setup-gpu     # optional: CUDA build of PyTorch for an NVIDIA GPU
+```
+
+Then just run `dino4dstem` to open the app. Other commands:
+`dino4dstem assistant`, `dino4dstem notebooks`, `dino4dstem --help`.
+The app keeps its working files in `~/DINO4DSTEM` (set `DINO4DSTEM_HOME` to
+move it).
 
 > ⚠️ **Windows is the primary, fully tested platform.** The **Linux** and
 > **macOS** builds share the same code and their installers have been checked,

@@ -1,0 +1,93 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dino4dstem"
+dynamic = ["version"]
+description = "Self-supervised classification and phase mapping for 4D-STEM / scanning electron diffraction, with a desktop app and a plain-English assistant."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Daniel Khaykelson", email = "daniel.khaykelson@gmail.com" }]
+# Validated on 3.10; the pinned numpy 1.26 has no wheels past 3.12.
+requires-python = ">=3.10,<3.13"
+keywords = ["4D-STEM", "4DSTEM", "electron diffraction", "scanning electron diffraction",
+            "self-supervised learning", "DINO", "microscopy", "phase mapping", "NBED"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# Same pins as requirements.txt (the validated reference environment).
+dependencies = [
+    "numpy==1.26.4",
+    "scipy==1.15.3",
+    "scikit-learn==1.4.2",
+    "scikit-image==0.25.2",
+    "pandas==2.3.0",
+    "matplotlib==3.10.3",
+    "h5py==3.14.0",
+    "hdf5plugin==5.1.0",
+    "pillow==11.2.1",
+    "opencv-python==4.11.0.86",
+    "tqdm==4.67.1",
+    "psutil==7.0.0",
+    "requests==2.32.4",
+    "umap-learn==0.5.7",
+    "hdbscan==0.8.40",
+    "colorcet==3.1.0",
+    "torch==2.7.1",
+    "torchvision==0.22.1",
+    "py4DSTEM==0.14.18",
+    "ase==3.28.0",
+    "abtem==1.0.0b33",
+    "customtkinter==5.2.2",
+    "python-pptx==1.0.2",
+    "notebook>=7,<8",
+    "ipywidgets>=8,<9",
+    "ipympl>=0.9,<0.10",
+]
+
+[project.optional-dependencies]
+pretrained = ["transformers==4.44.2"]   # "Pretrained DINO" panel
+dev = ["pytest>=8"]
+
+[project.scripts]
+dino4dstem = "dino4dstem.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/DanielKhaykelson/dino-4dstem"
+Paper = "https://arxiv.org/abs/2608.15098"
+Issues = "https://github.com/DanielKhaykelson/dino-4dstem/issues"
+
+[tool.hatch.version]
+path = "dino4dstem/__init__.py"
+
+# The app itself (src/, assets/, docs/, notebooks/, the GPU helper) is copied
+# inside the package so an installed wheel has the same layout as a clone.
+[tool.hatch.build.targets.wheel]
+packages = ["dino4dstem"]
+exclude = ["__pycache__", "*.pyc"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src" = "dino4dstem/src"
+"assets" = "dino4dstem/assets"
+"docs" = "dino4dstem/docs"
+"notebooks" = "dino4dstem/notebooks"
+"tools/setup_gpu_torch.py" = "dino4dstem/tools/setup_gpu_torch.py"
+
+[tool.hatch.build.targets.sdist]
+include = ["dino4dstem", "src", "assets", "docs", "notebooks", "tools",
+           "tests", "README.md", "LICENSE", "CITATION.cff", "requirements.txt"]
+exclude = ["__pycache__"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
