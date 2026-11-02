@@ -75,7 +75,12 @@ path = "dino4dstem/__init__.py"
 # inside the package so an installed wheel has the same layout as a clone.
 [tool.hatch.build.targets.wheel]
 packages = ["dino4dstem"]
-exclude = ["__pycache__", "*.pyc"]
+# Research / paper scripts and this machine's dataset registry stay in the
+# private repository only (they hold local data paths and sample names).
+exclude = ["__pycache__", "*.pyc",
+           "dino4dstem/src/tools", "dino4dstem/src/studies", "dino4dstem/src/scripts", "dino4dstem/src/runs",
+           "dino4dstem/src/samples_local.py", "dino4dstem/src/eval_all.py", "dino4dstem/src/run_si_extra.py",
+           "dino4dstem/src/make_nbed_50nm.py", "dino4dstem/src/*.sh", "dino4dstem/src/**/__pycache__", "dino4dstem/src/**/*.pyc"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src" = "dino4dstem/src"
@@ -87,7 +92,12 @@ exclude = ["__pycache__", "*.pyc"]
 [tool.hatch.build.targets.sdist]
 include = ["dino4dstem", "src", "assets", "docs", "notebooks", "tools",
            "tests", "README.md", "LICENSE", "CITATION.cff", "requirements.txt"]
-exclude = ["__pycache__"]
+# Research / paper scripts and this machine's dataset registry stay in the
+# private repository only (they hold local data paths and sample names).
+exclude = ["__pycache__",
+           "src/tools", "src/studies", "src/scripts", "src/runs",
+           "src/samples_local.py", "src/eval_all.py", "src/run_si_extra.py",
+           "src/make_nbed_50nm.py", "src/*.sh", "src/**/__pycache__", "src/**/*.pyc"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

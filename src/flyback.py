@@ -66,7 +66,7 @@ def find_raster(centre_x, period: Optional[int] = None,
                 best_p, best_s = pp, sc
         period = int(best_p)
         # The jump score cannot tell a period from its half when something
-        # jumps mid-row too (EMM: a 104-frame row with a small kink and
+        # jumps mid-row too (one dataset: a 104-frame row with a small kink and
         # sample-induced jumps at ~52 picked 52).  The descan itself can:
         # folded at the true period every row repeats the same sawtooth,
         # folded at half of it the two halves sit at different levels.
@@ -290,7 +290,7 @@ def detect_raster(sig: dict, n_rows: Optional[int] = None) -> dict:
         fr = None
     rows_hint = int(n_rows) if n_rows else max(1, (N - ras["f0_phase"]) // P)
     # switch only when the integer period would visibly shear the map: the
-    # accumulated drift over the scan exceeds a quarter of a row (EMM-65:
+    # accumulated drift over the scan exceeds a quarter of a row (seen on one dataset:
     # 0.45 x 138 = 62 frames; the cellulose scans, validated with the
     # integer recipe: 0.125 x 50 = 6 frames -> unchanged)
     if (fr is not None and abs(fr["P"] - P) * rows_hint > 0.25 * NS
@@ -351,7 +351,7 @@ def refine_period(centre_x, P0: int, jump_px: float = 10.0,
                   max_res: float = 1.5) -> Optional[dict]:
     """Row period to a fraction of a frame, from the flyback jump times.
 
-    A scan line need not last a whole number of frames (EMM-65: jumps every
+    A scan line need not last a whole number of frames (seen on one dataset: jumps every
     116 or 117 frames, 116.55 on average).  A fixed integer period then
     drifts by the difference every row - 0.45 frame x 138 rows = 62 frames,
     a sheared, wrapped map.  Single-frame spikes of the measured beam

@@ -211,9 +211,10 @@ Double-click `install_1_…bat` then `install_2_…bat`, launch from the Desktop
 Comfortable with Python? Install into a fresh Python 3.10 environment:
 
 ```bash
-pip install git+https://github.com/DanielKhaykelson/dino-4dstem
+pip install dino4dstem
 dino4dstem shortcuts     # optional: GUI / Assistant / Notebooks icons on your Desktop
 dino4dstem setup-gpu     # optional: CUDA build of PyTorch for an NVIDIA GPU
+pip install -U dino4dstem   # later: update to the newest release
 ```
 
 Then just run `dino4dstem` to open the app. Other commands:
