@@ -83,10 +83,17 @@ def main(argv: list[str]) -> int:
     tag = f"v{new}"
     print(f"version {cur} -> {new}  (tag {tag})")
 
-    dirty = [l for l in git("status", "--porcelain", "-uno").splitlines() if l]
-    if dirty:
-        print("Commit or stash these first:\n  " + "\n  ".join(dirty))
+    st = subprocess.run(["git", "status", "--porcelain", "-uno"], cwd=REPO,
+                        text=True, capture_output=True, check=True).stdout
+    staged = [l for l in st.splitlines() if l and l[0] not in " ?"]
+    if staged:
+        print("Staged but not committed - commit or unstage first:\n  "
+              + "\n  ".join(staged))
         return 1
+    edited = [l[3:] for l in st.splitlines() if l[:2] == " M"]
+    if edited:
+        print("(not in this release - uncommitted edits: "
+              + ", ".join(edited) + ")")
     git("fetch", "-q", "origin")
     if git("rev-list", "--count", "HEAD..origin/master") != "0":
         print("origin/master has commits you do not have - pull first.")
