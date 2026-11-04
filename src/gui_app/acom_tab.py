@@ -369,6 +369,35 @@ class ACOMTabPanel(DataRefMixin, StrainMixin, PhaseDiscrimMixin, SatFreeMixin,
                           variable=self._det_log,
                           command=self._detect_and_redraw
                           ).pack(anchor="w", padx=10, pady=2)
+        # diffuse-background removal, applied to every pattern before
+        # detection (acom_core.remove_background)
+        self._det_bg = ctk.StringVar(value="none")
+        self._det_bg_r = ctk.DoubleVar(value=0.0)
+        row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        row.pack(fill="x", padx=10, pady=1)
+        ctk.CTkLabel(row, text="background", width=80,
+                     anchor="w").pack(side="left")
+        ctk.CTkOptionMenu(row, variable=self._det_bg, width=86,
+                          values=["none", "radial", "local"],
+                          command=lambda _v: self._detect_and_redraw()
+                          ).pack(side="left", padx=2)
+        ctk.CTkLabel(row, text="r px").pack(side="left", padx=(6, 2))
+        e = ctk.CTkEntry(row, textvariable=self._det_bg_r, width=44)
+        e.pack(side="left")
+        e.bind("<Return>", lambda _e: self._detect_and_redraw())
+        ctk.CTkButton(sidebar, text="Preview background removal ▶",
+                      width=240, command=self._preview_background
+                      ).pack(anchor="w", padx=10, pady=(2, 0))
+        _hint(sidebar,
+            "Remove the diffuse background before peak finding.  radial: "
+            "subtracts the median at each distance from the beam "
+            "(amorphous halo, support film, inelastic background; spots "
+            "survive) - not for continuous polycrystalline rings.  local: "
+            "a smooth background that follows uneven, non-symmetric "
+            "diffuse intensity; r = window radius (0 = auto, ~6 % of the "
+            "detector; keep it > 2x the spot size).  Applies everywhere "
+            "peaks are found (single match, batches, data references, "
+            "phase maps, strain).")
         ctk.CTkButton(sidebar, text="Detect peaks ▶",
                        width=240,
                        command=self._detect_and_redraw
@@ -1531,16 +1560,8 @@ class ACOMTabPanel(DataRefMixin, StrainMixin, PhaseDiscrimMixin, SatFreeMixin,
             return
         from gui_app.acom_core import detect_peaks_2d
         try:
-            peaks = detect_peaks_2d(
-                self._test_pattern,
-                min_sigma=float(self._det_min.get()),
-                max_sigma=float(self._det_max.get()),
-                num_sigma=int(self._det_num.get()),
-                threshold=float(self._det_thr.get()),
-                log_stretch=bool(self._det_log.get()),
-                vmax=self._det_vmax_val(),
-                normalize=bool(self._det_norm.get()),
-            )
+            peaks = detect_peaks_2d(self._test_pattern,
+                                    **self._detect_kw_now())
             self._test_peaks = peaks
             self._det_status.configure(
                 text=f"{len(peaks)} peak(s) detected.")
@@ -2842,7 +2863,7 @@ class ACOMTabPanel(DataRefMixin, StrainMixin, PhaseDiscrimMixin, SatFreeMixin,
             counts_ok, quantum = False, 1.0
         base = dict(min_sigma=float(self._det_min.get()),
                     max_sigma=float(self._det_max.get()),
-                    num_sigma=int(self._det_num.get()))
+                    num_sigma=int(self._det_num.get()), **self._bg_kw())
         grid = []
         for log in (False, True):
             for vm in (0.0, 2.0, 3.0):
@@ -2946,7 +2967,7 @@ class ACOMTabPanel(DataRefMixin, StrainMixin, PhaseDiscrimMixin, SatFreeMixin,
             return 0.0
 
     def _detect_kw_now(self):
-        return dict(
+        kw = dict(
             min_sigma=float(self._det_min.get()),
             max_sigma=float(self._det_max.get()),
             num_sigma=int(self._det_num.get()),
@@ -2954,6 +2975,91 @@ class ACOMTabPanel(DataRefMixin, StrainMixin, PhaseDiscrimMixin, SatFreeMixin,
             log_stretch=bool(self._det_log.get()),
                 vmax=self._det_vmax_val(),
                 normalize=bool(self._det_norm.get()))
+        kw.update(self._bg_kw())
+        return kw
+
+    def _bg_kw(self):
+        """Background-removal settings; empty when off, so existing peak
+        caches (keyed on these kwargs) stay valid."""
+        mode = self._det_bg.get() if hasattr(self, "_det_bg") else "none"
+        if mode == "none":
+            return {}
+        try:
+            r = max(float(self._det_bg_r.get()), 0.0)
+        except Exception:
+            r = 0.0
+        return dict(background=mode, bg_radius=r)
+
+    def _preview_background(self):
+        """Current pattern: original | estimated background | after
+        removal, with the peaks found with and without it."""
+        if self._test_pattern is None:
+            messagebox.showinfo("Background", "Load a source pattern first "
+                                "(step 1).")
+            return
+        from gui_app.acom_core import estimate_background, detect_peaks_2d
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import (
+            FigureCanvasTkAgg, NavigationToolbar2Tk)
+        mode = self._det_bg.get()
+        if mode == "none":
+            mode = "radial"
+        try:
+            r = max(float(self._det_bg_r.get()), 0.0)
+        except Exception:
+            r = 0.0
+        pat = np.asarray(self._test_pattern, np.float32)
+        kw = self._detect_kw_now()
+        kw.pop("background", None); kw.pop("bg_radius", None)
+        try:
+            bg = estimate_background(pat, mode, r)
+            sub = np.clip(pat - bg, 0, None)
+            pk0 = detect_peaks_2d(pat, **kw)
+            pk1 = detect_peaks_2d(pat, background=mode, bg_radius=r, **kw)
+        except Exception as e:
+            messagebox.showerror("Background", repr(e)); return
+        win = tk.Toplevel(self)
+        win.title(f"Background removal preview ({mode})")
+        win.geometry("1300x560")
+        bar = tk.Frame(win); bar.pack(side="top", fill="x")
+        fig = Figure(figsize=(13, 5.3), dpi=95, layout="constrained")
+        cv = FigureCanvasTkAgg(fig, master=win)
+        cv.get_tk_widget().pack(fill="both", expand=True)
+        tb = NavigationToolbar2Tk(cv, bar, pack_toolbar=False)
+        tb.update(); tb.pack(side="left")
+        axs = fig.subplots(1, 4)
+        top = float(np.percentile(pat, 99.5)) or 1.0
+        for ax, img, ttl in ((axs[0], pat, f"original: {len(pk0)} peaks"),
+                             (axs[1], bg, f"background ({mode}"
+                              + (f", r={r:g}px)" if mode == "local" and r
+                                 else ")")),
+                             (axs[2], sub, f"removed: {len(pk1)} peaks")):
+            ax.imshow(np.log1p(np.clip(img, 0, None)), cmap="inferno",
+                      vmin=0, vmax=np.log1p(top), interpolation="nearest")
+            ax.set_title(ttl, fontsize=10)
+            ax.set_xticks([]); ax.set_yticks([])
+        for ax, pk, c in ((axs[0], pk0, "cyan"), (axs[2], pk1, "lime")):
+            if len(pk):
+                ax.scatter(pk[:, 1], pk[:, 0], s=60, facecolors="none",
+                           edgecolors=c, linewidths=1)
+        # radial profiles (log y) before / after
+        from gui_app.acom_core import _beam_centre
+        cy, cx = _beam_centre(pat)
+        yy, xx = np.indices(pat.shape)
+        ri = np.hypot(yy - cy, xx - cx).astype(int).ravel()
+        n = np.maximum(np.bincount(ri), 1)
+        ax = axs[3]
+        for img, lab, c in ((pat, "original", "0.3"), (bg, "background",
+                                                        "tab:orange"),
+                            (sub, "removed", "tab:green")):
+            prof = np.bincount(ri, img.ravel()) / n
+            ax.semilogy(np.clip(prof, 1e-4 * top, None), color=c, label=lab)
+        ax.set_xlabel("radius from the beam (px)")
+        ax.set_title("radial profile (mean)", fontsize=10)
+        ax.legend(fontsize=8)
+        cv.draw_idle()
+        self._set_status(f"background preview ({mode}): {len(pk0)} peaks "
+                         f"without, {len(pk1)} with removal")
 
     def _peak_cache_path(self, stride, detect_kw):
         """Path of the peak cache for (run, stride, detect params).
@@ -3957,13 +4063,7 @@ class ACOMTabPanel(DataRefMixin, StrainMixin, PhaseDiscrimMixin, SatFreeMixin,
         center = (H / 2.0, W / 2.0)
         crystals = dict(self._phase_crystals)
         inv_a = float(self._inv_ang.get())       # raw frame: factor 1
-        det = dict(min_sigma=float(self._det_min.get()),
-                   max_sigma=float(self._det_max.get()),
-                   num_sigma=int(self._det_num.get()),
-                   threshold=float(self._det_thr.get()),
-                   log_stretch=bool(self._det_log.get()),
-                vmax=self._det_vmax_val(),
-                normalize=bool(self._det_norm.get()))
+        det = self._detect_kw_now()
         self._set_status(f"matching ({y}, {x}) against "
                          f"{len(crystals)} phase(s)…")
 

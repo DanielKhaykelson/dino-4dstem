@@ -352,6 +352,81 @@ def pattern_reflection_level(pat: np.ndarray) -> float:
     return lvl if lvl > 0 else (float(p.max()) or 1.0)
 
 
+BACKGROUND_MODES = ("none", "radial", "local")
+
+
+def _beam_centre(p: np.ndarray):
+    """Direct-beam centre: intensity centroid of the brightest smoothed
+    spot (a disc of 4 % of the detector around the maximum)."""
+    from scipy.ndimage import gaussian_filter
+    s = gaussian_filter(p, 2.0)
+    H, W = s.shape
+    by, bx = np.unravel_index(int(np.argmax(s)), s.shape)
+    r = max(3.0, 0.04 * min(H, W))
+    yy, xx = np.ogrid[:H, :W]
+    m = (yy - by) ** 2 + (xx - bx) ** 2 <= r * r
+    w = np.where(m, np.clip(s - np.median(s), 0, None), 0.0)
+    tot = float(w.sum())
+    if tot <= 0:
+        return float(by), float(bx)
+    return (float((w * yy).sum() / tot), float((w * xx).sum() / tot))
+
+
+def estimate_background(pattern: np.ndarray, mode: str = "radial",
+                        radius: float = 0.0, centre=None) -> np.ndarray:
+    """Smooth diffuse background of one pattern (same shape).
+
+    radial: azimuthal MEDIAN at each radius from the direct beam -- removes
+            rotationally symmetric diffuse scattering (amorphous halo,
+            inelastic / TDS background, support film) while Bragg spots,
+            which occupy a small part of each ring, survive.  Do not use
+            it on continuous polycrystalline rings: those ARE the median.
+    local:  morphological opening (min then max filter, size 2*radius+1)
+            then a light blur -- follows uneven, non-symmetric background;
+            anything narrower than the window (the spots) is left out.
+            radius 0 = auto (3 x a typical spot, 6 % of the detector).
+    """
+    from scipy.ndimage import (gaussian_filter, maximum_filter,
+                               minimum_filter)
+    p = np.asarray(pattern, dtype=np.float32)
+    H, W = p.shape
+    if mode == "local":
+        r = float(radius) if radius and radius > 0 else 0.06 * min(H, W)
+        n = int(2 * round(r) + 1)
+        bg = maximum_filter(minimum_filter(p, size=n), size=n)
+        return gaussian_filter(bg, max(r / 3.0, 1.0)).astype(np.float32)
+    if mode == "radial":
+        cy, cx = centre if centre is not None else _beam_centre(p)
+        yy, xx = np.indices(p.shape)
+        rr = np.hypot(yy - cy, xx - cx)
+        ri = rr.astype(np.int32)
+        nb = int(ri.max()) + 1
+        order = np.argsort(ri.ravel(), kind="stable")
+        ri_s = ri.ravel()[order]
+        v_s = p.ravel()[order]
+        edges = np.searchsorted(ri_s, np.arange(nb + 1))
+        prof = np.zeros(nb, np.float64)
+        for k in range(nb):
+            seg = v_s[edges[k]:edges[k + 1]]
+            prof[k] = np.median(seg) if seg.size else 0.0
+        # smooth the profile a little (single rings of pixels are noisy),
+        # then interpolate at each pixel's exact radius
+        if nb > 5:
+            prof = gaussian_filter(prof, 1.0, mode="nearest")
+        return np.interp(rr, np.arange(nb), prof).astype(np.float32)
+    return np.zeros_like(p)
+
+
+def remove_background(pattern: np.ndarray, mode: str = "radial",
+                      radius: float = 0.0, centre=None) -> np.ndarray:
+    """pattern - estimate_background(...), clipped at 0."""
+    if mode in (None, "", "none"):
+        return np.asarray(pattern, dtype=np.float32)
+    p = np.asarray(pattern, dtype=np.float32)
+    return np.clip(p - estimate_background(p, mode, radius, centre), 0,
+                   None)
+
+
 def detect_peaks_2d(pattern: np.ndarray,
                        probe_kernel: Optional[np.ndarray] = None,
                        *,
@@ -363,7 +438,9 @@ def detect_peaks_2d(pattern: np.ndarray,
                        log_stretch: bool = True,
                        vmax: float = 0.0,
                        normalize: bool = False,
-                       py4dstem_params: Optional[dict] = None
+                       py4dstem_params: Optional[dict] = None,
+                       background: str = "none",
+                       bg_radius: float = 0.0,
                        ) -> np.ndarray:
     """Detect Bragg peaks on a single 2D pattern.
 
@@ -381,6 +458,10 @@ def detect_peaks_2d(pattern: np.ndarray,
     pat = np.asarray(pattern, dtype=np.float32)
     if pat.ndim != 2:
         raise ValueError(f"pattern must be 2D, got shape {pat.shape}")
+    # background (first, on raw counts): remove the diffuse background so
+    # the threshold / normalisation act on the spots alone
+    if background and background != "none":
+        pat = remove_background(pat, background, bg_radius)
     # normalize: divide by the pattern's own reflection level (99.5th
     # percentile outside the direct beam) so intensities -- and vmax -- are
     # in the same units for every pattern / dataset / dose.
