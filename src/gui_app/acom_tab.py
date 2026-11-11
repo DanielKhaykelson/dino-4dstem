@@ -260,8 +260,9 @@ class ACOMTabPanel(DataRefMixin, StrainMixin, PhaseDiscrimMixin, SatFreeMixin,
             "Choose ONE pattern to validate detection + calibration "
             "+ fit BEFORE batching.  Class avgs / grains use the class "
             "map picked below (DINO run, NMF or DINO+cluster) and the "
-            "raw frames; positions come from clicking the class map "
-            "(bottom right).")
+            "raw frames; positions come from clicking the map (bottom "
+            "right): the newest class map, or the virtual ADF / BF image "
+            "when there is none (scan pos and ROI need no classes).")
         self._source_var = ctk.StringVar(value="dp_max")
         src_row = ctk.CTkFrame(sidebar, fg_color="transparent")
         src_row.pack(fill="x", padx=10, pady=2)
@@ -272,7 +273,7 @@ class ACOMTabPanel(DataRefMixin, StrainMixin, PhaseDiscrimMixin, SatFreeMixin,
                 ("class avg  (DINO / NMF / DINO+cluster classes)",
                  "class_avg"),
                 ("grain @ click  (same classes)", "grain"),
-                ("ROI box  (two clicks on the class map)", "roi")):
+                ("ROI box  (two clicks on the map)", "roi")):
             ctk.CTkRadioButton(src_row, text=label,
                                 variable=self._source_var,
                                 value=val
@@ -1111,7 +1112,87 @@ class ACOMTabPanel(DataRefMixin, StrainMixin, PhaseDiscrimMixin, SatFreeMixin,
         for nm, (smp, _a) in getattr(self, "_file_labels", {}).items():
             if smp == s:
                 out.append(nm)
+        # a real-space image every dataset has: picking a scan position or
+        # an ROI needs no NMF / DINO
+        if s is not None:
+            out += list(self._VIRTUAL)
         return out
+
+    _VIRTUAL = ("virtual ADF", "virtual BF")
+
+    def _src_token(self, name):
+        """Identity of a source's current label array: a re-run (new
+        array) counts as new."""
+        try:
+            if name == "DINO class map":
+                return id(getattr(self._posthoc(), "_inf", None))
+            if name.startswith("NMF: "):
+                nmf = getattr(self.app, "nmf", None)
+                return id((getattr(nmf, "last_cluster_labels", None)
+                           or {}).get(name[5:]))
+            if name == "DINO+cluster":
+                return id(getattr(getattr(self.app, "dino_cluster", None),
+                                  "last_labels", None))
+            ent = getattr(self, "_file_labels", {}).get(name)
+            return id(ent[1]) if ent else None
+        except Exception:
+            return None
+
+    def _auto_source(self, srcs):
+        """Which source to show: the class map produced or loaded most
+        recently (one that is new or re-run since the last look); else the
+        current pick if still valid; else the newest class map; else the
+        virtual ADF image."""
+        real = [x for x in srcs if x not in self._VIRTUAL]
+        seen = getattr(self, "_seen_srcs", {})
+        now = {x: self._src_token(x) for x in real}
+        new = [x for x in real if x not in seen or seen[x] != now[x]]
+        self._seen_srcs = now
+        cur = self._label_src.get()
+        if new:
+            return new[-1]
+        if cur in srcs:
+            return cur
+        if real:
+            return real[-1]
+        return srcs[0] if srcs else "(none yet)"
+
+    def _virtual_selected(self):
+        return self._label_src.get() in self._VIRTUAL
+
+    def _virtual_img(self, which):
+        """Virtual BF / ADF image of the active dataset, or None while it
+        is being computed (in the background; the map redraws when done)."""
+        s = self._active_sample()
+        if s is None:
+            return None
+        c = getattr(self, "_virt_cache", None)
+        if c is not None and c[0] == s:
+            return c[1][0 if which == "virtual BF" else 1]
+        if getattr(self, "_virt_busy", None) == s:
+            return None
+        self._virt_busy = s
+        cfg = SAMPLES[s]
+
+        def work():
+            try:
+                from gui_app.posthoc_panel import _open_lazy
+                from gui_app.virtual_image import bf_adf
+                cube = _open_lazy(cfg["path"],
+                                  scan_shape=tuple(cfg["scan_shape"]))
+                out = bf_adf(cube, progress=lambda d, R: self.after(
+                    0, self._set_status,
+                    f"virtual BF / ADF (for picking): {d}/{R} rows"))
+                if out is not None:
+                    self._virt_cache = (s, out)
+            except Exception as e:                       # noqa: BLE001
+                self.after(0, self._set_status,
+                           f"virtual image failed: {e}")
+            finally:
+                self._virt_busy = None
+            self.after(0, self._draw_classmap_if_possible)
+        threading.Thread(target=work, daemon=True).start()
+        return None
 
     def _load_nmf_label_folder(self):
         """Pick an NMF results folder (or its 'maps' / any sub-folder):
@@ -1158,14 +1239,15 @@ class ACOMTabPanel(DataRefMixin, StrainMixin, PhaseDiscrimMixin, SatFreeMixin,
         srcs = self._label_sources()
         try:
             self._label_menu.configure(values=srcs or ["(none yet)"])
-            if self._label_src.get() not in srcs:
-                self._label_src.set(srcs[0] if srcs else "(none yet)")
+            self._label_src.set(self._auto_source(srcs))
         except Exception:
             pass
         try:
-            self._ov_menu.configure(values=srcs or ["(none yet)"])
-            if self._overlay_src.get() not in srcs:
-                self._overlay_src.set(srcs[0] if srcs else "(none yet)")
+            # overlays need classes: no virtual images there
+            real = [x for x in srcs if x not in self._VIRTUAL]
+            self._ov_menu.configure(values=real or ["(none yet)"])
+            if self._overlay_src.get() not in real:
+                self._overlay_src.set(real[-1] if real else "(none yet)")
         except Exception:
             pass
         self._draw_classmap_if_possible()
@@ -1178,6 +1260,11 @@ class ACOMTabPanel(DataRefMixin, StrainMixin, PhaseDiscrimMixin, SatFreeMixin,
         if s is None:
             return None, "Load a dataset first."
         Ny, Nx = SAMPLES[s]["scan_shape"]
+        if which in self._VIRTUAL:
+            return None, (f"'{which}' is an image, not a class map: class "
+                          f"averages and grains need classes from NMF "
+                          f"(Clustering > NMF), DINO+cluster or a DINO "
+                          f"run.  Scan position and ROI work on it.")
         lab = None
         if which == "DINO class map":
             ph = self._posthoc()
@@ -1469,7 +1556,7 @@ class ACOMTabPanel(DataRefMixin, StrainMixin, PhaseDiscrimMixin, SatFreeMixin,
         else:
             # grain / scan_pos require a click on the classmap
             self._source_status.configure(
-                text="click on the class map (bottom-right) to pick "
+                text="click on the map (bottom-right) to pick "
                       "the position.")
         self._detect_and_redraw()
 
@@ -1480,10 +1567,17 @@ class ACOMTabPanel(DataRefMixin, StrainMixin, PhaseDiscrimMixin, SatFreeMixin,
         if event.xdata is None or event.ydata is None:
             return
         src = self._source_var.get()
-        cur = self._current_labels()
-        if cur is None: return
-        grid, which = cur
-        Ny, Nx = grid.shape
+        if self._virtual_selected() and src in ("scan_pos", "roi"):
+            s = self._active_sample()
+            if s is None:
+                return
+            Ny, Nx = SAMPLES[s]["scan_shape"]
+            grid, which = None, self._label_src.get()
+        else:
+            cur = self._current_labels()
+            if cur is None: return
+            grid, which = cur
+            Ny, Nx = grid.shape
         x = max(0, min(Nx - 1, int(round(event.xdata))))
         y = max(0, min(Ny - 1, int(round(event.ydata))))
         if src == "scan_pos":
@@ -2684,8 +2778,28 @@ class ACOMTabPanel(DataRefMixin, StrainMixin, PhaseDiscrimMixin, SatFreeMixin,
         ax.clear()
         ax.set_xticks([]); ax.set_yticks([])
         cur = None
+        srcs = self._label_sources()
+        if self._label_src.get() not in srcs:
+            self._label_src.set(self._auto_source(srcs))
+        if self._virtual_selected():
+            which = self._label_src.get()
+            img = self._virtual_img(which)
+            if img is None:
+                ax.text(0.5, 0.5, f"computing {which} ...\n(one pass over "
+                        f"the data; redraws when done)", ha="center",
+                        va="center", fontsize=9, color="#888",
+                        transform=ax.transAxes)
+                self._redraw_all(); return
+            lo, hi = np.percentile(img, [0.5, 99.5])
+            ax.imshow(img, cmap="gray", vmin=lo, vmax=hi if hi > lo
+                      else lo + 1, interpolation="nearest")
+            ax.set_title(f"{which} - click: scan position / ROI (step 1); "
+                         f"class averages / grains need NMF or DINO",
+                         fontsize=9)
+            self._classmap_axes_xy = img.shape
+            self._redraw_all(); return
         try:
-            if self._label_src.get() in self._label_sources():
+            if self._label_src.get() in srcs:
                 cur = self._current_labels(quiet=True)
             else:
                 srcs = self._label_sources()
