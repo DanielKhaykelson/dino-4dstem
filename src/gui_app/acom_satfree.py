@@ -39,15 +39,20 @@ class SatFreeMixin:
     def _sf_run(self, res, sat_win=None):
         if getattr(self, "_dr_busy", False):
             messagebox.showinfo("Satellite-free domain", "busy"); return
+        sp = self._ap_split_settings()
+        if sp is None:
+            return
         self._dr_busy = True
         self._stop_event.clear()
-        threading.Thread(target=self._sf_worker, args=(res,),
+        threading.Thread(target=self._sf_worker, args=(res, sp["zd"]),
                          daemon=True).start()
 
-    def _sf_compute(self, res):
+    def _sf_compute(self, res, z_thr=3.0):
         """The satellite-free domain -> out dict (no GUI; raises).  Cached
-        in res["satfree"]."""
-        if res.get("satfree") is not None:
+        in res["satfree"] (per z threshold)."""
+        z_thr = float(z_thr)
+        if (res.get("satfree") is not None
+                and res["satfree"].get("z_thr") == z_thr):
             return res["satfree"]
         from gui_app import phase_discrim as pd
         from celldenoise_flatten import recentre
@@ -94,7 +99,7 @@ class SatFreeMixin:
         mean = cum / n
         Z[:9] = np.nan                       # fewer than 10 frames
         n_star = pd.satfree_stop(n, np.nan_to_num(Z, nan=-np.inf),
-                                 run=max(3, N // 50))
+                                 z_thr=z_thr, run=max(3, N // 50))
         # the doubling direction (for the profiles): strongest
         # satellite position of the rich reference, median main lattice
         f = pd.OFFSETS[d][np.argmax(ent["mu"][rich][d])]
@@ -111,9 +116,9 @@ class SatFreeMixin:
         # the two averages (beam-recentred), capped at 1500 frames each
         n_free = n_star if n_star is not None else N
         # a frame ranked in by its neighbours (domain edge) but with
-        # satellites of its own (S > 3 SE) is not satellite-free
+        # satellites of its own (S > z_thr SE) is not satellite-free
         keep = np.ones(N, bool)
-        keep[:n_free] = Sv[:n_free] <= 3 * SEv[:n_free]
+        keep[:n_free] = Sv[:n_free] <= z_thr * SEv[:n_free]
         keep[n_free:] = False
         n_drop = int(n_free - keep.sum())
         mask = np.zeros((Ny, Nx), bool)
@@ -144,13 +149,18 @@ class SatFreeMixin:
                    n_drop=n_drop, n_free=int(keep.sum()),
                    order=(ys, xs), avg_free=avg_free, avg_rest=avg_rest,
                    G=G, g_sat=g_sat, other=other, centre=centre,
-                   rmax=rmax, hw=hw, f=f, elapsed=time.time() - t0)
+                   rmax=rmax, hw=hw, f=f, elapsed=time.time() - t0,
+                   z_thr=z_thr,
+                   # the frames ranked in by their NEIGHBOURS, before the
+                   # own-S drop: their own S is an unbiased sample of
+                   # "no satellites" (noise reference for the z split)
+                   null_pos=(ys[:n_free], xs[:n_free]))
         res["satfree"] = out
         return out
 
-    def _sf_worker(self, res):
+    def _sf_worker(self, res, z_thr=3.0):
         try:
-            out = self._sf_compute(res)
+            out = self._sf_compute(res, z_thr)
             self._dr_post(self._sf_show, res, out)
         except Exception as e:
             import traceback
@@ -222,7 +232,7 @@ class SatFreeMixin:
         # (0, 1): z
         ax = axs[0, 1]
         ax.plot(N, Z, color="#ff7f0e", lw=1.2)
-        ax.axhline(3, color="r", ls="--", lw=1)
+        ax.axhline(out["z_thr"], color="r", ls="--", lw=1)
         ax.axhline(0, color="0.5", lw=0.6)
         if n_star is not None:
             ax.axvline(n_star, color="g", lw=1.5)
@@ -232,7 +242,7 @@ class SatFreeMixin:
                                                     60))
         ax.set_xlabel("N weakest frames in the set")
         ax.set_ylabel("z-score of the mean S")
-        ax.set_title("is the mean S significantly > 0?  (red = 3σ, "
+        ax.set_title(f"is the mean S significantly > 0?  (red = {out['z_thr']:g}σ, "
                      "green = stop N*)", fontsize=9)
         # (0, 2): map
         mk = out["mask"].astype(float)
@@ -291,7 +301,7 @@ class SatFreeMixin:
                      "(½g z = 1-D two-tail test, advisory)", fontsize=9)
         ax.legend(fontsize=7)
         fig.suptitle(
-            (f"stop at N* = {n_star} (mean S ≥ 3σ above 0 and stays); "
+            (f"stop at N* = {n_star} (mean S ≥ {out['z_thr']:g}σ above 0 and stays); "
              if n_star is not None else "no stop: ") +
             f"doubling along cell position ({out['f'][0]:g}, "
             f"{out['f'][1]:g}), G = {G:.1f} px, ranked by the neighbours' S   "

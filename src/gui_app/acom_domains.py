@@ -156,7 +156,8 @@ class DomainMixin:
         glab, _sub, grains = self._dm_grains(cat, len(names), st, mn)
         d = output_dir(self._active_sample(), "acom", "phases", "masks")
         masks = {f"phase_{n}": catf == k for k, n in enumerate(names)}
-        masks.update(uncertain=catf == -1, off_axis=catf == -2)
+        masks.update({("undecided" if res.get("auto_cat") is not None
+                       else "uncertain"): catf == -1, "off_axis": catf == -2})
         np.savez_compressed(os.path.join(d, "phase_masks.npz"),
                             grain_labels=glab,
                             grain_phase=np.array([g[1] for g in grains]),
@@ -727,7 +728,7 @@ class DomainMixin:
                             g["cx"]])
 
         lines = [f"scan step {step:g} nm/px (topbar), stride {st};  grains: "
-                 f">= {mn} sampled px, 8-connected;  uncertain "
+                 f">= {mn} sampled px, 8-connected;  uncertain/undecided "
                  f"{n_unc * a_px:.0f} px^2, off-axis {n_off * a_px:.0f} px^2",
                  "",
                  f"{'phase':<19}{'share':>7}{'grains':>7}"

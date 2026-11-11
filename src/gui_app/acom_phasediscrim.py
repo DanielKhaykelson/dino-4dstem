@@ -297,6 +297,8 @@ class PhaseDiscrimMixin:
         # for the domain / grain lattice comparison
         lat = np.full((K, Ny, Nx, 4), np.nan, np.float32)
         sat = np.full((2, Ny, Nx), np.nan, np.float32)   # S, its SE
+        # noise reference: z at the empty cell positions of every frame
+        snull = np.full((len(pd.OFFSETS), Ny, Nx), np.nan, np.float32)
         meter = pd.SiteMeter(model.w)
         pos = [(y, x) for y in range(0, Ny, stride)
                for x in range(0, Nx, stride)]
@@ -311,6 +313,8 @@ class PhaseDiscrimMixin:
             margin[y, x] = r["margin"]
             post[:, y, x] = r["post"]
             sat[:, y, x] = r.get("sat", (np.nan, np.nan))
+            if r.get("sat_null") is not None:
+                snull[:, y, x] = r["sat_null"]
             for k, f in enumerate(r.get("raw_fits") or []):
                 if f is not None:
                     lat[k, y, x] = np.asarray(f[0]).ravel()
@@ -319,7 +323,7 @@ class PhaseDiscrimMixin:
                 self._dr_post(self._pd_set_status,
                     f"phases: {i}/{len(pos)}  ({el:.0f} s)")
         res = dict(best=best, second=second, margin=margin, post=post,
-                   dr=dr_res, lat=lat, sat=sat,
+                   dr=dr_res, lat=lat, sat=sat, sat_null=snull,
                    status=status, stride=stride, scan_shape=(Ny, Nx),
                    model=model, cube=cube, peaks=peaks, centres=cents,
                    elapsed=time.time() - t0)
@@ -740,7 +744,13 @@ class PhaseDiscrimMixin:
                 f"{nm}: indexes {100 * g[0]:.0f}% of the brightest spots "
                 f"(needs {100 * g[1]:.0f}%)" if g else f"{nm}: no fit"
                 for nm, g in zip(names, r["gate"]))
-        sat = res.get("sat")
+        sat = res.get("sat_split", res.get("sat"))
+        spl = res.get("split")
+        if spl is not None and np.isfinite(spl["z"][y, x]):
+            lb = spl["lab"][y, x]
+            g = {0: "single", 1: "undecided", 2: "double"}.get(
+                int(lb) if np.isfinite(lb) else -1, "-")
+            head += f"\nsatellite signal z = {spl['z'][y, x]:+.1f} -> {g}"
         if sat is not None and np.isfinite(sat[0][y, x]):
             head += (f"\nsatellite strength S = {sat[0][y, x]:.3g} "
                      f"± {sat[1][y, x]:.2g}")

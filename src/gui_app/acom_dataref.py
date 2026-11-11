@@ -128,6 +128,32 @@ class DataRefMixin:
                       hover_color=("#8A3D8A", "#7A2F7A"),
                       command=self._ap_run).pack(fill="x", padx=6,
                                                  pady=(6, 0))
+        # per-frame split: satellites above the frame's own noise
+        ar = ctk.CTkFrame(parent, fg_color="transparent")
+        ar.pack(fill="x", padx=6, pady=(2, 0))
+        self._ap_cutmode = ctk.StringVar(value="noise (z)")
+        self._ap_zs = ctk.StringVar(value="2")
+        self._ap_zd = ctk.StringVar(value="3")
+        self._ap_scut = ctk.StringVar(value="0.03")
+        ctk.CTkLabel(ar, text="split by").pack(side="left")
+        ctk.CTkOptionMenu(ar, variable=self._ap_cutmode, width=96,
+                          values=["noise (z)", "fixed S"]).pack(
+                              side="left", padx=3)
+        ctk.CTkLabel(ar, text="single z <").pack(side="left")
+        ctk.CTkEntry(ar, textvariable=self._ap_zs, width=34).pack(
+            side="left", padx=2)
+        ctk.CTkLabel(ar, text="double z ≥").pack(side="left")
+        ctk.CTkEntry(ar, textvariable=self._ap_zd, width=34).pack(
+            side="left", padx=2)
+        ctk.CTkLabel(ar, text="S cut").pack(side="left", padx=(4, 0))
+        ctk.CTkEntry(ar, textvariable=self._ap_scut, width=44).pack(
+            side="left", padx=2)
+        _hint(parent,
+            "S = satellite brightness / main-spot brightness of a frame; "
+            "z = S / its noise (SE), calibrated on the satellite-free "
+            "frames. noise (z): single below the lower z, double at or above "
+            "the upper z, undecided between. fixed S: one S cut for every "
+            "frame, undecided within 2 noise of it.")
         _hint(parent,
             "Auto phases: from two references (with / without the extra "
             "reflections, not necessarily pure) - maps, finds the "

@@ -376,6 +376,26 @@ def fold_stats(raw, F, ctrl=None):
     return val, noi + 1e-12
 
 
+def _clear_of_main(meter, B, items, model, extra=None):
+    """Cell positions (OFFSETS) at least 3 spot sigma (and w + 3 px) away
+    from every main reflection of lattice B (and from the cell positions
+    ``extra``, e.g. the satellites).  items: (pattern, centre, fit) of the
+    references; the widest spots set the distance."""
+    r_av = meter.w + 3.0
+    for pat, cen, fit in items:
+        if fit is None:
+            continue
+        xy0, _ = lattice_sites(fit[0], fit[1], model.r_min, model.r_max)
+        r_av = max(r_av, 3.0 * meter.spot_sigma(pat, cen, xy0))
+    sh = np.array([(i, j) for i in (-1, 0, 1) for j in (-1, 0, 1)], float)
+    if extra is not None and len(extra):
+        sh = np.vstack([sh] + [sh + np.asarray(e, float)[None, :]
+                               for e in extra])
+    d = np.array([np.min(np.hypot(*(B @ (f[None, :] - sh).T)))
+                  for f in OFFSETS])
+    return d >= r_av
+
+
 def calibrate(model, patterns_by_ref, z_diff: float = 4.0):
     """Work out, from the references themselves, HOW every pair differs
     (patterns_by_ref: (pattern, peaks, centre) per reference)."""
@@ -422,6 +442,18 @@ def calibrate(model, patterns_by_ref, z_diff: float = 4.0):
                     dv = va - vb
                     z = np.abs(dv) / np.sqrt(sa ** 2 + sb ** 2)
                     disc = np.isfinite(z) & (z > z_diff)
+                    # a position inside the TAIL of a main reflection
+                    # (closer than 3 spot sigma) is not measurable: its
+                    # value follows the spot width, which differs between
+                    # two reference averages even without any satellite
+                    clear = _clear_of_main(meter, fr[a][c][0], [
+                        (patterns_by_ref[k][0], patterns_by_ref[k][2],
+                         fr[k][c]) for k in (a, b)], model)
+                    ent["clear"] = clear
+                    clear_args = (meter, fr[a][c][0], [
+                        (patterns_by_ref[k][0], patterns_by_ref[k][2],
+                         fr[k][c]) for k in (a, b)], model)
+                    disc &= clear
                     # Friedel's law: a real difference at cell position f
                     # is also at -f, with the same sign -> drop the rest
                     disc = disc & disc[_FRIEDEL] & (
@@ -458,6 +490,11 @@ def calibrate(model, patterns_by_ref, z_diff: float = 4.0):
                     vb, _ = fold_stats(*folds[b], ctrl)
                     ent.update(disc=disc, ctrl=ctrl, mu={a: va, b: vb},
                                z=z, folds=folds)
+                    # empty positions (noise reference): clear of the main
+                    # reflections AND of the satellites' tails
+                    ent["empty"] = (_clear_of_main(*clear_args,
+                                                   extra=OFFSETS[disc])
+                                    & ~disc)
                     if disc.any():
                         pos = ", ".join(f"({f[0]:g}, {f[1]:g})"
                                         for f in OFFSETS[disc])
@@ -578,6 +615,7 @@ def classify(model, pat, peaks, centre, meter=None):
             L[a, b], L[b, a] = x, -x
     res["llr"] = L
     res["sat"] = satellite_strength(model, cache)
+    res["sat_null"] = null_z(model, cache)
     s = L.sum(1) / max(K - 1, 1)
     p = np.exp(s - s.max())
     p /= p.sum()
@@ -627,6 +665,57 @@ def satellite_strength(model, cache):
         return (np.nan, np.nan)
     return (float(np.mean(val[d])),
             float(np.sqrt(np.sum(noi[d] ** 2)) / d.sum()))
+
+
+def null_z(model, cache):
+    """Noise reference of one frame: z = value / SE at the EMPTY cell
+    positions (clear of the main reflections' tails, not where the
+    references differ) -> (len(OFFSETS),) array, nan elsewhere.  Under no
+    signal these are what a satellite site's z looks like in this data,
+    whatever the frame's phase."""
+    out = np.full(len(OFFSETS), np.nan)
+    ent, d, _r, _p = _sat_pair(model)
+    if ent is None or "empty" not in ent:
+        return out
+    key = ("fold", ent["coarse"])
+    if key not in cache:
+        return out
+    empty = ent["empty"]
+    if not empty.any():
+        return out
+    val, noi = fold_stats(*cache[key], ent["ctrl"])
+    ok = empty & np.isfinite(val) & np.isfinite(noi) & (noi > 0)
+    out[ok] = val[ok] / noi[ok]
+    return out
+
+
+def bimodality(z):
+    """Two populations or one continuum?  Smoothed density (KDE) of z:
+    two separate peaks with a valley below half of the lower peak ->
+    True.  -> (bool, dict(grid, dens, peaks, valley))."""
+    from scipy.stats import gaussian_kde
+    z = np.asarray(z, float)
+    z = z[np.isfinite(z)]
+    if z.size < 30:
+        return None, {}
+    lo, hi = np.percentile(z, [0.5, 99.5])
+    z = z[(z >= lo) & (z <= hi)]
+    g = np.linspace(lo, hi, 400)
+    dens = gaussian_kde(z)(g)
+    pk = [i for i in range(1, len(g) - 1)
+          if dens[i] >= dens[i - 1] and dens[i] > dens[i + 1]
+          and dens[i] > 0.05 * dens.max()]
+    info = dict(grid=g, dens=dens, peaks=[float(g[i]) for i in pk],
+                valley=np.nan)
+    if len(pk) < 2:
+        return False, info
+    best = 1.0
+    for a in range(len(pk)):
+        for b in range(a + 1, len(pk)):
+            v = dens[pk[a]:pk[b] + 1].min() / min(dens[pk[a]], dens[pk[b]])
+            best = min(best, v)
+    info["valley"] = float(best)
+    return bool(best < 0.5), info
 
 
 def two_populations(S, p_min=0.95, n_iter=300):
