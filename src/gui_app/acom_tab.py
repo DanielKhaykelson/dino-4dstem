@@ -3072,9 +3072,16 @@ class ACOMTabPanel(DataRefMixin, StrainMixin, PhaseDiscrimMixin, SatFreeMixin,
         if sample is None:
             return None
         Ny, Nx = SAMPLES[sample]["scan_shape"]
+        # the data file's size + modification time: a file overwritten
+        # under the same name must not reuse the old file's peaks
+        try:
+            stt = os.stat(SAMPLES[sample]["path"])
+            fid = [int(stt.st_size), int(stt.st_mtime)]
+        except Exception:
+            fid = None
         kh = hashlib.md5(json.dumps(
             {"sample": sample, "stride": stride, "kw": detect_kw,
-               "shape": [Ny, Nx]},
+               "shape": [Ny, Nx], "file": fid},
             sort_keys=True, default=str).encode()).hexdigest()[:10]
         from data import output_dir
         base = output_dir(sample, "acom", "peak_cache")
