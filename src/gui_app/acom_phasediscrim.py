@@ -451,14 +451,7 @@ class PhaseDiscrimMixin:
         fig.suptitle(f"{K} references, stride {st}  ({res['elapsed']:.0f} "
                      f"s)   " + "  ".join(model.notes), fontsize=9)
 
-        def _click(ev):
-            if (ev.button != 1 or ev.inaxes not in axs or ev.xdata is None
-                    or getattr(tb, "mode", "")):
-                return
-            x = int(np.clip(round(ev.xdata), 0, Nx - 1))
-            y = int(np.clip(round(ev.ydata), 0, Ny - 1))
-            self._pd_inspect(y - y % st, x - x % st)
-        cv.mpl_connect("button_press_event", _click)
+        self._pd_click_inspect(cv, axs, res, tb)
         win._selectors = self._pd_box_selectors(axs, res)
         cv.draw_idle()
         s = res["status"][::st, ::st]
@@ -552,7 +545,7 @@ class PhaseDiscrimMixin:
         cv.get_tk_widget().pack(fill="both", expand=True)
         tb = NavigationToolbar2Tk(cv, bar, pack_toolbar=False)
         tb.update(); tb.pack(side="left")
-        tk.Label(bar, fg="#555", text="right-drag a box on a map: new "
+        tk.Label(bar, fg="#555", text="click a map: its diffraction pattern;  right-drag a box: new "
                  "reference from those patterns (e.g. the brightest core "
                  "and a satellite-free area)").pack(side="left", padx=10)
         tk.Button(bar, text="Satellite-free domain (½g test)…",
@@ -614,6 +607,8 @@ class PhaseDiscrimMixin:
             + (f"    saved to {od}" if od else ""), fontsize=9)
         win._selectors = self._pd_box_selectors(
             [axs[0, 0], axs[0, 1], axs[1, 1]], res)
+        self._pd_click_inspect(cv, [axs[0, 0], axs[0, 1], axs[1, 1]], res,
+                               tb)
         cv.draw_idle()
         if od:
             try:
@@ -669,10 +664,26 @@ class PhaseDiscrimMixin:
         except Exception as e:
             print(f"[phases] save: {e!r}", flush=True)
 
-    def _pd_inspect(self, y, x):
+    def _pd_click_inspect(self, cv, axs, res, tb=None):
+        """Left-click on any of these scan maps -> the diffraction pattern
+        at that position (with the phase evidence) in its own window."""
+        Ny, Nx = res["scan_shape"]; st = res["stride"]
+        axs = list(axs)
+
+        def _click(ev):
+            if (ev.button != 1 or ev.inaxes not in axs or ev.xdata is None
+                    or getattr(tb, "mode", "") or ev.dblclick):
+                return
+            x = int(np.clip(round(ev.xdata), 0, Nx - 1))
+            y = int(np.clip(round(ev.ydata), 0, Ny - 1))
+            self._pd_inspect(y - y % st, x - x % st, res=res)
+        return cv.mpl_connect("button_press_event", _click)
+
+    def _pd_inspect(self, y, x, res=None):
         """The pattern with the discriminating sites of every pair, and the
         pairwise log-likelihood ratios."""
-        res = getattr(self, "_pdfull", None)
+        if res is None:
+            res = getattr(self, "_pdfull", None)
         if res is None:
             return
         from matplotlib.figure import Figure
@@ -729,6 +740,10 @@ class PhaseDiscrimMixin:
                 f"{nm}: indexes {100 * g[0]:.0f}% of the brightest spots "
                 f"(needs {100 * g[1]:.0f}%)" if g else f"{nm}: no fit"
                 for nm, g in zip(names, r["gate"]))
+        sat = res.get("sat")
+        if sat is not None and np.isfinite(sat[0][y, x]):
+            head += (f"\nsatellite strength S = {sat[0][y, x]:.3g} "
+                     f"± {sat[1][y, x]:.2g}")
         ax.set_title(f"scan ({y}, {x})   {head}\nlog-likelihood ratios: "
                      + ";  ".join(lines), fontsize=9)
         if handles:

@@ -304,9 +304,8 @@ class AutoPhasesMixin:
                   + [Patch(color=extra[0], label="uncertain"),
                      Patch(color=extra[2], label="off-axis")],
                   fontsize=7, loc="upper right", framealpha=0.8)
-        ax.set_title(f"phase: '{sm['npo']}' = satellite-free frames, "
-                     f"'{sm['nr']}' = has satellites\n(nearest-reference "
-                     f"map: 'phase map' button)", fontsize=9)
+        ax.set_title(f"phase: '{sm['npo']}' = satellite-free\n"
+                     f"'{sm['nr']}' = has satellites", fontsize=9)
         # (0,1) confidence
         im = axs[0, 1].imshow(np.clip(maps["mg"], 0, 20), cmap="viridis",
                               vmin=0, vmax=20, interpolation="nearest")
@@ -391,6 +390,9 @@ class AutoPhasesMixin:
             f"satellite-free domain -> refined '{sm['npo']}', strong "
             f"satellites -> refined '{sm['nr']}', re-mapped.   "
             f"({time.time() - self._ap_ctx['t0']:.0f} s)", fontsize=9)
+        tk.Label(bar, fg="#555", text="click a map: its diffraction "
+                 "pattern").pack(side="left", padx=10)
+        self._pd_click_inspect(cv, [axs[0, 0], axs[0, 1], axs[0, 2], axs[1, 0]], res2, tb)
         if od:
             tk.Label(bar, fg="#555", text=f"saved -> {od}").pack(
                 side="left", padx=10)

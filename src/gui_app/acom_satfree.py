@@ -296,6 +296,9 @@ class SatFreeMixin:
             f"doubling along cell position ({out['f'][0]:g}, "
             f"{out['f'][1]:g}), G = {G:.1f} px, ranked by the neighbours' S   "
             f"({out['elapsed']:.0f} s)", fontsize=9)
+        tk.Label(bar, fg="#555", text="click a map: its diffraction "
+                 "pattern").pack(side="left", padx=10)
+        self._pd_click_inspect(cv, [axs[0, 2]], res, tb)
         if od:
             tk.Label(bar, fg="#555", text=f"saved -> {od}").pack(
                 side="left", padx=10)
