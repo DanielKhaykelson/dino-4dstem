@@ -3,4 +3,4 @@
 Installed with pip, this package ships the full desktop app. Launch it with
 the ``dino4dstem`` command (see ``dino4dstem --help``).
 """
-__version__ = "1.0.2"
+__version__ = "1.0.3"
