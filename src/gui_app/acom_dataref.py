@@ -139,6 +139,9 @@ class DataRefMixin:
         ctk.CTkOptionMenu(ar, variable=self._ap_cutmode, width=96,
                           values=["noise (z)", "fixed S"]).pack(
                               side="left", padx=3)
+        # the cuts on their own row: one row is wider than the sidebar
+        ar = ctk.CTkFrame(parent, fg_color="transparent")
+        ar.pack(fill="x", padx=6, pady=(2, 0))
         ctk.CTkLabel(ar, text="single z <").pack(side="left")
         ctk.CTkEntry(ar, textvariable=self._ap_zs, width=34).pack(
             side="left", padx=2)
